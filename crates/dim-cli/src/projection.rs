@@ -520,6 +520,9 @@ impl Projection {
                     .or_default() += data.delta.chars().count() as u64;
                 self.showed.insert(data.request_id.clone());
                 self.showed_thinking.remove(&data.request_id);
+                if self.replaced_thought(&data.request_id, &event.id) {
+                    self.discard_thinking(&data.request_id);
+                }
                 let index = self.open_thinking(&data.request_id);
                 let thought = self
                     .thinking_rows
@@ -527,6 +530,9 @@ impl Projection {
                     .expect("opened above");
                 let first = thought.written.is_empty();
                 thought.started_at.get_or_insert(event.create_at);
+                if first && !event.id.is_empty() {
+                    thought.part_id = Some(event.id.clone());
+                }
                 thought.written.push_str(&data.delta);
                 thought.excerpt.push(&data.delta);
                 let excerpt = thought.excerpt.text();
@@ -544,7 +550,11 @@ impl Projection {
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
                 self.showed_thinking.remove(&data.request_id);
-                self.close_thinking(&data.request_id, event.create_at);
+                if self.empty_thought(&data.request_id) {
+                    self.discard_thinking(&data.request_id);
+                } else {
+                    self.close_thinking(&data.request_id, event.create_at);
+                }
                 let index = match self.assistant_rows.get(&data.request_id) {
                     Some(index) => *index,
                     None => {
@@ -563,7 +573,11 @@ impl Projection {
             EventContent::ToolUse(data) => {
                 self.showed.insert(data.request_id.clone());
                 self.showed_thinking.remove(&data.request_id);
-                self.close_thinking(&data.request_id, event.create_at);
+                if self.empty_thought(&data.request_id) {
+                    self.discard_thinking(&data.request_id);
+                } else {
+                    self.close_thinking(&data.request_id, event.create_at);
+                }
                 self.close_assistant(&data.request_id);
                 let row_id = serde_json::to_string(&(&data.request_id, &data.call.id))
                     .expect("tool identity is JSON");
@@ -579,7 +593,14 @@ impl Projection {
                     .insert((data.request_id.clone(), data.call.id.clone()), index);
             }
             EventContent::ToolUseStart(data) => {
-                self.close_thinking(&data.request_id, event.create_at);
+                if self.empty_thought(&data.request_id) {
+                    self.discard_thinking(&data.request_id);
+                    if self.showed_thinking.remove(&data.request_id) {
+                        self.showed.remove(&data.request_id);
+                    }
+                } else {
+                    self.close_thinking(&data.request_id, event.create_at);
+                }
             }
             EventContent::ToolCompleted(data) => {
                 self.complete_tool(&data.request_id, &data.call_id, &data.result, true);
@@ -1955,6 +1976,28 @@ impl Projection {
             },
         );
         index
+    }
+
+    /// Whether a thought row is still only what progress showed: it has no
+    /// committed delta yet.
+    fn empty_thought(&self, request_id: &str) -> bool {
+        self.thinking_rows
+            .get(request_id)
+            .is_some_and(|thought| thought.written.is_empty())
+    }
+
+    /// Whether a durable thought belongs to an attempt other than the one the
+    /// open row's progress named. Both identities must be present: an event
+    /// without an id, like a row that never carried one, keeps the row.
+    fn replaced_thought(&self, request_id: &str, event_id: &str) -> bool {
+        !event_id.is_empty()
+            && self.thinking_rows.get(request_id).is_some_and(|thought| {
+                thought.written.is_empty()
+                    && thought
+                        .part_id
+                        .as_deref()
+                        .is_some_and(|part_id| !part_id.is_empty() && part_id != event_id)
+            })
     }
 
     /// Drops a thought a replaced attempt opened; none of it was committed.
