@@ -1230,12 +1230,16 @@ test("a move whose goal read loses the connection is not ready and reads no poli
 
 test("a move whose history read loses the connection is not ready", async t => {
   let lost = false
+  let moved = false
   const chat = session(t, params => {
     if (lost && params.branchId === "worker") throw new ConnectionLost()
     return page([input(1, `on ${params.branchId}`)], 1)
   }, {
-    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }),
-    "session.branch_set_default": () => "worker",
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: moved ? "worker" : "main" }),
+    "session.branch_set_default": () => {
+      moved = true
+      return "worker"
+    },
     "session.goal.get": params => ({ branchId: params.branchId, through: 1, goal: null }),
   })
   await flush()
@@ -1256,6 +1260,7 @@ test("a move whose history read loses the connection is not ready", async t => {
 test("a permission read that lands after a failed goal refresh does not make the page ready", async t => {
   const held = deferred()
   const policy = { preset: "read-only", allowedTools: [], disallowedTools: [] }
+  const newer = { preset: "full-access", allowedTools: [], disallowedTools: [] }
   let arm = false
   let failGoal = false
   const chat = session(t, () => page([input(1, "stored")], 1), {
@@ -1281,12 +1286,13 @@ test("a permission read that lands after a failed goal refresh does not make the
   receive(chat, "main", goalInput(2, "goal: carry on"))
   await flush()
   assert.equal(chat.views.session.status, "failed", "the centre's goal read failed while the permission read was out")
-  held.resolve({ version: 1, policy })
+  held.resolve({ version: 2, policy: newer })
   await reconnecting
   await flush()
   assert.equal(chat.views.session.status, "failed", "a permission read that lands later does not publish a ready page over the failure")
   assert.equal(chat.views.session.error, "the goal read failed")
-  assert.equal(chat.views.session.permission, undefined, "the failed page shows no policy from the read that crossed its failure")
+  assert.deepEqual(chat.views.session.permission, policy, "the failed page keeps the policy it showed before the failure, not the read that crossed it")
+  assert.equal(chat.views.session.permissionVersion, 1)
   failGoal = false
   arm = false
   chat.retryCentre("session")
@@ -1302,10 +1308,11 @@ test("a concurrent goal refresh reads the line each caller asked for", async t =
   const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
     "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }),
     "session.goal.set": () => ({}),
+    // The store keeps the goal a read decodes, so the fixture answers with one.
     "session.goal.get": params => {
       reads.push(params.branchId)
       if (arm && params.branchId === "worker") return held.promise
-      return { branchId: params.branchId, through: 1, goal: params.branchId === "main" ? { objective: "root work", status: { kind: "active" }, evaluator: false } : null }
+      return params.branchId === "main" ? { objective: "root work", evaluator: false, status: { kind: "active" } } : undefined
     },
   })
   await flush()
@@ -1318,7 +1325,7 @@ test("a concurrent goal refresh reads the line each caller asked for", async t =
   await flush()
   const rewriting = chat.writeGoal("session", "set", "worker again", "worker")
   await flush()
-  held.resolve({ branchId: "worker", through: 1, goal: null })
+  held.resolve(undefined)
   await reconnecting
   await writing
   await rewriting
