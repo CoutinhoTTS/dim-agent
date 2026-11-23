@@ -1937,3 +1937,47 @@ test("a goal read the next move overtook does not put the ready page back to loa
   await moving
   assert.equal(chat.views.session.status, "ready", "a goal read the next move overtook does not put the ready page back to loading")
 })
+
+test("a resync failure a move overtook does not fail the centre the move installed", async t => {
+  const sideQuestions = deferred()
+  let arm = false
+  let held = false
+  let directory = "main"
+  const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
+    "session.branches": () => ({
+      branches: [
+        { branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 0, state: "open" },
+        { branchId: "side", parentBranchId: "worker", branchPoint: 0, head: 0, state: "open" },
+      ],
+      defaultBranchId: directory,
+    }),
+    "session.question.pending": params => {
+      if (arm && params.branchId === "side") {
+        held = true
+        return sideQuestions.promise
+      }
+      return { ...params, asks: [], next: null }
+    },
+    "session.branch_set_default": () => {
+      directory = "worker"
+      return "worker"
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  arm = true
+  const reconnecting = chat.resync()
+  await until(() => held)
+  assert.equal(chat.views.session.status, "loading", "the resync holds the page while it reads an unopened side line")
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.equal(chat.views.session.status, "ready")
+  sideQuestions.reject(new Error("unknown branch"))
+  await reconnecting
+  await flush()
+  assert.equal(chat.views.session.status, "ready", "the resync's late failure does not fail the centre the move installed")
+  assert.equal(chat.views.session.error, "")
+  receive(chat, "worker", input(2, "on the worker live"))
+  await flush()
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the worker", "on the worker live"], "the moved centre keeps consuming its live events")
+})
