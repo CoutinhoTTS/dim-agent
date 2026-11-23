@@ -258,13 +258,10 @@ impl Output {
             }
         });
     }
-    /// One attempt starts; nothing of it is committed yet.
-    fn begin_attempt(&mut self) {
-        self.committed = false;
-    }
     /// Forgets the failed attempt's output. None of it was committed, so the
     /// retry replaces it and the Timeline keeps nothing of it.
     fn forget_attempt(&mut self) {
+        self.committed = false;
         self.text.clear();
         self.text_part_id = None;
         self.text_part_committed = false;
@@ -300,10 +297,6 @@ impl Output {
             progress.thinking_started_at = started_at;
             progress.thinking.push_str(&thinking);
         });
-    }
-    /// When the pending thinking must be shown without another delta.
-    fn thinking_show_deadline(&self) -> Option<Instant> {
-        self.thinking_show_at
     }
     /// Visible output arrived; a request replaced by a steer stops here.
     fn receive(&self) -> Result<(), HostError> {
@@ -616,7 +609,6 @@ pub(crate) async fn consume_output(
     cancel: CancellationToken,
     replay_safe: &mut bool,
 ) -> Result<FinishReason, HostError> {
-    output.begin_attempt();
     let mut stream = stream.fuse();
     let result = parse_output(&mut stream, output, cancel.clone()).await;
     if result.is_err() {
@@ -645,7 +637,7 @@ async fn parse_output(
     let mut content_seen = false;
     let mut published = output.timeline.watch();
     loop {
-        let show_at = output.thinking_show_deadline();
+        let show_at = output.thinking_show_at;
         let until = show_at.unwrap_or_else(Instant::now);
         let next = tokio::select! {
             chunk = stream.next() => chunk,
