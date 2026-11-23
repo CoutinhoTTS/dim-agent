@@ -1604,3 +1604,115 @@ test("a return to the centre while another line's history loads cancels that mov
   assert.equal(chat.views.session.defaultBranchId, "main", "the accepted return to the centre cancels the earlier move")
   assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the root"])
 })
+
+test("a retry that finishes its reads resumes the reply that arrived while they were out", async t => {
+  const goalRead = deferred()
+  let fail = true
+  let arm = false
+  const chat = session(t, () => {
+    if (fail) throw new Error("the line could not be read")
+    return page([input(1, "stored")], 1)
+  }, {
+    "session.goal.get": params => {
+      if (!arm) return { branchId: params.branchId, through: 1, goal: null }
+      // The reply arrives after the retry's window and before its ready page,
+      // the interval where the failed page queues but consumes nothing.
+      receive(chat, "main", input(2, "the last reply"))
+      return goalRead.promise
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  arm = true
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(chat.views.session.status, "failed", "the retry waits on the goal read it made")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored"], "the retry's window is in before its success")
+  goalRead.resolve({ branchId: "main", through: 1, goal: null })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored", "the last reply"], "the reply that arrived while the retry read the goal is applied when the retry succeeds")
+})
+
+test("a retry a move overtakes does not consume the old centre's queue", async t => {
+  const goalRead = deferred()
+  const workerPage = deferred()
+  let fail = true
+  let arm = false
+  let workerRead = false
+  let toolReads = 0
+  const chat = session(t, params => {
+    if (params.branchId === "worker") {
+      workerRead = true
+      return workerPage.promise
+    }
+    if (fail) throw new Error("the line could not be read")
+    return page([input(1, "stored")], 1)
+  }, {
+    "session.branch_set_default": params => params.branchId,
+    "session.goal.get": params => arm ? goalRead.promise : { branchId: params.branchId, through: 1, goal: null },
+    "session.tool.get": () => {
+      toolReads++
+      return { requestId: "r1", callId: "call-1", name: "exec", input: {} }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  arm = true
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(chat.views.session.status, "failed", "the retry is out on its goal read")
+  receive(chat, "main", event(2, { kind: "tool-completed", requestId: "r1", callId: "call-1", result: { content: [], isError: false } }))
+  const moving = chat.setDefaultBranch("session", "worker")
+  await until(() => workerRead)
+  goalRead.resolve({ branchId: "main", through: 1, goal: null })
+  await flush()
+  assert.equal(toolReads, 0, "a retry the move overtook does not start the old centre's consumer")
+  workerPage.resolve(page([input(1, "on the worker")], 1))
+  await moving
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.equal(chat.views.session.status, "ready")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the worker"], "the event the old centre queued does not enter the moved page")
+})
+
+test("a resumed live consumer applies each event once", async t => {
+  const goalRead = deferred()
+  const hydration = deferred()
+  let fail = true
+  let arm = false
+  let toolReads = 0
+  const chat = session(t, () => {
+    if (fail) throw new Error("the line could not be read")
+    return page([input(1, "stored")], 1)
+  }, {
+    "session.goal.get": params => {
+      if (!arm) return { branchId: params.branchId, through: 1, goal: null }
+      receive(chat, "main", event(2, { kind: "tool-completed", requestId: "r1", callId: "call-1", result: { content: [], isError: false } }))
+      return goalRead.promise
+    },
+    "session.tool.get": () => {
+      toolReads++
+      return hydration.promise
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  arm = true
+  chat.retryCentre("session")
+  await flush()
+  goalRead.resolve({ branchId: "main", through: 1, goal: null })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  receive(chat, "main", input(3, "while the consumer ran"))
+  await until(() => toolReads === 1)
+  hydration.resolve({ requestId: "r1", callId: "call-1", name: "exec", input: {} })
+  await flush()
+  assert.deepEqual(chat.views.session.rows.map(row => row.kind), ["user", "tool", "user"])
+  assert.deepEqual(chat.views.session.rows.filter(row => row.kind === "user").map(row => row.text), ["stored", "while the consumer ran"], "each event the resumed consumer held is applied once")
+  assert.equal(chat.views.session.rows.filter(row => row.kind === "tool").length, 1)
+  assert.equal(toolReads, 1, "a consumer that is already running is not started again for the event it holds")
+})
