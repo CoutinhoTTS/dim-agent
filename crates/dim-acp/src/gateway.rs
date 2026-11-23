@@ -5,21 +5,25 @@ use crate::{
     rpc::{self, Native, Rpc},
 };
 use agent_client_protocol::{Client, ConnectionTo, Error, UntypedMessage, schema::v1 as acp};
-use dim_agent_types::{DEFAULT_BRANCH_ID, TurnOutcome};
+use dim_agent_types::{
+    DEFAULT_BRANCH_ID, ModelPreferenceUpdate, PermissionPreset, PreferenceUpdate,
+    SessionConfigExpectation, TurnOutcome,
+};
 use dim_client::window::Window;
 use dim_client::wire::{
     Attached, Configuration, DisplayNotice, DisplayPage, Event, EventContent, EventNotice,
     HistoryWindow, PendingDelegations, PendingInputs, PendingQuestions, PendingTasks, Progress,
     TurnRead,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::Path,
+    sync::Arc,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedRwLockReadGuard, RwLock, mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub(crate) enum Incoming {
@@ -29,6 +33,11 @@ pub(crate) enum Incoming {
 }
 
 pub(crate) enum Work {
+    Providers {
+        reply: Responder,
+        mutating: bool,
+        result: Result<(Value, bool), Error>,
+    },
     Initialized {
         reply: Responder,
         result: Result<Vec<crate::auth::Method>, Error>,
@@ -42,7 +51,7 @@ pub(crate) enum Work {
         reply: Responder,
         cwd: String,
         servers: crate::mcp::Servers,
-        result: Result<Created, Error>,
+        result: Result<(Created, OwnedRwLockReadGuard<()>), Error>,
     },
     History {
         id: String,
@@ -77,7 +86,7 @@ pub(crate) enum Work {
         id: String,
         reply: Responder,
         mode: bool,
-        revision: u64,
+        revision: Option<u64>,
         result: Result<Config, Error>,
         refreshed: Option<Config>,
     },
@@ -176,6 +185,7 @@ struct Loading {
     preparation: u64,
     mcp_added: bool,
     cwd: String,
+    expected_config: Option<SessionConfigExpectation>,
     waiters: Vec<Waiter>,
     buffered: Vec<(String, Value)>,
     previous: Option<Box<Session>>,
@@ -295,6 +305,9 @@ pub(crate) struct Gateway {
     version: String,
     initialized: bool,
     initializing: bool,
+    provider_routes_used: bool,
+    pending_provider_routes: usize,
+    provider_route_admission: Arc<RwLock<()>>,
     creating: usize,
     sessions: HashMap<String, Slot>,
     interactions: HashMap<String, Interaction>,
@@ -382,6 +395,7 @@ impl Gateway {
                     .http(self.mcp.supported())
                     .sse(self.mcp.supported()),
             )
+            .providers(crate::providers::supported(&self.rpc).then(acp::ProvidersCapabilities::new))
             .meta(lody)
     }
 
@@ -411,6 +425,9 @@ impl Gateway {
             agent_id,
             version,
             initialized: false,
+            provider_routes_used: false,
+            pending_provider_routes: 0,
+            provider_route_admission: Arc::new(RwLock::new(())),
             initializing: false,
             creating: 0,
             sessions: HashMap::new(),
@@ -564,7 +581,15 @@ impl Gateway {
         Ok(())
     }
 
-    fn prepare(&mut self, id: String, cwd: String, waiter: Waiter, mcp_added: bool) {
+    fn prepare(
+        &mut self,
+        id: String,
+        cwd: String,
+        waiter: Waiter,
+        mcp_added: bool,
+        expected_config: Option<SessionConfigExpectation>,
+        route_admission: Option<OwnedRwLockReadGuard<()>>,
+    ) {
         self.next_preparation += 1;
         let preparation = self.next_preparation;
         let rpc = self.rpc.clone();
@@ -581,6 +606,7 @@ impl Gateway {
                 preparation,
                 mcp_added,
                 cwd,
+                expected_config: expected_config.clone(),
                 waiters: vec![waiter],
                 buffered: Vec::new(),
                 previous,
@@ -588,7 +614,14 @@ impl Gateway {
         );
         self.spawn(async move {
             let result = async {
-                let prepared = read_history(&rpc, &id, expected_cwd).await?;
+                let prepared = read_history(
+                    &rpc,
+                    &id,
+                    expected_cwd,
+                    expected_config.as_ref(),
+                    route_admission,
+                )
+                .await?;
                 mcp.ensure(&id).await?;
                 Ok(prepared)
             }
@@ -675,6 +708,45 @@ impl Gateway {
         };
         let rpc = self.rpc.clone();
         match request.method.as_str() {
+            "providers/list" | "providers/set" | "providers/disable"
+                if crate::providers::supported(&rpc) =>
+            {
+                let method = request.method;
+                let value = request.params;
+                let mutating = method != "providers/list";
+                self.pending_provider_routes += usize::from(mutating);
+                let admission = self.provider_route_admission.clone();
+                self.spawn(async move {
+                    let _mutation = if mutating {
+                        Some(admission.write().await)
+                    } else {
+                        None
+                    };
+                    let result = async {
+                        match method.as_str() {
+                            "providers/list" => {
+                                let _: acp::ListProvidersRequest = params(value)?;
+                                Ok((encode_native(crate::providers::list(&rpc).await?)?, false))
+                            }
+                            "providers/set" => Ok((
+                                encode_native(crate::providers::set(&rpc, params(value)?).await?)?,
+                                true,
+                            )),
+                            _ => {
+                                let changed =
+                                    crate::providers::disable(&rpc, params(value)?).await?;
+                                Ok((encode_native(acp::DisableProviderResponse::new())?, changed))
+                            }
+                        }
+                    }
+                    .await;
+                    Work::Providers {
+                        reply,
+                        mutating,
+                        result,
+                    }
+                });
+            }
             "authenticate" => {
                 let args: acp::AuthenticateRequest = match params(request.params) {
                     Ok(args) => args,
@@ -730,11 +802,20 @@ impl Gateway {
                 {
                     return reply.respond_with_error(error);
                 }
+                let config = controls.configuration;
+                if matches!(config.reasoning_effort, Some(PreferenceUpdate::Clear(_)))
+                    && !rpc.supports("session.create.clearModelPreferences")
+                {
+                    return reply.respond_with_error(crate::lody::unsupported(
+                        "sessionConfig.configOptionValues.effort",
+                    ));
+                }
                 if self.sessions.len() + self.creating >= 128 {
                     return reply.respond_with_error(busy());
                 }
                 self.creating += 1;
                 let agent = self.agent_id.clone();
+                let admission = self.provider_route_admission.clone();
                 let managed: Vec<_> = self
                     .auth_methods
                     .iter()
@@ -749,11 +830,7 @@ impl Gateway {
                             .into_os_string()
                             .into_string()
                             .map_err(|_| Error::invalid_params())?;
-                        let mut args = json!({"cwd":cwd});
-                        if let Some(mode) = controls.mode {
-                            args["permissionPolicy"] = json!({"preset":mode});
-                        }
-                        let explicit = if let Some(model) = controls.startup {
+                        let model = if let Some(model) = config.model_id {
                             if !rpc.supports("provider.models.query") {
                                 return Err(Error::invalid_params());
                             }
@@ -763,19 +840,17 @@ impl Gateway {
                                 .find(|choice| choice.id == model)
                                 .ok_or_else(Error::invalid_params)?;
                             crate::auth::ensure(&rpc, &selected.provider, &managed).await?;
-                            args["model"] =
-                                json!({"provider":selected.provider,"modelId":selected.id});
-                            true
+                            Some(SelectedModel {
+                                provider: selected.provider,
+                                model_id: selected.id,
+                            })
                         } else {
-                            false
+                            None
                         };
-                        if let Some(agent) = agent {
-                            args["agentId"] = json!(agent);
-                        }
-                        if rpc.supports("session.create.origin") {
-                            args["origin"] = json!("acp");
-                        }
-                        if !explicit && !managed.is_empty() && rpc.supports("provider.selection") {
+                        if model.is_none()
+                            && !managed.is_empty()
+                            && rpc.supports("provider.selection")
+                        {
                             #[derive(Deserialize)]
                             struct Selection {
                                 selection: Option<Selected>,
@@ -790,7 +865,51 @@ impl Gateway {
                                 crate::auth::ensure(&rpc, &selected.provider_id, &managed).await?;
                             }
                         }
-                        rpc.typed("session.create", args).await
+                        #[derive(Serialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct SelectedModel {
+                            provider: String,
+                            model_id: String,
+                        }
+                        #[derive(Serialize)]
+                        struct Policy {
+                            preset: PermissionPreset,
+                        }
+                        #[derive(Serialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct Create<'a> {
+                            cwd: &'a str,
+                            #[serde(skip_serializing_if = "Option::is_none")]
+                            model: Option<SelectedModel>,
+                            #[serde(skip_serializing_if = "Option::is_none")]
+                            permission_policy: Option<Policy>,
+                            #[serde(skip_serializing_if = "ModelPreferenceUpdate::is_empty")]
+                            model_preferences: ModelPreferenceUpdate,
+                            #[serde(skip_serializing_if = "Option::is_none")]
+                            origin: Option<&'static str>,
+                            #[serde(skip_serializing_if = "Option::is_none")]
+                            agent_id: Option<String>,
+                        }
+                        let route_admission = admission.read_owned().await;
+                        let created = rpc
+                            .typed(
+                                "session.create",
+                                encode_native(Create {
+                                    cwd: &cwd,
+                                    model,
+                                    permission_policy: config
+                                        .permission_preset
+                                        .map(|preset| Policy { preset }),
+                                    model_preferences: ModelPreferenceUpdate {
+                                        reasoning_effort: config.reasoning_effort,
+                                        service_tier: None,
+                                    },
+                                    origin: rpc.supports("session.create.origin").then_some("acp"),
+                                    agent_id: agent,
+                                })?,
+                            )
+                            .await?;
+                        Ok((created, route_admission))
                     }
                     .await;
                     Work::Created {
@@ -802,6 +921,12 @@ impl Gateway {
                 });
             }
             "session/load" | "session/resume" => {
+                let expected_config = (controls.configuration
+                    != SessionConfigExpectation::default())
+                .then_some(controls.configuration);
+                if expected_config.is_some() && !rpc.supports("session.attach.expectedConfig") {
+                    return reply.respond_with_error(crate::lody::unsupported("sessionConfig"));
+                }
                 let replay = request.method == "session/load";
                 let kind = if replay {
                     Preparation::Load
@@ -841,7 +966,10 @@ impl Gateway {
                         if loading.cwd != cwd {
                             return reply.respond_with_error(Error::invalid_params());
                         }
-                        if loading.waiters.len() >= 128 || !self.mcp.can_coalesce(&id, &servers) {
+                        if loading.waiters.len() >= 128
+                            || loading.expected_config != expected_config
+                            || !self.mcp.can_coalesce(&id, &servers)
+                        {
                             return reply.respond_with_error(busy());
                         }
                         loading.waiters.push(Waiter { reply, kind });
@@ -855,7 +983,11 @@ impl Gateway {
                         {
                             return reply.respond_with_error(busy());
                         }
-                        if !replay && session.cwd == cwd && !self.mcp.supported() {
+                        if !replay
+                            && expected_config.is_none()
+                            && session.cwd == cwd
+                            && !self.mcp.supported()
+                        {
                             let response = session.config.response();
                             self.commands(&id)?;
                             return reply.respond(
@@ -868,7 +1000,14 @@ impl Gateway {
                             Ok(added) => added,
                             Err(error) => return reply.respond_with_error(error),
                         };
-                        self.prepare(id, cwd, Waiter { reply, kind }, added);
+                        self.prepare(
+                            id,
+                            cwd,
+                            Waiter { reply, kind },
+                            added,
+                            expected_config,
+                            None,
+                        );
                     }
                     None => {
                         if self.sessions.len() >= 128 {
@@ -878,7 +1017,14 @@ impl Gateway {
                             Ok(added) => added,
                             Err(error) => return reply.respond_with_error(error),
                         };
-                        self.prepare(id, cwd, Waiter { reply, kind }, added);
+                        self.prepare(
+                            id,
+                            cwd,
+                            Waiter { reply, kind },
+                            added,
+                            expected_config,
+                            None,
+                        );
                     }
                 }
             }
@@ -954,6 +1100,12 @@ impl Gateway {
                 });
             }
             "session/fork" if self.rpc.supports("session.fork") => {
+                let expected_config = (controls.configuration
+                    != SessionConfigExpectation::default())
+                .then_some(controls.configuration);
+                if expected_config.is_some() && !rpc.supports("session.fork.expectedConfig") {
+                    return reply.respond_with_error(crate::lody::unsupported("sessionConfig"));
+                }
                 if !self.rpc.supports("session.turn.get") {
                     return reply.respond_with_error(Error::new(
                         -32001,
@@ -975,6 +1127,7 @@ impl Gateway {
                     return reply.respond_with_error(busy());
                 }
                 self.creating += 1;
+                let admission = self.provider_route_admission.clone();
                 self.spawn(async move {
                     let mut cwd = args.cwd.to_string_lossy().into_owned();
                     let result = async {
@@ -1018,8 +1171,26 @@ impl Gateway {
                                 .as_u64()
                                 .ok_or_else(Error::internal_error)?
                         };
-                        rpc.typed("session.fork", json!({"sessionId":source,"at":at}))
-                            .await
+                        #[derive(Serialize)]
+                        #[serde(rename_all = "camelCase")]
+                        struct Fork {
+                            session_id: String,
+                            at: u64,
+                            #[serde(skip_serializing_if = "Option::is_none")]
+                            expected_config: Option<SessionConfigExpectation>,
+                        }
+                        let route_admission = admission.read_owned().await;
+                        let created = rpc
+                            .typed(
+                                "session.fork",
+                                encode_native(Fork {
+                                    session_id: source,
+                                    at,
+                                    expected_config,
+                                })?,
+                            )
+                            .await?;
+                        Ok((created, route_admission))
                     }
                     .await;
                     Work::Created {
@@ -1204,6 +1375,24 @@ impl Gateway {
                     Ok(args) => args,
                     Err(error) => return reply.respond_with_error(error),
                 };
+                if key == "model"
+                    && !self.sessions.contains_key(&id)
+                    && rpc.supports("session.model.update.requireExpiredRoute")
+                    && rpc.supports("session.model.get")
+                {
+                    self.spawn(async move {
+                        let result = Config::recover_model(&rpc, &id, &value).await;
+                        Work::Configured {
+                            id,
+                            reply,
+                            mode: false,
+                            revision: None,
+                            result,
+                            refreshed: None,
+                        }
+                    });
+                    return Ok(());
+                }
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };
@@ -1252,6 +1441,7 @@ impl Gateway {
                                     .await?;
                                 let model = attached.model.map(|model| Configuration {
                                     provider_id: model.provider_id,
+                                    catalog_provider_id: attached.catalog_provider_id,
                                     model_id: model.model_id,
                                     capability_snapshot: attached.capability_snapshot,
                                     model_preferences: attached.model_preferences,
@@ -1269,7 +1459,7 @@ impl Gateway {
                         id,
                         reply,
                         mode,
-                        revision,
+                        revision: Some(revision),
                         result,
                         refreshed,
                     }
@@ -1397,7 +1587,7 @@ impl Gateway {
                 Work::Created { reply, result, .. } => {
                     self.creating -= 1;
                     let mut error = rpc::unavailable();
-                    if let Ok(created) = result {
+                    if let Ok((created, _)) = result {
                         error = error.data(
                             json!({"code":"daemon_unavailable","sessionId":created.session_id}),
                         );
@@ -1414,7 +1604,8 @@ impl Gateway {
                     self.authenticating.remove(&provider);
                     return reply.respond_with_error(rpc::unavailable());
                 }
-                Work::Listed { reply, .. }
+                Work::Providers { reply, .. }
+                | Work::Listed { reply, .. }
                 | Work::History { reply, .. }
                 | Work::Removed { reply, .. }
                 | Work::Configured { reply, .. } => {
@@ -1424,6 +1615,20 @@ impl Gateway {
             }
         }
         match work {
+            Work::Providers {
+                reply,
+                mutating,
+                result,
+            } => {
+                self.pending_provider_routes -= usize::from(mutating);
+                match result {
+                    Ok((value, changed)) => {
+                        self.provider_routes_used |= changed;
+                        reply.respond_with_result(Ok(value))?;
+                    }
+                    Err(error) => reply.respond_with_error(error)?,
+                }
+            }
             Work::Initialized { reply, result } => {
                 self.initializing = false;
                 match result {
@@ -1463,7 +1668,7 @@ impl Gateway {
             } => {
                 self.creating -= 1;
                 match result {
-                    Ok(created) => {
+                    Ok((created, route_admission)) => {
                         let added = match self.mcp.plan(&created.session_id, servers) {
                             Ok(added) => added,
                             Err(error) => return reply.respond_with_error(error),
@@ -1476,6 +1681,8 @@ impl Gateway {
                                 kind: Preparation::New,
                             },
                             added,
+                            None,
+                            Some(route_admission),
                         )
                     }
                     Err(error) => reply.respond_with_error(error)?,
@@ -1694,7 +1901,19 @@ impl Gateway {
                         }
                         if let Some(previous) = loading.previous {
                             self.sessions.insert(id.clone(), Slot::Ready(previous));
-                        } else {
+                        } else if error.code != agent_client_protocol::ErrorCode::ResourceNotFound
+                            && !error.data.as_ref().is_some_and(|data| {
+                                matches!(
+                                    data["nativeAppError"].as_str(),
+                                    Some(
+                                        "session_config_mismatch"
+                                            | "provider_route_conflict"
+                                            | "provider_route_unavailable"
+                                            | "provider_route_disabled"
+                                    )
+                                )
+                            })
+                        {
                             let rpc = self.rpc.clone();
                             let detached = id.clone();
                             self.tasks.spawn(async move {
@@ -1886,6 +2105,11 @@ impl Gateway {
                 result,
                 refreshed,
             } => {
+                let Some(revision) = revision else {
+                    return reply.respond_with_result(result.and_then(|config| {
+                        encode_native(acp::SetSessionConfigOptionResponse::new(config.options()))
+                    }));
+                };
                 let Some(Slot::Ready(session)) = self.sessions.get_mut(&id) else {
                     return reply.respond_with_error(Error::resource_not_found(Some(id)));
                 };
@@ -2673,7 +2897,7 @@ impl Gateway {
                             }
                         }
                     }
-                    let prepared = read_history(&rpc, &id, Some(cwd)).await?;
+                    let prepared = read_history(&rpc, &id, Some(cwd), None, None).await?;
                     let input_id = input
                         .as_ref()
                         .map(|event| event.id.clone())
@@ -3004,6 +3228,12 @@ impl Gateway {
     async fn handle_native(&mut self, message: Option<Native>) -> Result<bool, Error> {
         match message {
             Some(Native::Notice { method, params }) => self.notice(method, params).await?,
+            Some(Native::Lost)
+                if self.provider_routes_used || self.pending_provider_routes != 0 =>
+            {
+                self.fail_connection().await?;
+                return Ok(true);
+            }
             Some(Native::Lost) => self.lost()?,
             Some(Native::Restored {
                 same_instance,
@@ -3044,10 +3274,16 @@ fn decode_native<T: serde::de::DeserializeOwned>(value: Value) -> Result<T, Erro
     })
 }
 
+fn encode_native(value: impl Serialize) -> Result<Value, Error> {
+    serde_json::to_value(value).map_err(|_| Error::internal_error())
+}
+
 async fn read_history(
     rpc: &Rpc,
     id: &str,
     expected_cwd: Option<String>,
+    expected_config: Option<&SessionConfigExpectation>,
+    route_admission: Option<OwnedRwLockReadGuard<()>>,
 ) -> Result<Prepared, Error> {
     if expected_cwd.is_some() && !rpc.supports("session.attach.expectedCwd") {
         return Err(
@@ -3060,17 +3296,29 @@ async fn read_history(
     // the reply check. It reads the branch the Session shows by default without
     // reading the Session's default branch, so `DEFAULT_BRANCH_ID` names it.
     let conversation = DEFAULT_BRANCH_ID;
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Attach<'a> {
+        session_id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected_cwd: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        expected_config: Option<&'a SessionConfigExpectation>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        display: Option<bool>,
+    }
     let attached: Attached = rpc
-        .typed("session.attach", {
-            let mut params = json!({"sessionId":id});
-            if let Some(cwd) = expected_cwd {
-                params["expectedCwd"] = json!(cwd);
-            }
-            if rpc.supports("session.history.display") && rpc.supports("session.history.detail") {
-                params["display"] = json!(true);
-            }
-            params
-        })
+        .typed(
+            "session.attach",
+            encode_native(Attach {
+                session_id: id,
+                expected_cwd,
+                expected_config,
+                display: (rpc.supports("session.history.display")
+                    && rpc.supports("session.history.detail"))
+                .then_some(true),
+            })?,
+        )
         .await
         .map_err(|error| {
             if error
@@ -3083,8 +3331,10 @@ async fn read_history(
                 error
             }
         })?;
+    drop(route_admission);
     let model = attached.model.map(|model| Configuration {
         provider_id: model.provider_id,
+        catalog_provider_id: attached.catalog_provider_id,
         model_id: model.model_id,
         capability_snapshot: attached.capability_snapshot,
         model_preferences: attached.model_preferences,

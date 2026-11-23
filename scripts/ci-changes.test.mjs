@@ -49,8 +49,13 @@ test('documents that code reads keep their checks',()=>{
 });
 
 test('Web sources that static checks read avoid the heavy xtask build',()=>{
-  for (const file of ['web/src/main.ts','web/src/chat-ui/WebChatTimeline.vue','web/src/rpc/protocol.ts','web/src/a.mjs','web/src/a.js'])
+  for (const file of ['web/src/chat-ui/WebChatTimeline.vue','web/src/rpc/protocol.ts','web/src/a.mjs','web/src/a.js'])
     assert.deepEqual(classify([file]),only('web','static'),file);
+});
+
+test('the React Web entry and its styles select the Web checks',()=>{
+  for (const file of ['web/src/react/main.tsx','web/src/react/workspace.css'])
+    assert.deepEqual(classify([file]),only('web'),file);
 });
 
 test('dependency checks follow Cargo manifests, lockfile and policy files',()=>{
@@ -68,7 +73,7 @@ test('source areas select their groups',()=>{
   assert.deepEqual(classify(['scripts/stage-web.mjs']),only('scripts','web'));
   assert.deepEqual(classify(['scripts/check-acp-registry.mjs']),only('scripts'));
   assert.deepEqual(classify(['docker/Dockerfile']),only('scripts'));
-  assert.deepEqual(classify(['crates/dim-app-server/src/lib.rs','runtime/fixtures/session-part.json']),only('rust','node'));
+  assert.deepEqual(classify(['crates/dim-app-server/src/lib.rs','runtime/fixtures/session-part.json']),only('rust','node','windows_native'));
   assert.deepEqual(classify(['crates/dim-app-server/src/protocol.rs']),only('rust','node','web','scripts'));
   assert.deepEqual(classify(['crates/dim-app-server/src/storage/sqlite.rs']),only('rust','node','scripts','macos_scripts'));
   assert.deepEqual(classify(['crates/dim-app-server/resources/default-catalog.json']),only('rust','node','scripts'));
@@ -76,6 +81,31 @@ test('source areas select their groups',()=>{
   assert.deepEqual(classify(['crates/dim-client/src/lib.rs']),only('rust','windows','node'));
   assert.deepEqual(classify(['vendor/grok-build/xai-ratatui-textarea/src/lib.rs']),only('rust','windows','node'));
   assert.deepEqual(classify(['docs/notes.md','crates/dim-cli/src/notes.rs']),only('rust','windows'));
+});
+
+test('Windows-native flows follow their storage, host and named pipe paths',()=>{
+  for (const file of [
+    'crates/dim-agent-capabilities/src/file_storage.rs',
+    'crates/dim-agent-capabilities/src/file_storage/windows.rs',
+    'crates/dim-agent-capabilities/src/host_platform/confined.rs',
+    'crates/dim-agent-capabilities/tests/capabilities_flow.rs',
+    'crates/dim-agent-capabilities/tests/file_storage_flow.rs',
+    'crates/dim-agent-capabilities/tests/host_platform_windows_flow.rs',
+    'crates/dim-app-server/src/lib.rs',
+    'crates/dim-app-server/src/transport.rs',
+    'crates/dim-app-server/src/pipe_client.rs',
+    'crates/dim-app-server/src/cli.rs',
+    'crates/dim-app-server/tests/app_server_flow.rs',
+    'crates/dim-app-server/tests/named_pipe_flow.rs',
+    'scripts/test-windows-native.mjs',
+  ]) assert.equal(classify([file]).windows_native,true,file);
+  for (const file of [
+    'crates/dim-cli/src/main.rs',
+    'crates/dim-app-server/tests/transport_flow.rs',
+    'crates/dim-agent-capabilities/tests/host_platform_flow.rs',
+    'crates/dim-agent-capabilities/src/workspace_tools/exec.rs',
+  ]) assert.equal(classify([file]).windows_native,false,file);
+  assert.equal(classify(['.github/workflows/ci.yml']).windows_native,true,'the workflow selects every check group');
 });
 
 test('native macOS CI follows its runner, packaging and Mach-O layout sources',()=>{
@@ -94,7 +124,8 @@ test('bridge, evaluation and wall-clock flows follow their owning paths',()=>{
   assert.deepEqual(classify(['xtask/src/scenario_eval.rs']),only('rust','node','eval'));
   assert.deepEqual(classify(['xtask/scenario-eval/case.json']),only('rust','node','eval'));
   assert.deepEqual(classify(['crates/dim-agent-capabilities/src/workspace_tools/exec.rs']),only('rust','node','execution'));
-  assert.deepEqual(classify(['crates/dim-agent-capabilities/src/host_platform/mod.rs']),only('rust','node','execution'));
+  assert.deepEqual(classify(['crates/dim-agent-capabilities/src/workspace_tools/background.rs']),only('rust','node','execution'));
+  assert.deepEqual(classify(['crates/dim-agent-capabilities/src/host_platform/mod.rs']),only('rust','node','execution','windows_native'));
   assert.deepEqual(classify(['tests/integration/tests/local_execution.rs']),only('rust','node','execution'));
   assert.deepEqual(classify(['scripts/run-rust-test.mjs']),only(...groups));
 });

@@ -612,9 +612,19 @@ async fn a_live_read_waits_for_a_committed_adoption_the_dispatcher_has_not_reach
         "hot-2",
         "the committed adoption is read even though the Dispatcher has not reached it"
     );
-    assert_eq!(through_of(&reply), cutoff);
+    let through = through_of(&reply);
+    assert!(
+        through >= cutoff,
+        "the committed adoption is inside the reported cutoff: {through} >= {cutoff}"
+    );
     let pinned = read(&mut client, &id, "main", Some(cutoff)).await;
     assert_eq!(model_of(&pinned), "hot-2");
+    let pinned = read(&mut client, &id, "main", Some(through)).await;
+    assert_eq!(
+        model_of(&pinned),
+        "hot-2",
+        "reading at the reported cutoff answers the reported configuration"
+    );
 
     drop(client);
     drop(agent);

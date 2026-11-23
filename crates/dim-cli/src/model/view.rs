@@ -232,7 +232,12 @@ pub struct LineView {
     /// The running state the daemon last reported for this line; `None`
     /// until it reports one. Readiness and busy both come from here.
     pub running: Option<bool>,
-    /// Where it was cut from its parent; `None` for `main`.
+    /// The parent's sequence the line was cut at, once a creation or a
+    /// directory row names it, whether or not its count is known; the line
+    /// list orders siblings by it. `None` for `main`.
+    pub branch_point: Option<u64>,
+    /// Where it was cut from its parent and how many messages it inherits;
+    /// `None` while the count is unknown.
     pub cut: Option<LineCut>,
 }
 

@@ -480,6 +480,19 @@ impl BundledCatalog {
         }
     }
 
+    pub(crate) fn bundled_model_count(&self, provider_id: &str) -> Option<usize> {
+        if let Some(data) = self.data {
+            let provider = data.provider_named(provider_id)?;
+            Some((provider.first..provider.end).len())
+        } else {
+            Some(
+                self.providers[*self.by_provider.get(provider_id)?]
+                    .models
+                    .len(),
+            )
+        }
+    }
+
     pub fn providers(&self) -> impl Iterator<Item = CatalogProvider> + '_ {
         self.provider_ids()
             .map(|id| self.provider(id).expect("a catalog provider id"))

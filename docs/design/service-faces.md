@@ -288,7 +288,7 @@ wakeups.cancel {sessionId, wakeupId} -> {} | {state}
 与 `wakeups` 同一做法：注册为 shared，在 `host_key("loops")` 提供 dispatcher，原生 `Loops` 在类型键继续提供。按 Scheduler §12.6：
 
 ```text
-loops.start {sessionId, branchId?, prompt, everySeconds?} -> {loopId, branchId, state, round, nextAt?, lastRoundAt?, expiresAt, stoppedReason?, settledAt?}
+loops.start {sessionId, branchId?, prompt, everySeconds?} -> {loopId, branchId, state, round, prompt, nextAt?, lastRoundAt?, expiresAt, stoppedReason?, settledAt?}
 loops.next {sessionId, loopId, delaySeconds?} -> 同一记录形状
 loops.list {sessionId, branchId?} -> {loops: [记录…]}
 loops.stop {sessionId, loopId} -> 记录形状，未结算时另带 {settled: false}
