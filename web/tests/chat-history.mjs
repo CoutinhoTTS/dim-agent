@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import { registerHooks, stripTypeScriptTypes } from "node:module"
 import test from "node:test"
 import { createPinia, setActivePinia } from "pinia"
+import { watch } from "vue"
 
 registerHooks({
   resolve(specifier, context, next) {
@@ -377,14 +378,22 @@ test("adoption leaves an unconsumed input pending until consumption or deletion"
   assert.deepEqual(chat.views.session.queued, [])
 })
 
-test("empty visible windows still pin the raw head before held live events", async t => {
+test("empty visible windows still pin the raw head before held live events", { timeout: 5000 }, async t => {
+  const historyRequested = deferred()
   const pageWait = deferred()
-  const chat = session(t, () => pageWait.promise)
-  await flush()
+  const chat = session(t, () => {
+    historyRequested.resolve()
+    return pageWait.promise
+  })
+  await historyRequested.promise
   receive(chat, "main", input(50, "already included in snapshot"))
   receive(chat, "main", input(101, "after snapshot"))
+  const rowsPublished = deferred()
+  t.after(watch(() => chat.views.session.rows.length, length => {
+    if (length > 0) rowsPublished.resolve()
+  }))
   pageWait.resolve(page([], 100))
-  await flush()
+  await rowsPublished.promise
   assert.deepEqual(chat.views.session.rows.map(row => row.text), ["after snapshot"])
 })
 
