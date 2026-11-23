@@ -6839,7 +6839,7 @@ async fn drive(
     // clock already named the switch it stopped waiting on and keeps that
     // ending.
     if let Some(pending) = switches.front()
-        && !(driven.stop == "seconds" && driven.error.is_some())
+        && !(pending.moved && driven.stop == "seconds" && driven.error.is_some())
     {
         let reason = if pending.moved {
             let line = pending
