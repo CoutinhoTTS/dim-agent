@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use crate::management::{self, editor};
 use crate::model::session::{
     Area, Command, CompactReply, ContextReading, DIM_OAUTH_ID, DeleteOutcome, DeleteReply,
-    DraftPart, ManagementAction, ManagementRefusal, ManagementRequest, ManagementResult,
+    DraftPart, ManagementAction, ManagementRefusal, ManagementRequest, ManagementResult, Origin,
     PromptField, PromptSetting, RenameReply, SessionPort, SubmitMode, SuggestionSetting,
     SwitchKind, Update,
 };
@@ -24,7 +24,7 @@ use crate::model::view::{
 };
 use crate::ui::Env;
 use crate::ui::Initial;
-use crate::ui::approvals_panel::ApprovalsPanel;
+use crate::ui::approvals_panel::{ApprovalsPanel, preset_label};
 use crate::ui::commands::{COMMANDS, Context as CommandContext, Needs};
 use crate::ui::composer::{Composer, Outcome as ComposerOutcome, Shell, history};
 use crate::ui::i18n::{self, t, tf};
@@ -149,15 +149,6 @@ enum Jump {
 
 /// The card id of fullscreen's load-more row: no line or delegation id.
 const LOAD_MORE: &str = "\u{1}load-more";
-
-/// The preset as the status line names it.
-fn permission_label(preset: dim_agent_types::PermissionPreset) -> &'static str {
-    match preset {
-        dim_agent_types::PermissionPreset::ReadOnly => "Read only",
-        dim_agent_types::PermissionPreset::WorkspaceWrite => "Workspace write",
-        dim_agent_types::PermissionPreset::FullAccess => "Full access",
-    }
-}
 
 fn apply_jump(full: &mut FullScreen, app: &App, jump: Jump) {
     match jump {
@@ -310,10 +301,11 @@ fn run_terminal(
     );
     app.fullscreen = full.is_some();
     app.initial = surroundings.initial;
-    app.awaiting_window = surroundings.resume;
-    if surroundings.resume {
+    app.awaiting_window = surroundings.resume.is_some();
+    if surroundings.resume.is_some() {
         app.begin_switch(SwitchKind::Resumed);
     }
+    app.startup_session = surroundings.resume;
     app.terminal_clipboard =
         terminal.clipboard_protocol() && crate::clipboard::terminal::native_unreachable();
     app.host.send(Command::LoginStatus(DIM_OAUTH_ID.into()));
@@ -1042,8 +1034,13 @@ struct ModelLabel {
 
 impl ModelLabel {
     fn new(configuration: &Configuration) -> Self {
+        let mut model = format!("{} / {}", configuration.provider_id, configuration.model_id);
+        if configuration.provider_id == crate::login::LEGACY_CODEX_ID {
+            model.push_str(" · ");
+            model.push_str(t("Legacy"));
+        }
         Self {
-            model: format!("{} / {}", configuration.provider_id, configuration.model_id),
+            model,
             effort: configuration
                 .model_preferences
                 .as_ref()
@@ -1241,7 +1238,7 @@ struct App {
     /// A submitted first message no Session has taken yet: a refusal puts
     /// it back into the draft.
     unsent: Option<Initial>,
-    permission_policy: dim_agent_types::PermissionPolicy,
+    permission_policy: Option<dim_agent_types::PermissionPolicy>,
     /// The main branch's context use.
     context: Option<ContextReading>,
     /// The first attempt tag of the next `/login` panel, so a closed panel's
@@ -1264,6 +1261,10 @@ struct App {
     /// The user message a `/timeline` jump or a loaded page lands on, once
     /// drawn: `(row id, pick it)`.
     landing: Option<(String, bool)>,
+    /// The Session the invocation asked to resume, until the interface shows
+    /// it: the invocation's first message names that Session, while no key
+    /// typed before the attachment does.
+    startup_session: Option<String>,
     /// A session was just switched; the next snapshot decides the window.
     awaiting_window: bool,
     /// A Session switch the user asked for whose outcome has not arrived
@@ -1561,9 +1562,18 @@ enum ClipboardRead {
 /// A Ctrl+Enter that has withdrawn the queue and asked for a stop. At most one
 /// is in flight: its reply decides for the gesture the user last meant.
 struct SendNow {
+    /// The line the gesture started on: its stop and the draft it settles
+    /// belong to that line, not to the centre a queued move may install.
+    line: String,
+    /// The Session the gesture started in: a handoff it could not see keeps
+    /// the draft out of the Session that replaced it.
+    session: Origin,
     /// Esc called off the submit. The stop still settles, and its reply
     /// releases the gesture without submitting anything.
     submit_cancelled: bool,
+    /// A Session switch cleared the composer before the stop settled, so the
+    /// reply must not claim the draft was kept.
+    draft_lost: bool,
     /// Where the next recalled message goes: past the ones already recalled,
     /// so they keep queue order ahead of the draft that was typed.
     at: usize,
@@ -1686,10 +1696,10 @@ impl App {
             initial: None,
             unsent: None,
             send_now: None,
-            permission_policy: dim_agent_types::PermissionPolicy {
+            permission_policy: Some(dim_agent_types::PermissionPolicy {
                 preset: dim_agent_types::PermissionPreset::WorkspaceWrite,
                 ..Default::default()
-            },
+            }),
             context: None,
             login_attempts: 0,
             theme_context: None,
@@ -1699,6 +1709,7 @@ impl App {
             load_more: false,
             reveal_pending: false,
             landing: None,
+            startup_session: None,
             awaiting_window: false,
             switch_pending: false,
             switches: PendingSwitches::default(),
@@ -2046,9 +2057,52 @@ impl App {
     /// Submits the draft a settled stop made ready, as a new message: the run
     /// is idle now, so the submit starts its own turn and takes whatever
     /// withdrawn messages joined the draft in the meantime.
-    fn submit_send_now(&mut self) {
+    fn submit_send_now(&mut self, line: String, session: Origin) {
         let outcome = self.composer.submit();
-        self.dispatch_composer(outcome, SubmitMode::Queue);
+        self.dispatch_composer(outcome, SubmitMode::Queue, line, session);
+    }
+
+    /// The origin a key's command belongs to: the Session shown, or Home.
+    /// `--resume` is not a key's origin: while the first attachment is still
+    /// in flight the interface shows Home, and a key typed there is Home's,
+    /// so no attachment can turn it into a command on the Session it brings
+    /// in (design §14).
+    fn target_session(&self) -> Origin {
+        if self.session_id.is_empty() {
+            Origin::Home
+        } else {
+            Origin::Session(self.session_id.clone())
+        }
+    }
+
+    /// A permission change and the Session and default line the gesture saw:
+    /// a move or handoff before it runs cancels it instead of changing the
+    /// policy of the new centre (design §14).
+    fn permission_change(&self, change: crate::permission::PresetSelection) -> Command {
+        Command::SetPermission {
+            change,
+            session: self.target_session(),
+            line: self.default_line(),
+        }
+    }
+
+    /// The centre as this interface last saw it: the line a key's command
+    /// belongs to. Empty before the first Snapshot, when a command can only
+    /// be the invocation's first message (design §14).
+    fn target_line(&self) -> String {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.focus.clone())
+            .unwrap_or_default()
+    }
+
+    /// The Session's default branch as this interface last saw it, the line
+    /// `/usage` reports (design §14).
+    fn default_line(&self) -> String {
+        self.snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.default_branch_id.clone())
+            .unwrap_or_default()
     }
 
     /// Ctrl+Enter: withdraws every held message into the draft, stops the run
@@ -2064,11 +2118,17 @@ impl App {
             return;
         }
         self.send_now = Some(SendNow {
+            line: self.target_line(),
+            session: self.target_session(),
             submit_cancelled: false,
+            draft_lost: false,
             at: 0,
         });
         self.recall_all_queued();
-        self.host.send(Command::SubmitNow);
+        self.host.send(Command::SubmitNow {
+            line: self.target_line(),
+            session: self.target_session(),
+        });
     }
 
     fn withdraw(&mut self, id: String) {
@@ -2088,6 +2148,19 @@ impl App {
             input_id: id,
             action: "withdraw",
         });
+    }
+
+    /// Shows that the centre's policy is not known to this interface: the
+    /// status line, Settings and the Permissions panel stop naming the
+    /// outgoing preset (design §14).
+    fn show_permission_unknown(&mut self) {
+        if let Some(Prompt::Approvals(panel)) = &mut self.prompt {
+            panel.set_policy(None);
+        }
+        self.permission_policy = None;
+        if let Some(Prompt::Settings(panel)) = &self.prompt {
+            self.open_settings(panel.selected());
+        }
     }
 
     fn set_notice(&mut self, text: impl Into<String>) {
@@ -2425,13 +2498,21 @@ impl App {
                     }
                     return;
                 }
-                // The stop failed, so the combined draft stays in the
-                // composer with the reason: nothing typed is lost.
+                // A stop that failed for the Session still shown leaves the
+                // combined draft in the composer with the reason: nothing
+                // typed is lost. A switch already cleared it, so that notice
+                // does not claim the draft was kept.
                 if let Some(error) = error {
-                    self.notices.push(tf(
-                        "Send now failed: {error}; the draft was kept",
-                        &[("error", &crate::sanitize::safe_line(&error))],
-                    ));
+                    let error = crate::sanitize::safe_line(&error);
+                    let text = if pending.draft_lost {
+                        tf("Send now failed: {error}", &[("error", &error)])
+                    } else {
+                        tf(
+                            "Send now failed: {error}; the draft was kept",
+                            &[("error", &error)],
+                        )
+                    };
+                    self.notices.push(text);
                     return;
                 }
                 // No read can start while the gesture is pending, so nothing
@@ -2446,7 +2527,7 @@ impl App {
                     self.set_notice(t("Send now is waiting for the insertion before sending"));
                     return;
                 }
-                self.submit_send_now();
+                self.submit_send_now(pending.line, pending.session);
             }
             Update::Exported { format, path } => self.notices.push(tf(
                 "Exported {format}: {path}",
@@ -2458,12 +2539,28 @@ impl App {
             Update::Ready(configuration) => {
                 self.label = Some(ModelLabel::new(&configuration));
             }
+            Update::NoModel => self.label = None,
             Update::ModelFeatures {
                 images,
                 service_tiers,
             } => {
                 self.composer.set_accepts_images(images);
                 self.service_tiers = service_tiers;
+            }
+            Update::LineRefusal {
+                projection_id,
+                branch_id,
+                text,
+            } => {
+                let shown = match &mut self.prompt {
+                    Some(Prompt::Lines(panel)) => {
+                        panel.refuse(projection_id, &branch_id, text.clone())
+                    }
+                    _ => false,
+                };
+                if !shown {
+                    self.set_notice(text);
+                }
             }
             Update::Snapshot(snapshot) => {
                 let was_running = self.running();
@@ -2688,15 +2785,19 @@ impl App {
             Update::Permissions(policy) => match policy {
                 Ok(policy) => {
                     if let Some(Prompt::Approvals(panel)) = &mut self.prompt {
-                        panel.set_policy(&policy);
+                        panel.set_policy(Some(&policy));
                     }
-                    self.permission_policy = policy;
+                    self.permission_policy = Some(policy);
                     if let Some(Prompt::Settings(panel)) = &self.prompt {
                         self.open_settings(panel.selected());
                     }
                 }
-                Err(error) => self.notices.push(error),
+                Err(error) => {
+                    self.notices.push(error);
+                    self.show_permission_unknown();
+                }
             },
+            Update::PermissionsUnknown => self.show_permission_unknown(),
             Update::PermissionSelected(preset) => {
                 let label = format!("Permission: {}", crate::permission::name(preset));
                 let message = crate::ui::config::write(
@@ -3015,6 +3116,12 @@ impl App {
             }
             Update::ForkFailed => self.end_switch(SwitchKind::Forked),
             Update::NewSessionDone => self.end_switch(SwitchKind::New),
+            Update::ChatGptProfiles(result) => {
+                if let Some(Prompt::Providers(panel)) = &mut self.prompt {
+                    let effect = panel.set_chatgpt_profiles(result);
+                    self.apply_effect(effect);
+                }
+            }
             Update::Oauth { attempt, event } => {
                 let effect = match &mut self.prompt {
                     Some(Prompt::Providers(panel)) => panel.oauth_event(attempt, event),
@@ -3251,6 +3358,9 @@ impl App {
                 self.switches.clear();
                 self.failure = Some(message);
                 self.failure_resumable = resumable;
+                // The resumed Session does not exist: a command typed now is
+                // Home's, not the invocation's resume.
+                self.startup_session = None;
                 // A first message the invocation supplied has no Session
                 // to take it: keep it in the draft and stay, rather than
                 // exiting nonzero with nothing sent.
@@ -3537,9 +3647,8 @@ impl App {
                     && (key.mods == Modifiers::SHIFT
                         || (key.code == KeyCode::BackTab && key.mods == Modifiers::NONE)) =>
             {
-                self.host.send(Command::SetPermission(
-                    crate::permission::PresetSelection::Next,
-                ));
+                self.host
+                    .send(self.permission_change(crate::permission::PresetSelection::Next));
                 return Outcome::Continue;
             }
             KeyCode::Char('o' | 'p') if ctrl && !self.composer.palette_open() => {
@@ -3629,7 +3738,7 @@ impl App {
         match self.composer.handle_key(key) {
             ComposerOutcome::Command { name, args } => return self.run_command(&name, &args),
             outcome => {
-                self.dispatch_composer(outcome, mode);
+                self.dispatch_composer(outcome, mode, self.target_line(), self.target_session());
             }
         }
         if self.suggestion.is_some() && !self.composer.is_empty() {
@@ -3664,7 +3773,13 @@ impl App {
 
     /// What a composer outcome does, the same for Enter and for the
     /// invocation's first message.
-    fn dispatch_composer(&mut self, outcome: ComposerOutcome, mode: SubmitMode) -> Outcome {
+    fn dispatch_composer(
+        &mut self,
+        outcome: ComposerOutcome,
+        mode: SubmitMode,
+        line: String,
+        session: Origin,
+    ) -> Outcome {
         // Every send key is refused before the composer acts (see
         // `settling_key_refused`), so an outcome that already cleared the draft
         // cannot arrive here while a gesture settles. If one ever does, the
@@ -3705,7 +3820,7 @@ impl App {
                 if mode == SubmitMode::Queue && self.running() {
                     self.set_notice(t("Message queued"));
                 }
-                self.host.submit(text, mode);
+                self.host.submit(text, mode, line, session);
             }
             ComposerOutcome::SubmitDraft { text, parts } => {
                 let text = text.trim().to_owned();
@@ -3715,7 +3830,12 @@ impl App {
                 if mode == SubmitMode::Queue && self.running() {
                     self.set_notice(t("Message queued"));
                 }
-                self.host.send(Command::SubmitDraft(parts, mode));
+                self.host.send(Command::SubmitDraft {
+                    parts,
+                    mode,
+                    line,
+                    session,
+                });
             }
             ComposerOutcome::Shell { command, shell } => {
                 let entry = format!("{}{command}", shell.prefix());
@@ -3727,6 +3847,8 @@ impl App {
                     run_id: running.run_id.clone(),
                     command: running.command.clone(),
                     private: running.private,
+                    line,
+                    session,
                 });
                 self.shell = Some(running);
             }
@@ -3763,7 +3885,20 @@ impl App {
         if submitted && self.session_id.is_empty() {
             self.unsent = Some(initial);
         }
-        self.dispatch_composer(outcome, SubmitMode::Queue)
+        // The invocation's first message belongs to the Session it asked to
+        // resume, not to the Home screen the first frame may still show. Its
+        // line is unknown here: the first frame may carry the line the first
+        // attachment invalidated, while the worker resolves an empty line to
+        // the line it shows when the message runs (design §14).
+        let session = if self.session_id.is_empty() {
+            match &self.startup_session {
+                Some(session) => Origin::Session(session.clone()),
+                None => Origin::Home,
+            }
+        } else {
+            Origin::Session(self.session_id.clone())
+        };
+        self.dispatch_composer(outcome, SubmitMode::Queue, String::new(), session)
     }
 
     /// Puts a first message no Session took back into the draft, unless the
@@ -4009,7 +4144,9 @@ impl App {
                 stop_turn: self.running(),
             });
         } else {
-            self.host.stop();
+            let line = self.target_line();
+            let session = self.target_session();
+            self.host.stop(line, session);
         }
         self.set_notice(t("Stopping"));
     }
@@ -4272,6 +4409,17 @@ impl App {
                     branch_id,
                 });
             }
+            Effect::SetDefaultLine {
+                session_id,
+                projection_id,
+                branch_id,
+            } => {
+                self.host.send(Command::SetDefaultLine {
+                    session_id,
+                    projection_id,
+                    branch_id,
+                });
+            }
             Effect::Resume(id) => {
                 self.begin_switch(SwitchKind::Resumed);
                 self.host.send(Command::CloseSessions);
@@ -4296,7 +4444,7 @@ impl App {
             },
             Effect::OpenPermissions => {
                 self.open_prompt(Prompt::Approvals(ApprovalsPanel::new(
-                    &self.permission_policy,
+                    self.permission_policy.as_ref(),
                 )));
             }
             Effect::OpenArea { area, note } => {
@@ -4454,9 +4602,9 @@ impl App {
             }
             Effect::SetPermission(preset) => {
                 self.prompt = None;
-                self.host.send(Command::SetPermission(
-                    crate::permission::PresetSelection::Preset(preset),
-                ));
+                self.host.send(
+                    self.permission_change(crate::permission::PresetSelection::Preset(preset)),
+                );
             }
             Effect::Provider(action) => self.host.send(Command::Provider(action)),
             Effect::Plugin(action) => self.host.send(Command::Plugin(action)),
@@ -4498,8 +4646,15 @@ impl App {
                 if provider_id == DIM_OAUTH_ID {
                     self.signed_in = true;
                 }
-                self.prompt = Some(Prompt::Models(Box::new(ModelsPanel::new())));
-                self.host.send(Command::ListModels);
+                let mut models = ModelsPanel::new();
+                if provider_id == crate::login::CHATGPT_PROVIDER_ID {
+                    let effect = models.paste("OpenAI ChatGPT");
+                    self.prompt = Some(Prompt::Models(Box::new(models)));
+                    self.apply_effect(effect);
+                } else {
+                    self.prompt = Some(Prompt::Models(Box::new(models)));
+                    self.host.send(Command::ListModels);
+                }
             }
             Effect::OpenModels => {
                 self.prompt = Some(Prompt::Models(Box::new(ModelsPanel::new())));
@@ -4507,6 +4662,14 @@ impl App {
             }
             Effect::Logout(target) => self.host.send(Command::Logout(target)),
             Effect::LoginStatus(provider_id) => self.host.send(Command::LoginStatus(provider_id)),
+            Effect::ChatGptProfiles => self.host.send(Command::ChatGptProfiles),
+            Effect::SelectChatGptProfile {
+                profile_id,
+                attempt,
+            } => self.host.send(Command::SelectChatGptProfile {
+                profile_id,
+                attempt,
+            }),
             Effect::LoginUsage(provider_id) => self.host.send(Command::LoginUsage(provider_id)),
             Effect::OpenUrl(url) => {
                 let opened = crate::browser::open(&url);
@@ -4555,8 +4718,11 @@ impl App {
                     .as_ref()
                     .is_some_and(|label| label.model == model)
                 {
-                    self.host
-                        .send(Command::Configure(format!("/effort {value}")));
+                    self.host.send(Command::Configure {
+                        text: format!("/effort {value}"),
+                        line: self.target_line(),
+                        session: self.target_session(),
+                    });
                 } else {
                     self.set_notice(t(
                         "Model changed; reopen /effort to choose its reasoning effort.",
@@ -4586,7 +4752,7 @@ impl App {
         if self.prompt.is_none()
             && let Some(mut panel) = self.permissions_return.take()
         {
-            panel.set_policy(&self.permission_policy);
+            panel.set_policy(self.permission_policy.as_ref());
             self.open_prompt(Prompt::Approvals(panel));
         }
         if self.prompt.is_none()
@@ -5015,7 +5181,10 @@ impl App {
                 .as_ref()
                 .map(|setting| setting.document.enabled),
             prompts: self.prompt_origins(),
-            permission: crate::permission::name(self.permission_policy.preset).to_owned(),
+            permission: self.permission_policy.as_ref().map_or_else(
+                || "Unavailable".to_owned(),
+                |policy| crate::permission::name(policy.preset).to_owned(),
+            ),
         };
         self.open_prompt(Prompt::Settings(SettingsPanel::new(&values, select)));
     }
@@ -5047,7 +5216,7 @@ impl App {
                 self.settings_return = None;
             }
             Setting::Permission => {
-                let panel = ApprovalsPanel::new(&self.permission_policy);
+                let panel = ApprovalsPanel::new(self.permission_policy.as_ref());
                 self.open_prompt(Prompt::Approvals(panel));
             }
             Setting::Isolation => {
@@ -5556,18 +5725,27 @@ impl App {
                 Outcome::Continue
             }
             "usage" => {
-                self.host.send(Command::Usage);
+                self.host.send(Command::Usage {
+                    line: self.default_line(),
+                    session: self.target_session(),
+                });
                 Outcome::Continue
             }
             "compact" => {
-                self.host.send(Command::Compact);
+                self.host.send(Command::Compact {
+                    line: self.target_line(),
+                    session: self.target_session(),
+                });
                 Outcome::Continue
             }
             "earlier" => {
                 if self.fullscreen {
                     self.show_earlier();
                 } else {
-                    self.host.send(Command::Earlier);
+                    self.host.send(Command::Earlier {
+                        line: self.target_line(),
+                        session: self.target_session(),
+                    });
                 }
                 Outcome::Continue
             }
@@ -5603,7 +5781,16 @@ impl App {
             }
             "goal" => {
                 match crate::goal::request(args) {
-                    Some(request) => self.host.send(Command::Goal(request)),
+                    Some(request) => self.host.send(Command::Goal {
+                        request,
+                        line: self.target_line(),
+                        session: self.target_session(),
+                        draft: if args.trim().is_empty() {
+                            "/goal".to_owned()
+                        } else {
+                            format!("/goal {}", args.trim())
+                        },
+                    }),
                     None => self.reports.push(Block::Status {
                         text: crate::goal::USAGE.to_owned(),
                         tone: Tone::Muted,
@@ -5613,7 +5800,16 @@ impl App {
             }
             "loop" => {
                 match crate::loop_view::request(args) {
-                    Some(request) => self.host.send(Command::Loop(request)),
+                    Some(request) => self.host.send(Command::Loop {
+                        request,
+                        line: self.target_line(),
+                        session: self.target_session(),
+                        draft: if args.trim().is_empty() {
+                            "/loop".to_owned()
+                        } else {
+                            format!("/loop {}", args.trim())
+                        },
+                    }),
                     None => self.reports.push(Block::Status {
                         text: crate::loop_view::USAGE.to_owned(),
                         tone: Tone::Muted,
@@ -5636,8 +5832,11 @@ impl App {
                     self.open_prompt(Prompt::Effort(EffortPrompt::new()));
                 }
                 let text = format!("/{name} {args}");
-                self.host
-                    .send(Command::Configure(text.trim_end().to_owned()));
+                self.host.send(Command::Configure {
+                    text: text.trim_end().to_owned(),
+                    line: self.target_line(),
+                    session: self.target_session(),
+                });
                 Outcome::Continue
             }
             "report" => {
@@ -5746,7 +5945,7 @@ impl App {
                 // which opens holding where they work instead of ignoring
                 // them, and says it until the user's first key there.
                 if args.trim().is_empty() {
-                    let panel = ApprovalsPanel::new(&self.permission_policy);
+                    let panel = ApprovalsPanel::new(self.permission_policy.as_ref());
                     self.open_prompt(Prompt::Approvals(panel));
                 } else {
                     self.open_management(
@@ -7428,6 +7627,9 @@ impl App {
         }
         self.report_error = None;
         self.release_compaction_details();
+        // The startup attachment has arrived: its Session is the centre, so
+        // later Home commands are Home's, not the invocation's resume.
+        self.startup_session = None;
         let first = self.session_id.is_empty();
         // Home's first message started this Session: nothing shown to clear.
         if first
@@ -7479,6 +7681,9 @@ impl App {
             kind => Some(kind),
         };
         self.composer.clear();
+        if let Some(pending) = &mut self.send_now {
+            pending.draft_lost = true;
+        }
         self.line_draft = None;
         self.suggestion = None;
         if let Some(text) = self.fork_draft.take()
@@ -7588,7 +7793,10 @@ impl App {
         };
         match snapshot.earlier {
             Earlier::Unread => {
-                self.host.send(Command::Earlier);
+                self.host.send(Command::Earlier {
+                    line: self.target_line(),
+                    session: self.target_session(),
+                });
                 self.reveal_pending = true;
             }
             Earlier::Reading => self.reveal_pending = true,
@@ -8566,13 +8774,19 @@ impl App {
     fn status_line(&self, cols: usize) -> String {
         use dim_agent_types::PermissionPreset;
         let p = &self.palette;
-        let preset = self.permission_policy.preset;
-        let color = match preset {
-            PermissionPreset::ReadOnly => &p.permission_read,
-            PermissionPreset::WorkspaceWrite => &p.permission_write,
-            PermissionPreset::FullAccess => &p.permission_full,
+        let permission = match &self.permission_policy {
+            Some(policy) => {
+                let color = match policy.preset {
+                    PermissionPreset::ReadOnly => &p.permission_read,
+                    PermissionPreset::WorkspaceWrite => &p.permission_write,
+                    PermissionPreset::FullAccess => &p.permission_full,
+                };
+                fg(&format!("⏵⏵ {}", preset_label(policy.preset)), color)
+            }
+            // The line's policy is unknown until its own read or a fact
+            // arrives; the outgoing centre's preset is not shown for it.
+            None => fg(&format!("⏵⏵ {}", t("Permission unavailable")), &p.muted),
         };
-        let permission = fg(&format!("⏵⏵ {}", permission_label(preset)), color);
         let hint = fg(t("(shift+tab to cycle)"), &p.muted);
         let total = cols.saturating_sub(2);
         let prefix = format!("{}{permission}", " ".repeat(MARGIN));
@@ -9596,7 +9810,7 @@ mod tests {
                     drawn.key(KeyCode::Enter);
                     assert!(matches!(
                         sent.borrow().last(),
-                        Some(Command::Submit(text, _)) if text == draft
+                        Some(Command::Submit { text, .. }) if text == draft
                     ));
                 }
             }
@@ -9762,6 +9976,7 @@ mod tests {
                         purpose: String::new(),
                         state: LineState::Main,
                         running: Some(false),
+                        branch_point: None,
                         cut: None,
                     },
                     LineView {
@@ -9770,6 +9985,7 @@ mod tests {
                         purpose: "parser race".into(),
                         state: LineState::Working,
                         running: Some(true),
+                        branch_point: None,
                         cut: None,
                     },
                 ],
@@ -10373,6 +10589,7 @@ mod tests {
             purpose: String::new(),
             state,
             running,
+            branch_point: None,
             cut: None,
         }
     }
@@ -11547,7 +11764,7 @@ mod tests {
             }
             drawn.key(KeyCode::Enter);
             assert!(
-                matches!(sent.borrow().last(), Some(Command::Submit(text, _)) if text == &draft)
+                matches!(sent.borrow().last(), Some(Command::Submit { text, .. }) if text == &draft)
             );
         }
     }
@@ -12390,6 +12607,7 @@ mod tests {
                 purpose: String::new(),
                 state: LineState::Main,
                 running: Some(false),
+                branch_point: None,
                 cut: None,
             }],
             ..ViewSnapshot::default()
@@ -12491,7 +12709,7 @@ mod tests {
         assert!(expected.ends_with(" appended"));
         press(&mut app, KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().as_slice(), [Command::Submit(text, _)] if text == &expected)
+            matches!(sent.borrow().as_slice(), [Command::Submit { text, .. }] if text == &expected)
         );
     }
 
@@ -13414,6 +13632,7 @@ mod tests {
             "/private/tmp/dima-probe".into(),
         );
         app.apply(Update::Ready(Configuration {
+            catalog_provider_id: None,
             provider_id: provider.into(),
             model_id: model.into(),
             model_preferences: effort.map(|effort| dim_agent_types::ModelPreferences {
@@ -14017,6 +14236,7 @@ mod tests {
                 let app = &mut drawn.app;
                 app.fullscreen = fullscreen;
                 app.apply(Update::Ready(Configuration {
+                    catalog_provider_id: None,
                     provider_id: "test".into(),
                     model_id: "model".into(),
                     model_preferences: Some(dim_agent_types::ModelPreferences {
@@ -14730,7 +14950,7 @@ mod tests {
                     }
                     assert!(!sent.borrow().iter().any(|command| matches!(
                         command,
-                        Command::SetPermission(_) | Command::SaveIsolation { .. }
+                        Command::SetPermission { .. } | Command::SaveIsolation { .. }
                     )));
                 }
             }
@@ -14780,9 +15000,12 @@ mod tests {
         app.handle_input(key(KeyCode::Enter));
         assert!(matches!(
             sent.borrow().last(),
-            Some(Command::SetPermission(
-                crate::permission::PresetSelection::Preset(PermissionPreset::WorkspaceWrite)
-            ))
+            Some(Command::SetPermission {
+                change: crate::permission::PresetSelection::Preset(
+                    PermissionPreset::WorkspaceWrite
+                ),
+                ..
+            })
         ));
         app.apply(Update::PermissionSelected(PermissionPreset::WorkspaceWrite));
         let saved: serde_json::Value = serde_json::from_str(
@@ -14790,7 +15013,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(saved, serde_json::json!({"permission":"workspace-write"}));
-        assert_eq!(app.permission_policy.disallowed_tools, ["blocked"]);
+        assert_eq!(
+            app.permission_policy
+                .as_ref()
+                .expect("the read policy is shown")
+                .disallowed_tools,
+            ["blocked"]
+        );
+    }
+
+    #[test]
+    fn an_unknown_policy_hides_the_outgoing_preset() {
+        use dim_agent_types::{PermissionPolicy, PermissionPreset};
+
+        let (mut app, _home) = status_app("local", "fixture-model", None);
+        app.apply(Update::Permissions(Ok(PermissionPolicy {
+            preset: PermissionPreset::ReadOnly,
+            ..Default::default()
+        })));
+        let (_, _, footer) = composer_chrome(&mut app, 100);
+        assert!(footer.contains("⏵⏵ Read only"), "{footer}");
+
+        app.apply(Update::PermissionsUnknown);
+        let (_, _, footer) = composer_chrome(&mut app, 100);
+        assert!(footer.contains("⏵⏵ Permission unavailable"), "{footer}");
+
+        app.apply(Update::Permissions(Err(
+            "permission: unavailable (denied)".into()
+        )));
+        let (_, _, footer) = composer_chrome(&mut app, 100);
+        assert!(footer.contains("⏵⏵ Permission unavailable"), "{footer}");
     }
 
     #[test]
@@ -15656,6 +15908,7 @@ mod tests {
                         purpose: String::new(),
                         state: LineState::Main,
                         running: Some(false),
+                        branch_point: None,
                         cut: None,
                     },
                     LineView {
@@ -15664,6 +15917,7 @@ mod tests {
                         purpose: "parser race".into(),
                         state: LineState::Waiting,
                         running: Some(false),
+                        branch_point: Some(1),
                         cut: Some(crate::model::view::LineCut {
                             sequence: 1,
                             messages: 1,
@@ -15784,6 +16038,7 @@ mod tests {
                 purpose: String::new(),
                 state: LineState::Main,
                 running: Some(true),
+                branch_point: None,
                 cut: None,
             }],
             ..ViewSnapshot::default()
@@ -15808,6 +16063,7 @@ mod tests {
                     purpose: String::new(),
                     state: LineState::Main,
                     running: Some(false),
+                    branch_point: None,
                     cut: None,
                 },
                 crate::model::view::LineView {
@@ -15816,6 +16072,7 @@ mod tests {
                     purpose: "review".into(),
                     state: LineState::Working,
                     running: Some(true),
+                    branch_point: Some(1),
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,
@@ -16203,7 +16460,7 @@ mod tests {
         assert!(
             matches!(
                 sent.borrow().as_slice(),
-                [Command::Submit(text, _)] if text == "/skill:commit fix the parser"
+                [Command::Submit { text, .. }] if text == "/skill:commit fix the parser"
             ),
             "the draft is a message, never a command"
         );
@@ -18637,7 +18894,7 @@ mod tests {
             assert!(!drawn.app.composer.text().contains("[Image #1]"));
             drawn.key(KeyCode::Enter);
             match sent.borrow().last().unwrap() {
-                Command::Submit(text, _) => assert!(!text.contains("[Image #1]")),
+                Command::Submit { text, .. } => assert!(!text.contains("[Image #1]")),
                 Command::OpenLine { prompt, .. } => assert_eq!(prompt, "look [Image #7]"),
                 _ => panic!("message reuse must submit text or open a line"),
             }
@@ -19085,6 +19342,7 @@ mod tests {
             let (mut app, sent, _home) = asked();
             app.fullscreen = fullscreen;
             app.apply(Update::Ready(Configuration {
+                catalog_provider_id: None,
                 provider_id: "relay".into(),
                 model_id: "reasoner".into(),
                 model_preferences: None,
@@ -19140,6 +19398,7 @@ mod tests {
                 assert!(frame.live.iter().all(|row| width_of(row) <= 36));
                 if stale {
                     app.apply(Update::Ready(Configuration {
+                        catalog_provider_id: None,
                         provider_id: "relay".into(),
                         model_id: "other".into(),
                         model_preferences: None,
@@ -19155,7 +19414,7 @@ mod tests {
                     assert!(app.notice.as_ref().unwrap().0.contains("/effort"));
                 } else {
                     assert!(
-                        matches!(sent.borrow().last(), Some(Command::Configure(text)) if text == "/effort none")
+                        matches!(sent.borrow().last(), Some(Command::Configure { text, .. }) if text == "/effort none")
                     );
                 }
             }
@@ -19289,7 +19548,7 @@ mod tests {
                         press(&mut app, KeyCode::Enter);
                         assert!(matches!(
                             sent.borrow().as_slice(),
-                            [Command::Goal(request)] if *request == expected
+                            [Command::Goal { request, .. }] if *request == expected
                         ));
                         assert!(app.composer.is_empty());
                     }
@@ -19334,7 +19593,7 @@ mod tests {
                 assert!(
                     matches!(
                         sent.borrow().as_slice(),
-                        [Command::Loop(request)] if *request == expected
+                        [Command::Loop { request, .. }] if *request == expected
                     ),
                     "{words:?} dispatches {expected:?}"
                 );
@@ -19392,10 +19651,10 @@ mod tests {
         commands
             .iter()
             .map(|command| match command {
-                Command::Submit(text, mode) => format!("submit:{}:{}", mode.as_str(), text),
+                Command::Submit { text, mode, .. } => format!("submit:{}:{}", mode.as_str(), text),
                 Command::InputControl { input_id, action } => format!("{action}:{input_id}"),
-                Command::Stop => "stop".into(),
-                Command::SubmitNow => "submit-now".into(),
+                Command::Stop { .. } => "stop".into(),
+                Command::SubmitNow { .. } => "submit-now".into(),
                 _ => "other".into(),
             })
             .collect()
@@ -19724,7 +19983,7 @@ mod tests {
         assert!(
             matches!(
                 &sent_now[3..],
-                [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                     if matches!(parts.as_slice(), [DraftPart::Text(text), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })] if text == "first\n")
             ),
             "the message is the text then the image, with no blank text: {}",
@@ -19795,7 +20054,7 @@ mod tests {
             assert!(
                 matches!(
                     submitted,
-                    [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                    [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                         if matches!(
                             parts.as_slice(),
                             [
@@ -19856,7 +20115,7 @@ mod tests {
         assert!(
             matches!(
                 &sent_now[2..],
-                [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                     if matches!(
                         parts.as_slice(),
                         [
@@ -20148,7 +20407,7 @@ mod tests {
             assert!(
                 matches!(
                     &sent_now[2..],
-                    [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                    [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                         if matches!(
                             parts.as_slice(),
                             [
@@ -20225,7 +20484,10 @@ mod tests {
             sent_now
                 .iter()
                 .filter(|command| {
-                    matches!(command, Command::Submit(..) | Command::SubmitDraft(..))
+                    matches!(
+                        command,
+                        Command::Submit { .. } | Command::SubmitDraft { .. }
+                    )
                 })
                 .count(),
             1,
@@ -20246,9 +20508,10 @@ mod tests {
             error: Some("the stop failed".into()),
         });
         assert!(
-            sent.borrow()
-                .iter()
-                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            sent.borrow().iter().all(|command| !matches!(
+                command,
+                Command::Submit { .. } | Command::SubmitDraft { .. }
+            )),
             "a cancelled submit sends nothing: {}",
             describe(&sent.borrow()).join(", ")
         );
@@ -20276,9 +20539,10 @@ mod tests {
             error: Some("the retry stop failed".into()),
         });
         assert!(
-            sent.borrow()
-                .iter()
-                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            sent.borrow().iter().all(|command| !matches!(
+                command,
+                Command::Submit { .. } | Command::SubmitDraft { .. }
+            )),
             "no submit follows the retry's failed stop: {}",
             describe(&sent.borrow()).join(", ")
         );
@@ -20427,7 +20691,7 @@ mod tests {
                 if image {
                     assert!(matches!(
                         sent.borrow().as_slice(),
-                        [Command::SubmitDraft(parts, SubmitMode::Steer)]
+                        [Command::SubmitDraft { parts, mode: SubmitMode::Steer, .. }]
                             if matches!(parts.as_slice(), [DraftPart::Text(text), DraftPart::Block(dim_agent_types::ContentBlock::Image { .. })] if text == "look ")
                     ));
                 } else {
@@ -20512,7 +20776,7 @@ mod tests {
             assert!(
                 sent.borrow()
                     .iter()
-                    .all(|command| !matches!(command, Command::Submit(..))),
+                    .all(|command| !matches!(command, Command::Submit { .. })),
                 "nothing is submitted while the stop settles"
             );
             press(&mut app, KeyCode::Enter);
@@ -20520,7 +20784,7 @@ mod tests {
             assert!(
                 sent.borrow()
                     .iter()
-                    .all(|command| !matches!(command, Command::Submit(..))),
+                    .all(|command| !matches!(command, Command::Submit { .. })),
                 "Enter and Ctrl+Enter send nothing while the stop settles"
             );
 
@@ -20537,7 +20801,7 @@ mod tests {
                 assert!(
                     matches!(
                         submitted,
-                        [Command::SubmitDraft(parts, SubmitMode::Queue)]
+                        [Command::SubmitDraft { parts, mode: SubmitMode::Queue, .. }]
                             if matches!(parts.first(), Some(DraftPart::Text(text)) if text == "first\nsecond\nand then ")
                                 && parts.iter().any(|part| matches!(part, DraftPart::Block(_)))
                     ),
@@ -20575,9 +20839,10 @@ mod tests {
             error: Some("the run would not stop".into()),
         });
         assert!(
-            sent.borrow()
-                .iter()
-                .all(|command| !matches!(command, Command::Submit(..) | Command::SubmitDraft(..))),
+            sent.borrow().iter().all(|command| !matches!(
+                command,
+                Command::Submit { .. } | Command::SubmitDraft { .. }
+            )),
             "no submit follows a failed stop"
         );
         assert_eq!(app.composer.text(), "first\nand then");
@@ -20671,7 +20936,7 @@ mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(
             sent.borrow().as_slice(),
-            [Command::SubmitDraft(restored, _)] if restored == &parts
+            [Command::SubmitDraft { parts: restored, .. }] if restored == &parts
         ));
     }
 
@@ -20788,7 +21053,7 @@ mod tests {
         );
         press(&mut app, KeyCode::Enter);
         assert!(
-            matches!(sent.borrow().last(), Some(Command::Usage)),
+            matches!(sent.borrow().last(), Some(Command::Usage { .. })),
             "the palette ran /usage"
         );
         assert_eq!(
@@ -23021,7 +23286,7 @@ mod tests {
         let before = drawn.transcript();
         drawn.app.show_earlier();
         assert_eq!(sent.borrow().len(), 1, "an unread prefix is requested");
-        assert!(matches!(sent.borrow()[0], Command::Earlier));
+        assert!(matches!(sent.borrow()[0], Command::Earlier { .. }));
         drawn.draw();
         assert_eq!(drawn.transcript(), before, "the request draws nothing");
         let mut rows = window_rows(HISTORY_WINDOW);

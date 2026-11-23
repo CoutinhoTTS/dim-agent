@@ -510,9 +510,11 @@ The requirements that answer these items are in [Model-facing prompts](model-pro
 
 ### 12.3 Evaluation scenarios
 
-The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: eight under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), each declaring a window of 131,072 tokens, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), declaring 16,000 so that compaction happens. `budget.window` is a check, not a setting: a run whose Session declares another window fails before its first turn, so a rerun needs a model that declares exactly the scenario's window, and a model that declares none falls back to 128,000 and fails too. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
+The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: fifteen under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), each declaring a window of 131,072 tokens, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), declaring 29,000 so that compaction happens. `budget.window` is a check, not a setting: a run whose Session declares another window fails before its first turn, so a rerun needs a model that declares exactly the scenario's window, and a model that declares none falls back to 128,000 and fails too. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
 
 `main-moved-on` is the scenario for the parent block (§7.1.1): `main` works before the cut, opens a line, then keeps working; the line must read what `main` did after the cut before it answers or ends, and it must not page through all of `main`'s activity. It is the scenario for [§12.4](#124-texts-and-their-classes)'s parent-block policy sentence.
+
+The opening and switching roles add seven scenarios: `long-work-and-a-flaky-test`, `refactor-and-a-pasted-report`, `same-file-tradeoff`, `background-command-not-branch`, `switch-continue-directly`, `switch-then-open-lines` and `root-opens-after-switch`.
 
 `identity-after-compaction` reuses `redone-work`'s message and workspace, and `flooding` and `never-ending` share one workspace: each pair stays identical, and the no-model test that reads both committed directories fails when one copy changes alone.
 
@@ -530,6 +532,7 @@ The set lives in the repository, one directory per scenario, holding a `scenario
 | Sibling relay | `timeline-branches/sibling-relay` | An opener is used to pass messages between lines that should have been one line |
 | Identity after compaction | `timeline-branches-compact/identity-after-compaction` | After compaction on `main` and on a line, each still knows which line it is and which lines are its own |
 | Continuing on a line after a switch | `—` | A line that became the default branch calls `end` on itself, hands its work to another line, keeps waking its opener with idle notices, or cannot open a line while the root could |
+| Opening lines after a switch | `timeline-branches/switch-then-open-lines` | The new default branch does both independent additions itself instead of opening a line for one of them, or the former default branch takes the new work |
 | The root opens while a line holds the role | `timeline-branches/root-opens-after-switch` | The user asks the root for a line after another line became the default branch: the root must open it, the new line must start from the root's history, and it must report to the root |
 | Ping-pong | `timeline-branches/ping-pong` | Steer exchanges that do not move the work forward |
 | Asking the user | `timeline-branches/asking-the-user` | A line asks the user directly when it should, and does not route through `main` |
@@ -661,6 +664,18 @@ resumes that line from it. The same rule holds the catalog row's
 Session never changes it, while `running` and `updatedAt` follow the default branch. A persisted move refreshes
 `updatedAt` in its own transaction from the new default's latest activity, and the switch itself counts as none, so an
 idle move never leaves the row recent by the line the Session left.
+
+The reply's `model`, `modelPreferences` and `capabilitySnapshot` stay the root's adopted configuration, the watermark a
+Session on its root has always read. A client that follows the move pairs the configuration with the cursor instead of
+mixing the two: it takes the configuration of the line the cursor names through
+`session.model.get {sessionId, branchId, through}`, so a Session whose conversation is on a line shows the model that
+line adopted at or below its cursor, and the reply's record seeds the root alone. The read answers the line's own
+configuration with its own committed cutoff, so it works when a display transcript omits `context/configured` and a
+bounded window begins after the adoption; that cutoff is the watermark a later configuration must pass. A server that
+cannot answer the read does not name that line's configuration, and its attach reply is the root's, so no client shows
+the root's model for a line. A reply that
+carries no `defaultBranch` names the root, because a server without the field cannot move the default branch, so
+its record is the Session's one model and every client keeps using it.
 
 The directory read performs no history I/O. Its display fields are null or absent.
 `session.branch.get {sessionId, branchId}` (v3, separately listed in

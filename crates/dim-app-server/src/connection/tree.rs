@@ -44,6 +44,16 @@ impl Connection {
             None => self.unnamed_branch(&session).map_err(RpcError::from)?,
         };
         let publication = session.publication(&branch).map_err(RpcError::from)?;
+        if let Some(provider) = rpc.ctx.get::<crate::provider::ProviderService>() {
+            let adopted = session
+                .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&branch)?
+                .and_then(|state| state.configuration);
+            let metadata = match &adopted {
+                Some(model) => model.metadata.as_ref(),
+                None => session.config().model.metadata.as_ref(),
+            };
+            provider.scoped_connection_owner(&self.id, metadata, false)?;
+        }
         let user = params.user.or_else(|| {
             params.text.map(|text| UserInput {
                 content: vec![ContentBlock::Text { text }],
@@ -721,6 +731,17 @@ impl Connection {
         .await
         .map_err(RpcError::from)?;
         boundary.map_err(RpcError::invalid)?;
+        if let Some(provider) = rpc.ctx.get::<crate::provider::ProviderService>() {
+            let (adopted, _) = session
+                .session_service::<TreeCommands>()?
+                .adopted_configuration(params.parent_branch_id.clone(), Some(params.at))
+                .await?;
+            let metadata = match &adopted {
+                Some(model) => model.metadata.as_ref(),
+                None => session.config().model.metadata.as_ref(),
+            };
+            provider.scoped_connection_owner(&self.id, metadata, false)?;
+        }
         // A blocked prompt creates no branch (Hooks A.6.2). A branch's first
         // input is built from the prompt alone, so the checks' contexts are
         // dropped and their warnings ride on the reply.

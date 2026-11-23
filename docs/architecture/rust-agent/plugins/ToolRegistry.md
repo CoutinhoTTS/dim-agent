@@ -114,8 +114,10 @@ the Session's private name `tool_provider_changes(instance)`
 notification carries no data because every refresh reads every source.
 Replacing or withdrawing sets updates the source-state watch (`sources_state()`),
 which ToolBinding follows. ToolBinding owns adoption and request pins. Dynamic
-source validation reserves the mount list's names, host tool names and every
-registered tool's name; only a registered tool's own set may offer that name.
+source validation reserves host tool names and every registered tool's name;
+only a registered tool's own set may offer that name. A name the mount list
+lists is not reserved: the list filters host and registered tools, and each
+source decides its own visibility.
 Already bound requests retain their handlers. A refresh is neither a durable
 configuration save nor permission authorization; a new tool is not
 model-visible until adoption, or until the next `bind_current` request of a
