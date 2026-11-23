@@ -45,9 +45,13 @@ pub struct Projection {
     /// The lines of the Session, as `main` recorded them (design §14).
     lines: Vec<LineView>,
     /// Each line's own user messages, by input id and submission sequence,
-    /// to count where a line was cut (timeline UI §6); a withdrawn one is
-    /// dropped.
+    /// to count where a line was cut (timeline UI §6); a withdrawn message
+    /// stays, and `withdrawals` decides which cuts still count it.
     messages: HashMap<String, Vec<(String, u64)>>,
+    /// Each line's user messages withdrawn later, by input id and the sequence
+    /// that withdrew them: a cut before that sequence still counts the
+    /// message, whichever page carried the input or the withdrawal.
+    withdrawals: HashMap<String, HashMap<String, u64>>,
     /// Lines whose loaded history starts after the line's own start: a cut
     /// that counts one of them has no count until an earlier read reaches it.
     incomplete: HashSet<String>,
@@ -131,9 +135,11 @@ impl Projection {
                 }
             }
             EventContent::InputDeleted(data) => {
-                if let Some(messages) = self.messages.get_mut(parent) {
-                    messages.retain(|(id, _)| *id != data.input_id);
-                }
+                let withdrawals = self.withdrawals.entry(parent.to_owned()).or_default();
+                withdrawals
+                    .entry(data.input_id.clone())
+                    .and_modify(|at| *at = (*at).min(event.sequence))
+                    .or_insert(event.sequence);
             }
             EventContent::BranchCreate(data) => {
                 let purpose = data
@@ -204,7 +210,17 @@ impl Projection {
             None => return None,
         };
         let own = self.messages.get(branch).map_or(0, |messages| {
-            messages.iter().filter(|(_, at)| *at <= sequence).count()
+            messages
+                .iter()
+                .filter(|(id, at)| {
+                    *at <= sequence
+                        && self
+                            .withdrawals
+                            .get(branch)
+                            .and_then(|withdrawals| withdrawals.get(id))
+                            .is_none_or(|withdrawn| *withdrawn > sequence)
+                })
+                .count()
         });
         Some(inherited + own)
     }
