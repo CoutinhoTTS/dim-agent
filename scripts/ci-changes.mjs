@@ -11,6 +11,11 @@ const cargoManifest=/(?:^|\/)Cargo\.toml$/;
 // the test targets that include them, and the runner that selects them. A file
 // missing here still reaches the Windows step on the daily sweep, so add it when
 // a Windows branch of those flows moves or gains another file.
+// The same tests are named in scripts/test-windows-native.mjs's `flows`, which
+// decides what the step runs; this list decides whether it runs at all. Change both
+// together. Without a path here, a change to that file reaches the step only on the
+// daily sweep or through another matching file; without a `flows` entry, the test
+// never runs, the daily sweep included.
 const windowsNative=[
   /^crates\/dim-agent-capabilities\/src\/(?:file_storage\.rs|file_storage\/|host_platform\.rs|host_platform\/)/,
   /^crates\/dim-agent-capabilities\/tests\/(?:capabilities_flow|file_storage_flow|host_platform_windows_flow)\.rs$/,
