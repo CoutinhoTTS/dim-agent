@@ -1023,3 +1023,138 @@ async fn a_recovery_settles_the_prompt_the_moved_default_left_behind() {
     root.shutdown().await.unwrap();
     server.await.unwrap();
 }
+
+/// A load whose default branch is a line hands the request's `expectedConfig`
+/// to the checked attach, reads the directory only after the attach passed,
+/// and shows that line's own model instead of the attach reply's root model.
+/// Writing the model afterwards targets the line, and a temporary route keeps
+/// the catalog provider the model was chosen under (design §14).
+#[tokio::test]
+async fn a_gateway_load_keeps_the_default_line_apart_from_the_root() {
+    let home = tempfile::tempdir_in("/tmp").unwrap();
+    let endpoint = home.path().join("daemon.sock");
+    let cwd = home.path().to_str().unwrap().to_owned();
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let daemon_cwd = cwd.clone();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut read = BufReader::new(read);
+        let hello = frame(&mut read).await;
+        send(&mut write,json!({"jsonrpc":"2.0","id":hello["id"],"result":{"instanceId":"fixture","serverVersion":"fixture","protocolVersion":3,"daemonProfile":{"kind":"product"},"features":["session.attach","session.attach.expectedCwd","session.attach.expectedConfig","session.branches","session.create","session.detach","session.history","session.history.latestTurn","session.input_lookup","session.methods","session.model.get","session.model.update","session.stop","session.submit","session.turn.get","provider.models.query"]}})).await;
+        let mut attached = false;
+        while let Some(request) = read_frame(&mut read).await {
+            let method = request["method"].as_str().unwrap_or_default().to_owned();
+            let branch = request["params"]["branchId"]
+                .as_str()
+                .unwrap_or("line-1")
+                .to_owned();
+            let through = request["params"]["through"].as_u64().unwrap_or(5);
+            let id = request["id"].clone();
+            match method.as_str() {
+                "session.attach" => {
+                    assert_eq!(request["params"]["expectedCwd"], json!(daemon_cwd));
+                    assert_eq!(
+                        request["params"]["expectedConfig"],
+                        json!({"modelId":"B"}),
+                        "the load hands the request's expectation to the attach"
+                    );
+                    attached = true;
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"sequence":2,"cwd":daemon_cwd,"model":{"providerId":"root-route","modelId":"A"},"catalogProviderId":"root-catalog","defaultBranch":{"branchId":"line-1","sequence":5}}})).await;
+                }
+                "session.branches" => {
+                    assert!(
+                        attached,
+                        "the checked attach passes before the directory is read"
+                    );
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"defaultBranchId":"line-1","branches":[{"branchId":"main","state":"open","head":2},{"branchId":"line-1","parentBranchId":"main","branchPoint":1,"state":"open","head":5}]}})).await;
+                }
+                "session.history" => {
+                    assert_eq!(branch, "line-1", "the recovery reads the default line");
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"events":[],"through":5,"nextBefore":null,"nextAfter":5}})).await;
+                }
+                "session.methods" => {
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"methods":[{"name":"session.model.update","mutating":true}]}})).await;
+                }
+                "provider.models.query" => {
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"models":[{"providerId":"fixture","model":{"id":"A","name":"A"}},{"providerId":"fixture","model":{"id":"B","name":"B"}},{"providerId":"fixture","model":{"id":"C","name":"C"}}],"next":null}})).await;
+                }
+                "session.model.get" => {
+                    assert_eq!(branch, "line-1", "the line's configuration is its own");
+                    assert_eq!(through, 5, "read at the line's own cursor");
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":"line-1","through":5,"configuration":{"model":{"providerId":"fixture","modelId":"B"}}}})).await;
+                }
+                "session.model.update" => {
+                    assert_eq!(branch, "line-1", "the config write stays on the line");
+                    assert_eq!(request["params"]["providerId"], json!("fixture"));
+                    assert_eq!(request["params"]["modelId"], json!("C"));
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"model":{"providerId":"route-1","modelId":"C"},"outcome":"adopted"}})).await;
+                }
+                "session.turn.get" => {
+                    assert_eq!(branch, "line-1", "the turn read is the default line's");
+                    send(&mut write,json!({"jsonrpc":"2.0","id":id,"result":{"branchId":branch,"through":through,"turn":null,"output":null}})).await;
+                }
+                "session.detach" => {
+                    send(&mut write, json!({"jsonrpc":"2.0","id":id,"result":{}})).await;
+                    break;
+                }
+                other => panic!("unexpected {other}: {request}"),
+            }
+        }
+    });
+    let client = Client::connect(&ConnectionConfig {
+        endpoint,
+        server: Server {
+            program: "unused".into(),
+            embedded: false,
+        },
+        profile: Some(DaemonProfile::Product),
+        client_kind: "other",
+        client_name: "AcpGateway",
+        protocol_version: 3,
+    })
+    .await
+    .unwrap();
+    let (peer, transport) = tokio::io::duplex(64 * 1024);
+    let (reader, writer) = tokio::io::split(transport);
+    let (gateway, finished) = AcpGateway::new(
+        client,
+        Io {
+            reader: Box::new(reader),
+            writer: Box::new(writer),
+        },
+        None,
+        env!("CARGO_PKG_VERSION").to_owned(),
+    );
+    let root = rutis::Ctx::root().unwrap();
+    let mounted = root.plugin(gateway);
+    (&mounted).await.unwrap();
+    let (read, mut write) = tokio::io::split(peer);
+    let mut read = BufReader::new(read);
+    send(&mut write,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}})).await;
+    let initialize = reply(&mut read, 1).await;
+    assert!(initialize["error"].is_null(), "{initialize}");
+    send(&mut write,json!({"jsonrpc":"2.0","id":2,"method":"session/load","params":{"sessionId":"session","cwd":cwd,"mcpServers":[],"_meta":{"lody":{"sessionConfig":{"version":1,"modelId":"B","configOptionValues":{}}}}}})).await;
+    let loaded = reply(&mut read, 2).await;
+    assert!(loaded["error"].is_null(), "{loaded}");
+    assert_eq!(
+        option(&loaded, "model")["currentValue"],
+        json!("B"),
+        "the load shows the default line's model, not the attach reply's root model: {loaded}"
+    );
+    send(&mut write,json!({"jsonrpc":"2.0","id":3,"method":"session/set_config_option","params":{"sessionId":"session","configId":"model","value":"C"}})).await;
+    let configured = reply(&mut read, 3).await;
+    assert!(configured["error"].is_null(), "{configured}");
+    assert_eq!(
+        option(&configured, "model")["currentValue"],
+        json!("C"),
+        "the adopted model keeps the catalog provider its line chose: {configured}"
+    );
+    drop(read);
+    let _ = write.shutdown().await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), finished).await;
+    mounted.dispose().await.unwrap();
+    root.shutdown().await.unwrap();
+    server.await.unwrap();
+}
