@@ -155,8 +155,11 @@ ModelFailure {
   call is the exception: the known filter terminal is authoritative, so the
   reply writes `content_filtered` and the started call is closed as failed
   instead of being announced as a tool call. A stream that stops without that
-  terminal keeps `malformed_response`, settled at once rather than held open
-  for a part that may never arrive.
+  terminal keeps `malformed_response`: a chat-shaped adapter queues the
+  terminal in the same flush as the call, so the failure is settled at once,
+  and an adapter that learns the finish reason from a later event, such as the
+  Responses one, is read on until a short fixed deadline measured from the
+  failure.
 - A reply that stops with an end-turn finish and carries no non-whitespace text
   and no tool call writes `failure.kind = malformed_response` with the reason
   "the response had no text and no tool call". Thinking alone is not an answer,
