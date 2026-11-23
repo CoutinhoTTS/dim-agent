@@ -68,7 +68,7 @@ test('source areas select their groups',()=>{
   assert.deepEqual(classify(['scripts/stage-web.mjs']),only('scripts','web'));
   assert.deepEqual(classify(['scripts/check-acp-registry.mjs']),only('scripts'));
   assert.deepEqual(classify(['docker/Dockerfile']),only('scripts'));
-  assert.deepEqual(classify(['crates/dim-app-server/src/lib.rs','runtime/fixtures/session-part.json']),only('rust','node'));
+  assert.deepEqual(classify(['crates/dim-app-server/src/lib.rs','runtime/fixtures/session-part.json']),only('rust','node','windows_native'));
   assert.deepEqual(classify(['crates/dim-app-server/src/protocol.rs']),only('rust','node','web','scripts'));
   assert.deepEqual(classify(['crates/dim-app-server/src/storage/sqlite.rs']),only('rust','node','scripts','macos_scripts'));
   assert.deepEqual(classify(['crates/dim-app-server/resources/default-catalog.json']),only('rust','node','scripts'));
@@ -86,6 +86,7 @@ test('Windows-native flows follow their storage, host and named pipe paths',()=>
     'crates/dim-agent-capabilities/tests/capabilities_flow.rs',
     'crates/dim-agent-capabilities/tests/file_storage_flow.rs',
     'crates/dim-agent-capabilities/tests/host_platform_windows_flow.rs',
+    'crates/dim-app-server/src/lib.rs',
     'crates/dim-app-server/src/transport.rs',
     'crates/dim-app-server/src/pipe_client.rs',
     'crates/dim-app-server/src/cli.rs',
@@ -95,7 +96,6 @@ test('Windows-native flows follow their storage, host and named pipe paths',()=>
   ]) assert.equal(classify([file]).windows_native,true,file);
   for (const file of [
     'crates/dim-cli/src/main.rs',
-    'crates/dim-app-server/src/lib.rs',
     'crates/dim-app-server/tests/transport_flow.rs',
     'crates/dim-agent-capabilities/tests/host_platform_flow.rs',
     'crates/dim-agent-capabilities/src/workspace_tools/exec.rs',
