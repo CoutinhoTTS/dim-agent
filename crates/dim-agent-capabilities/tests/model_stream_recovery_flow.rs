@@ -658,6 +658,72 @@ async fn a_tool_start_shows_buffered_thinking_at_once() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn buffered_thinking_is_shown_within_one_interval_without_another_delta() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (chunks, receiver) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![receiver]));
+        let agent = MinimalHost::start(&builder(model, Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+        progress
+            .wait_for(|progress| progress.request_id.is_some())
+            .await
+            .unwrap();
+        snapshots(&mut progress);
+        send(
+            &chunks,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "alone".into(),
+                }),
+                Ok(ModelChunk::Thinking("alone".into())),
+                Ok(usage(1)),
+            ],
+        );
+        wait_for_usage(&session, 1).await;
+        let taken = snapshots(&mut progress);
+        assert!(
+            taken.is_empty(),
+            "nothing is shown before the interval elapses: {taken:?}"
+        );
+        let shown = progress
+            .wait_for(|progress| progress.thinking == "alone")
+            .await
+            .unwrap()
+            .clone();
+        assert_eq!(shown.thinking, "alone");
+
+        send(
+            &chunks,
+            vec![
+                Ok(ModelChunk::ThinkingEnd {
+                    thinking: "alone".into(),
+                }),
+                Ok(ModelChunk::TextEnd),
+                Ok(ModelChunk::MessageStop {
+                    message_id: "alone".into(),
+                    reason: ModelStopReason::EndTurn,
+                }),
+            ],
+        );
+        drop(chunks);
+        session.idle("main").await.unwrap();
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test(start_paused = true)]
 async fn a_thinking_block_end_shows_the_buffer_at_once() {
     tokio::time::timeout(Duration::from_secs(10), async {
         let (chunks, receiver) = mpsc::unbounded_channel();
