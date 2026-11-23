@@ -38,7 +38,7 @@ const rules=[
   [/^crates\/dim-app-server\/src\/protocol\.rs$/,['rust','node','web','scripts']],
   [/^crates\/dim-app-server\/src\/storage\/sqlite\.rs$/,['rust','node','scripts','macos_scripts']],
   [/^crates\/dim-app-server\/resources\//,['rust','node','scripts']],
-  [/^crates\/dim-agent-capabilities\/src\/(background_exec|workspace_tools\/exec|host_platform)/,['rust','node','execution']],
+  [/^crates\/dim-agent-capabilities\/src\/(workspace_tools\/(background|exec)|host_platform)/,['rust','node','execution']],
   [/^tests\/integration\/tests\/(local_execution|local_support|minimal_execution)/,['rust','node','execution']],
   [/^vendor\/grok-build\//,['rust','windows','node']],
   [/^xtask\/check\//,['static','xtask']],
