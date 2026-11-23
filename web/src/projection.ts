@@ -83,6 +83,8 @@ export class Projection {
   private showedOutput = new Set<string>()
   /** Requests whose only visible output so far is progress thinking. */
   private showedThinking = new Set<string>()
+  /** Thinking blocks a replaced attempt left, whose late notices must not reopen them. */
+  private discardedThoughts = new Map<string, Set<string>>()
   /** Names each thought row; a rebuilt row gets a new one. */
   private rowSeq = 0
   /** The error of the model failure the latest turn end may repeat. */
@@ -204,10 +206,12 @@ export class Projection {
       case "model-start":
         break
       case "thinking": {
+        if (this.replacedThought(content.requestId, event.id)) this.discardThinking(content.requestId)
         this.showedOutput.add(content.requestId)
         this.showedThinking.delete(content.requestId)
         if (!this.thoughts.has(content.requestId)) this.thoughtStarts.set(content.requestId, event.createAt)
         const thought = this.openThinking(content.requestId)
+        if (thought.written === "" && event.id !== "") thought.partId = event.id
         commit(thought, content.delta)
         this.update(thought.index, { text: shown(thought) })
         break
@@ -215,7 +219,8 @@ export class Projection {
       case "text": {
         this.showedOutput.add(content.requestId)
         this.showedThinking.delete(content.requestId)
-        this.closeThinking(content.requestId, event.createAt)
+        if (this.emptyThought(content.requestId)) this.discardThinking(content.requestId)
+        else this.closeThinking(content.requestId, event.createAt)
         const answer = this.openAnswer(content.requestId)
         commit(answer, content.delta)
         this.update(answer.index, { text: shown(answer) })
@@ -224,12 +229,18 @@ export class Projection {
       case "tool-use":
         this.showedOutput.add(content.requestId)
         this.showedThinking.delete(content.requestId)
-        this.closeThinking(content.requestId, event.createAt)
+        if (this.emptyThought(content.requestId)) this.discardThinking(content.requestId)
+        else this.closeThinking(content.requestId, event.createAt)
         this.closeAnswer(content.requestId)
         this.tools.set(content.callId, this.push({ kind: "tool", key: `tool-${content.callId}`, callId: content.callId, name: content.name, input: content.input, pending: true }))
         break
       case "tool-use-start":
-        this.closeThinking(content.requestId, event.createAt)
+        if (this.emptyThought(content.requestId)) {
+          this.discardThinking(content.requestId)
+          if (this.showedThinking.delete(content.requestId)) this.showedOutput.delete(content.requestId)
+        } else {
+          this.closeThinking(content.requestId, event.createAt)
+        }
         break
       case "tool-call":
         break
@@ -244,6 +255,7 @@ export class Projection {
         this.showedThinking.delete(content.requestId)
         this.closeThinking(content.requestId, event.createAt)
         this.closeAnswer(content.requestId)
+        this.discardedThoughts.delete(content.requestId)
         if (content.error !== undefined) {
           const failure = content.failure
           const text = content.presentation !== undefined
@@ -260,6 +272,7 @@ export class Projection {
         this.settleRows()
         for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId, event.createAt)
         for (const requestId of [...this.answers.keys()]) this.closeAnswer(requestId)
+        this.discardedThoughts.clear()
         // The marker belongs to this turn only, whatever the outcome.
         const shown = this.shownFailure
         this.shownFailure = undefined
@@ -283,12 +296,13 @@ export class Projection {
   progress(progress: ModelProgress): void {
     const requestId = progress.requestId
     if (requestId === undefined) return
+    const reclaimed = progress.thinkingPartId !== undefined && this.discardedThoughts.get(requestId)?.has(progress.thinkingPartId) === true
     const thought = this.thoughts.get(requestId)
-    if (thought !== undefined && thought.written === "" && this.replacedAttempt(progress, thought)) {
+    if (!reclaimed && thought !== undefined && thought.written === "" && this.replacedAttempt(progress, thought)) {
       this.discardThinking(requestId)
       if (this.showedThinking.delete(requestId)) this.showedOutput.delete(requestId)
     }
-    if (progress.thinking !== "") {
+    if (progress.thinking !== "" && !reclaimed) {
       this.showedOutput.add(requestId)
       this.showedThinking.add(requestId)
       const thought = this.openThinking(requestId)
@@ -312,10 +326,31 @@ export class Projection {
     return progress.thinking !== "" && progress.thinkingPartId !== undefined && progress.thinkingPartId !== thought.partId
   }
 
+  /** Whether a thought row is still only what progress showed. */
+  private emptyThought(requestId: string): boolean {
+    return this.thoughts.get(requestId)?.written === ""
+  }
+
+  /** Whether a durable thought belongs to an attempt other than the open row's progress. */
+  private replacedThought(requestId: string, eventId: string): boolean {
+    const thought = this.thoughts.get(requestId)
+    return thought !== undefined
+      && thought.written === ""
+      && thought.partId !== undefined
+      && thought.partId !== ""
+      && eventId !== ""
+      && thought.partId !== eventId
+  }
+
   /** Drops a thought opened only by an uncommitted attempt's progress. */
   private discardThinking(requestId: string): void {
     const thought = this.thoughts.get(requestId)
     if (thought === undefined) return
+    if (thought.partId !== undefined && thought.partId !== "") {
+      const parts = this.discardedThoughts.get(requestId) ?? new Set<string>()
+      parts.add(thought.partId)
+      this.discardedThoughts.set(requestId, parts)
+    }
     this.thoughts.delete(requestId)
     this.thoughtStarts.delete(requestId)
     this.removeRow(thought.index)
