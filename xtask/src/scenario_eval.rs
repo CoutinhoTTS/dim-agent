@@ -8998,6 +8998,125 @@ mod tests {
         assert_eq!(default, "3", "the last move holds the default branch");
     }
 
+    /// A move's acknowledgment does not send its follow-up: the line answers
+    /// the input only after it wrote the note, so an idle line cannot answer a
+    /// follow-up before its note lands (Timeline branches §12.4).
+    #[tokio::test]
+    async fn a_follow_up_waits_for_the_note_after_the_moves_acknowledgment() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        pending.notice("2", &turn_start);
+        let mut switches: VecDeque<PendingSwitch> = [pending].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder {
+            inputs: ["i1".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        assert!(
+            matches!(
+                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                Ok(SwitchFire::NotFired)
+            ),
+            "the move's answer alone sends nothing"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default"],
+            "the follow-up waits for the note the move wrote"
+        );
+        let pending = switches.front_mut().expect("the move waits for its note");
+        pending.notice("2", &move_note("2", true, "main"));
+        assert!(
+            matches!(
+                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the note releases the follow-up"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default", "session.submit"],
+            "the move runs before its input"
+        );
+        assert_eq!(default, "2", "the move holds the new default");
+    }
+
+    /// A chained move waits for the input the move before it sent: the first
+    /// move's target answers with its note in effect before the next move can
+    /// retire it (Timeline branches §12.4).
+    #[tokio::test]
+    async fn a_chained_move_waits_for_the_input_before_it() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let first = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        let second = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("3".into()),
+                message: "to the user line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            true,
+        );
+        let mut switches: VecDeque<PendingSwitch> = [first, second].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder {
+            inputs: ["i1".to_owned(), "i2".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        switches
+            .front_mut()
+            .expect("the first move is pending")
+            .notice("2", &turn_start);
+        assert!(
+            matches!(
+                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the first move fires"
+        );
+        assert!(
+            matches!(
+                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                Ok(SwitchFire::NotFired)
+            ),
+            "the chained move waits for the input before it"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default", "session.submit"],
+            "the second move sends nothing before the first input is consumed"
+        );
+        let pending = switches.front_mut().expect("the second move is pending");
+        pending.notice("2", &consumed("i1"));
+        assert!(
+            matches!(
+                fire_switch(&mut client, "session", &mut switches, &mut default, None).await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the consumed input releases the chained move"
+        );
+        assert_eq!(default, "3", "the chained move holds the new default");
+    }
+
     /// A switch that has started its target stays with it: a tool line opened
     /// afterwards has its own purpose, so the retry of a move promotes the
     /// line that started rather than the newer line (model-prompts §9.8).
@@ -9083,6 +9202,17 @@ mod tests {
     struct SwitchRecorder {
         calls: Vec<(String, Value)>,
         refusals: Vec<dim_client::RpcError>,
+        /// The input ids its `session.submit` answers carry, in order; a call
+        /// past the list answers an empty result.
+        inputs: VecDeque<String>,
+    }
+    impl SwitchRecorder {
+        fn methods(&self) -> Vec<&str> {
+            self.calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect()
+        }
     }
     impl SwitchClient for SwitchRecorder {
         async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
@@ -9090,8 +9220,35 @@ mod tests {
             if method == "session.branch_set_default" && !self.refusals.is_empty() {
                 return Err(self.refusals.remove(0).into());
             }
+            if method == "session.submit"
+                && let Some(input) = self.inputs.pop_front()
+            {
+                return Ok(json!({"event": {"id": input}}));
+            }
             Ok(json!({}))
         }
+    }
+
+    /// The `branch:line` message a move writes on `line`: the role it gives
+    /// the line and the participant it names (design §12.1).
+    fn move_note(line: &str, default: bool, other: &str) -> Value {
+        let marker = if default {
+            format!("This line is now the session's default branch, switched from line {other}.")
+        } else {
+            format!("The session's default branch moved from this line to line {other}.")
+        };
+        let text = format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"{}\">\n{marker}\n</dim-branch-line>",
+            if default { "true" } else { "false" }
+        );
+        json!({"type": "input", "name": "message", "id": format!("note-{line}"), "sequence": 1,
+               "data": {"blocks": [{"type": "raw", "key": "branch:line", "text": text}]}})
+    }
+
+    /// The `input/consumed` notice of `input` on a line.
+    fn consumed(input: &str) -> Value {
+        json!({"type": "input", "name": "consumed", "id": format!("consumed-{input}"),
+               "sequence": 2, "data": {"input_id": input}})
     }
 
     /// A move whose target has started its first turn, ready to move.
