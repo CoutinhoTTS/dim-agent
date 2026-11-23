@@ -77,6 +77,23 @@ test("a thought opened only by progress settles from its producer start", () => 
   assert.equal(projection.rows[0].elapsedMs, 3)
 })
 
+test("a coalesced clear rebuilds the replaced attempt's thought row", () => {
+  const projection = new Projection()
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1_000 })
+  const first = projection.rows[0]
+  assert.equal(first.kind, "thinking")
+  // The clear frame was coalesced away; the next notice is the new attempt's.
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "second", text: "", textOffset: 0, thinking: "a longer successful thought", thinkingOffset: 0, thinkingStartedAt: 1_002 })
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.notEqual(thoughts[0].key, first.key, "the rebuilt thought row has a new identity")
+  assert.equal(thoughts[0].text, "a longer successful thought")
+
+  projection.apply(event(5, { kind: "text", requestId: "r1", delta: "Done." }))
+  const thought = projection.rows.find((row) => row.kind === "thinking")
+  assert.equal(thought.elapsedMs, 3, "the span starts at the new attempt")
+})
+
 test("a tool start settles a thought before its arguments arrive", () => {
   const projection = new Projection()
   projection.apply(event(2, { kind: "thinking", requestId: "r1", delta: "weigh" }))
