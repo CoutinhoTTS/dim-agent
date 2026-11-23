@@ -5,7 +5,6 @@ use dim_agent_types::{BranchCreateAt, BranchCreateData, BranchSource};
 use dim_agent_types::{EventKind, ExtensionEvent, InputConsumedData, InputMode};
 use serde_json::json;
 use std::time::Duration;
-use support::NEGATIVE;
 use support::parts::*;
 use support::texts;
 use tokio_util::sync::CancellationToken;
@@ -132,38 +131,6 @@ async fn graceful_unload_saves_one_pause_and_reload_preserves_it() {
     assert_eq!(saved[1]["operation"], "pause");
     let env = env.restore().await;
     assert_eq!(states(&env).await.len(), 2);
-    env.close().await;
-}
-
-/// A `clear` that commits before the branch closes wins the closing pause: the
-/// pause record reads the latest committed cutoff, so it cannot revive the
-/// objective the clear removed (Pursuit §5).
-#[tokio::test]
-async fn a_clear_committed_behind_the_fold_wins_the_closing_pause() {
-    let env = Env::start_gated().await;
-    env.set("ship it").await;
-    let mut closing = dim_goal::testing::hold_stage(
-        env.session_id(),
-        "main",
-        dim_goal::testing::Stage::Closing,
-        0,
-        None,
-    );
-    let (committed, release) = env.gated().hold_state(None);
-    env.goal("clear", json!({})).await.expect("clear writes");
-    committed
-        .await
-        .expect("the clear's state record is committed");
-    let closing_session = tokio::spawn(env.session.close());
-    let _ = tokio::time::timeout(NEGATIVE, closing.arrived()).await;
-    closing.release();
-    release.send(()).unwrap();
-    closing_session.await.unwrap().expect("the Session closes");
-    let env = env.restore().await;
-    assert!(
-        env.goal("get", json!({})).await.unwrap()["goal"].is_null(),
-        "the cleared goal stays cleared after the unload"
-    );
     env.close().await;
 }
 

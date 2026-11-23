@@ -11,7 +11,6 @@ use dim_agent_types::{
     InputConsumedData, InputMode, ToolResult, TurnStartData,
 };
 use serde_json::json;
-use support::NEGATIVE;
 use support::parts::*;
 use support::texts;
 
@@ -123,16 +122,6 @@ async fn wait_evaluated(env: &Env, branch: &str, evaluation: u64) -> Block {
     })
     .await
     .expect("an evaluated continuation")
-}
-
-/// Waits until `main` records the end of `evaluator`.
-async fn wait_ended(env: &Env, evaluator: &str) {
-    support::wait_event(
-        &env.session,
-        "main",
-        |kind| matches!(kind, EventKind::BranchEnded(data) if data.branch == evaluator),
-    )
-    .await;
 }
 
 /// The pending inputs of `branch`, as string slices for a turn.
@@ -892,7 +881,19 @@ async fn pursuit_2_a_continue_conclusion_reads_the_latest_committed_cutoff() {
     );
     cutoff_gate.release();
 
-    let stale = tokio::time::timeout(NEGATIVE, wait_evaluated(&env, "main", evaluation)).await;
+    let stale = tokio::time::timeout(Duration::from_millis(750), async {
+        loop {
+            let writes = writes_with(&env, "main", &format!(r#"evaluation="{evaluation}""#)).await;
+            if let Some(block) = writes
+                .iter()
+                .find(|block| block.marker.contains(r#"kind="continuation""#))
+            {
+                return block.marker.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
     assert!(
         stale.is_err(),
         "the continue conclusion writes no continuation while a committed Queue is not folded: {stale:?}"
@@ -914,217 +915,6 @@ async fn pursuit_2_a_continue_conclusion_reads_the_latest_committed_cutoff() {
         env.pending_inputs("main").await.contains(&queued.id),
         "the Queue drives the next turn instead of the evaluated continuation"
     );
-    env.close().await;
-}
-
-/// The `continue` conclusion's `Pause` decides again after its last wait: a
-/// Queue that commits once the record's settle returned folds before the
-/// write, so the pause is not written and the Queue drives the next turn
-/// (Pursuit §4.1, §5).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pursuit_2_a_queue_folded_during_the_pause_write_holds_the_pause() {
-    let env = Env::start().await;
-    env.set_limit(1);
-    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
-    let through = env.timeline("main").committed() + 1;
-    let mut settle_gate = dim_goal::testing::hold_stage(
-        env.session_id(),
-        "main",
-        dim_goal::testing::Stage::Settle,
-        through,
-        None,
-    );
-    let conclusion = write_conclusion(
-        &env,
-        &create.branch,
-        evaluation,
-        "continue",
-        "CONTINUE:\n- still missing",
-    );
-    let after = tokio::time::timeout(support::WAIT, settle_gate.arrived())
-        .await
-        .expect("the pause record reached its last wait in time");
-    assert_eq!(
-        after, conclusion,
-        "the pause record names the conclusion input at {conclusion}"
-    );
-
-    let queued = env.write_message(
-        "main",
-        vec![raw("keep going", None, false)],
-        InputMode::Queue,
-    );
-    assert!(
-        queued.sequence > conclusion,
-        "the queued input at {} commits after the conclusion at {conclusion}",
-        queued.sequence
-    );
-    settle_gate.release();
-
-    let paused = tokio::time::timeout(NEGATIVE, env.wait_for("main", r#"reason="limit""#)).await;
-    assert!(
-        paused.is_err(),
-        "the continue conclusion writes no pause while the Queue folds during its write: {paused:?}"
-    );
-    let writes = env.settled("main").await;
-    assert!(
-        !writes
-            .iter()
-            .any(|block| block.marker.contains(r#"reason="limit""#)),
-        "no pause is stated after the Queue folds: {writes:#?}"
-    );
-    assert!(
-        env.pending_inputs("main").await.contains(&queued.id),
-        "the Queue drives the next turn instead of the pause"
-    );
-    env.close().await;
-}
-
-/// A turn end whose `Pause` is superseded by a Queue keeps the evaluator that
-/// has not concluded: the writer ends evaluator lines only after the pause it
-/// decided is committed, so a Queue that folds at its last wait leaves the
-/// goal running with its evaluator (Pursuit §4.1, §13 E2).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pursuit_2_a_superseded_turn_end_pause_keeps_the_live_evaluator() {
-    let env = Env::start().await;
-    env.set_limit(1);
-    let (_, create) = completion_requested_with(&env, Some(1)).await;
-    let evaluator = create.branch.clone();
-    let through = env.timeline("main").committed() + 1;
-    let mut settle_gate = dim_goal::testing::hold_stage(
-        env.session_id(),
-        "main",
-        dim_goal::testing::Stage::Settle,
-        through,
-        None,
-    );
-    env.turn_start("main", "next");
-    let end = env.end_turn("main", "next", "completed");
-    let after = tokio::time::timeout(support::WAIT, settle_gate.arrived())
-        .await
-        .expect("the pause record reached its last wait in time");
-    assert_eq!(
-        after, end.sequence,
-        "the pause record names the turn end at {}",
-        end.sequence
-    );
-    assert!(
-        !env.ended("main")
-            .await
-            .iter()
-            .any(|ended| ended.branch == evaluator),
-        "the writer ends no evaluator before its pause is committed"
-    );
-
-    let queued = env.write_message(
-        "main",
-        vec![raw("keep going", None, false)],
-        InputMode::Queue,
-    );
-    assert!(
-        queued.sequence > end.sequence,
-        "the queued input at {} commits after the turn end at {}",
-        queued.sequence,
-        end.sequence
-    );
-    settle_gate.release();
-
-    let paused = tokio::time::timeout(NEGATIVE, env.wait_for("main", r#"reason="limit""#)).await;
-    assert!(
-        paused.is_err(),
-        "the turn end writes no pause while the Queue folds during its write: {paused:?}"
-    );
-    assert!(
-        !env.ended("main")
-            .await
-            .iter()
-            .any(|ended| ended.branch == evaluator),
-        "the goal keeps running with its live evaluator"
-    );
-    assert!(
-        env.pending_inputs("main").await.contains(&queued.id),
-        "the Queue drives the next turn"
-    );
-    env.close().await;
-}
-
-/// The `continue` conclusion's `Pause` is decided before its writer takes any
-/// side effect: a Queue that folds at its last wait leaves the evaluation's
-/// evaluator and the Queue's turn intact (Pursuit §4.1, §5).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pursuit_2_a_superseded_conclusion_pause_keeps_the_live_evaluator() {
-    let env = Env::start().await;
-    env.set_limit(1);
-    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
-    let evaluator = create.branch.clone();
-    let through = env.timeline("main").committed() + 1;
-    let mut settle_gate = dim_goal::testing::hold_stage(
-        env.session_id(),
-        "main",
-        dim_goal::testing::Stage::Settle,
-        through,
-        None,
-    );
-    // The conclusion ends its evaluator through the settle task; hold that end
-    // so this case reads the writer's own effects, not the settle's.
-    let end_gate = dim_goal::testing::hold_stage(
-        env.session_id(),
-        "main",
-        dim_goal::testing::Stage::End,
-        evaluation,
-        Some(evaluation),
-    );
-    let conclusion = write_conclusion(
-        &env,
-        &evaluator,
-        evaluation,
-        "continue",
-        "CONTINUE:\n- still missing",
-    );
-    let after = tokio::time::timeout(support::WAIT, settle_gate.arrived())
-        .await
-        .expect("the pause record reached its last wait in time");
-    assert_eq!(
-        after, conclusion,
-        "the pause record names the conclusion input at {conclusion}"
-    );
-    assert!(
-        !env.ended("main")
-            .await
-            .iter()
-            .any(|ended| ended.branch == evaluator),
-        "the writer ends no evaluator before its pause is committed"
-    );
-
-    let queued = env.write_message(
-        "main",
-        vec![raw("keep going", None, false)],
-        InputMode::Queue,
-    );
-    assert!(
-        queued.sequence > conclusion,
-        "the queued input at {} commits after the conclusion at {conclusion}",
-        queued.sequence
-    );
-    settle_gate.release();
-
-    let paused = tokio::time::timeout(NEGATIVE, env.wait_for("main", r#"reason="limit""#)).await;
-    assert!(
-        paused.is_err(),
-        "the continue conclusion writes no pause while the Queue folds during its write: {paused:?}"
-    );
-    let writes = env.settled("main").await;
-    assert!(
-        !writes
-            .iter()
-            .any(|block| block.marker.contains(r#"reason="limit""#)),
-        "no pause is stated after the Queue folds: {writes:#?}"
-    );
-    assert!(
-        env.pending_inputs("main").await.contains(&queued.id),
-        "the Queue drives the next turn instead of the pause"
-    );
-    end_gate.release();
     env.close().await;
 }
 
@@ -1515,146 +1305,4 @@ async fn pursuit_5_a_failed_or_cancelled_evaluator_turn_reports_failed() {
         );
         env.close().await;
     }
-}
-
-/// A committed turn-end `Pause` ends the evaluator it replaces only after the
-/// fold consumed the record, and the ended line states no failure (Pursuit
-/// §4.1, §13 E2).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pursuit_2_a_committed_pause_ends_the_live_evaluator_once() {
-    let env = Env::start().await;
-    env.set_limit(1);
-    let (_, create) = completion_requested_with(&env, Some(1)).await;
-    let evaluator = create.branch.clone();
-    let mut fold_gate = dim_goal::testing::hold_input(env.session_id(), "main", 0);
-    env.turn_start("main", "next");
-    env.end_turn("main", "next", "completed");
-    let pause = env.wait_for("main", r#"reason="limit""#).await;
-    let held = tokio::time::timeout(support::WAIT, fold_gate.arrived())
-        .await
-        .expect("the pause reaches the fold in time");
-    assert_eq!(held, pause.sequence, "the held input is the pause record");
-    let ended = tokio::time::timeout(NEGATIVE, wait_ended(&env, &evaluator)).await;
-    assert!(
-        ended.is_err(),
-        "the writer ends the evaluator only after the fold consumed its pause"
-    );
-    fold_gate.release();
-    wait_ended(&env, &evaluator).await;
-    let ended = env.ended("main").await;
-    assert_eq!(
-        ended
-            .iter()
-            .filter(|ended| ended.branch == evaluator)
-            .count(),
-        1,
-        "the evaluator ends once"
-    );
-    let writes = env.settled("main").await;
-    assert_eq!(
-        writes
-            .iter()
-            .filter(|block| block.marker.contains(r#"reason="limit""#))
-            .count(),
-        1,
-        "the pause is stated once: {writes:#?}"
-    );
-    assert!(
-        !writes
-            .iter()
-            .any(|block| block.marker.contains(r#"reason="evaluation_failed""#)),
-        "the ended evaluator states no failure: {writes:#?}"
-    );
-    env.close().await;
-}
-
-/// A pause written while a turn end's evaluator creation is claimed leaves no
-/// evaluator running: the committed record stops the decisions the creation
-/// belongs to before it reaches `tree.create` (Pursuit §4.1, §13 E2).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pursuit_2_a_pause_at_creation_leaves_no_live_evaluator() {
-    let env = Env::start().await;
-    env.set_limit(20);
-    let (_, first) = completion_requested_with(&env, Some(20)).await;
-    let evaluator = first.branch.clone();
-    let mut create_gate = dim_goal::testing::hold_stage(
-        env.session_id(),
-        "main",
-        dim_goal::testing::Stage::Create,
-        0,
-        None,
-    );
-    env.turn_start("main", "next");
-    env.tool(
-        "main",
-        json!({"status": "completed", "summary": "all tests pass"}),
-    )
-    .await;
-    let end = env.end_turn("main", "next", "completed");
-    let held = tokio::time::timeout(support::WAIT, create_gate.arrived())
-        .await
-        .expect("the turn end reaches its evaluator creation in time");
-    assert_eq!(held, end.sequence, "the held creation is this turn end's");
-    env.interrupt("main");
-    env.wait_for("main", r#"reason="interrupted""#).await;
-    // The pause's commit ends the evaluator it replaces; the writer reaches it
-    // only after the decisions it stops were stopped and awaited.
-    wait_ended(&env, &evaluator).await;
-    create_gate.release();
-    let expected = BranchSource::Host {
-        operation_id: format!("goal:evaluate:{}", end.sequence),
-    };
-    let created = tokio::time::timeout(
-        NEGATIVE,
-        support::wait_event(
-            &env.session,
-            "main",
-            |kind| matches!(kind, EventKind::BranchCreate(data) if data.source == expected),
-        ),
-    )
-    .await;
-    assert!(
-        created.is_err(),
-        "a pause written while the evaluation is claimed leaves no live evaluator"
-    );
-    env.close().await;
-}
-
-/// A pause committed before an evaluation's `branch/create` folds still ends
-/// that evaluator: the settle treats the evaluation as due once the goal it
-/// belongs to is not running (Pursuit §13 E2).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn pursuit_2_a_settle_ends_an_evaluator_created_behind_the_pause() {
-    let env = Env::start().await;
-    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
-        .await
-        .expect("set writes");
-    env.wait_for("main", r#"op="set""#).await;
-    env.interrupt("main");
-    let pause = env.wait_for("main", r#"reason="interrupted""#).await;
-    let evaluation = pause.sequence;
-    let mut end_gate = dim_goal::testing::hold_stage(
-        env.session_id(),
-        "main",
-        dim_goal::testing::Stage::End,
-        evaluation,
-        None,
-    );
-    let evaluator = env
-        .open_branch(
-            "main",
-            "evaluate",
-            BranchSource::Host {
-                operation_id: format!("goal:evaluate:{evaluation}"),
-            },
-        )
-        .await;
-    let held = tokio::time::timeout(support::WAIT, end_gate.arrived()).await;
-    assert!(
-        held.is_ok(),
-        "a pause behind the evaluation's creation still ends that evaluator"
-    );
-    end_gate.release();
-    wait_ended(&env, &evaluator).await;
-    env.close().await;
 }

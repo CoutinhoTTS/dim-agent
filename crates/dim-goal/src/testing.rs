@@ -99,16 +99,8 @@ pub enum Stage {
     Cutoff,
     /// After the evaluation decision and before `treeCommands.create`.
     Create,
-    /// After a record took its write guard, before its final decision and
-    /// write: nothing of the record has happened yet.
-    Settle,
-    /// Before a settle task ends the evaluator of `evaluation`, after it
-    /// decided the end is due.
-    End,
     /// After `do_turn_end` took every decision it carries.
     Done,
-    /// At the start of the closing pause, before it reads the fold.
-    Closing,
 }
 
 type StageHold = (
@@ -179,11 +171,6 @@ pub fn hold_stage(
         arrived: wait,
         release,
     }
-}
-
-/// Holds the closing pause of `branch_id` before it reads the fold.
-pub(crate) async fn closing_held(session_id: &str, branch_id: &str) {
-    stage_held(session_id, branch_id, Stage::Closing, 0).await;
 }
 
 pub(crate) async fn stage_held(session_id: &str, branch_id: &str, stage: Stage, after: u64) {
