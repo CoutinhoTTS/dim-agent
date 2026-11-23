@@ -590,6 +590,7 @@ impl Worker {
             history.window.push(page).map_err(|error| error.to_string())
         });
         let window_ready = matches!(result, Ok(true));
+        let mut missing_prefix = false;
         match result {
             Err(error) => {
                 history.error = Some(error.clone());
@@ -609,7 +610,7 @@ impl Worker {
             Ok(false) => self.task_history_queue.push_back(request.branch_id.clone()),
             Ok(true) => {
                 let events = history.window.take();
-                let missing_prefix = history.window.before.is_some();
+                missing_prefix = history.window.before.is_some();
                 history.window_complete = true;
                 if history.earlier == EarlierRead::Reading {
                     history.earlier = EarlierRead::None;
@@ -628,16 +629,16 @@ impl Worker {
                     }
                     self.task_history_queue.push_back(request.branch_id.clone());
                 }
-                if missing_prefix {
-                    self.send(Update::Notice(
-                        "Earlier content not loaded; /earlier to read it".into(),
-                    ));
-                }
             }
         }
         self.changed();
         if window_ready {
             self.publish();
+        }
+        if missing_prefix {
+            self.send(Update::Notice(
+                "Earlier content not loaded; /earlier to read it".into(),
+            ));
         }
         Ok(())
     }
