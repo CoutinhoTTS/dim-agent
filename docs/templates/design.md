@@ -26,7 +26,7 @@ Run results belong in the issue or PR.
 
 ## Rule check
 
-Answer [design rules §4](../architecture/rust-agent/principles.md), §1 and
+Answer [design rules §4](../architecture/rust-agent/principles.md), §1, the §7.2 owner checks and
 [ADR 002](../adr/002-plugin-scope.md) D1–D5 as required by AGENTS.md; explain inapplicable rules.
 
 ## Requirements raised to mechanism owners
