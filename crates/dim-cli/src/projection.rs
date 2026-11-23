@@ -2905,6 +2905,23 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_counts_the_history_a_window_holds_without_the_branch_start() {
+        let mut main = Projection::default();
+        apply(
+            &mut main,
+            &[user_says(2, "try the parser"), line_created(3, "b-7c", 2)],
+        );
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 2,
+                messages: 1,
+            }),
+            "a transcript page leaves the branch start out, and still counts"
+        );
+    }
+
+    #[test]
     fn a_cut_without_the_start_of_the_parent_history_shows_no_count() {
         let mut main = Projection::default();
         apply(

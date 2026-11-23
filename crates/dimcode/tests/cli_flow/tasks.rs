@@ -148,6 +148,138 @@ fn opening_a_discovered_line_loads_its_transcript_through_the_task_history_queue
 }
 
 #[test]
+fn tui_lines_count_a_cut_read_from_a_transcript_window() {
+    for at_start in [true, false] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.methods",
+                "session.history.display",
+                "session.history.detail",
+                "session.history.display.tail",
+                "session.history.display.transcript",
+            ]);
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let methods = wire.read("session.methods");
+            wire.reply(&methods, json!({"methods":[
+                {"name":"session.input.pending","mutating":false},
+                {"name":"session.exec.pending","mutating":false},
+                {"name":"session.turn.get","mutating":false}
+            ]}));
+            let said = |sequence: u64, text: &str| {
+                fact(
+                    &format!("in-{sequence}"),
+                    sequence,
+                    sequence * 1000,
+                    "input",
+                    "message",
+                    json!({"user":{"content":[{"type":"text","text":text}]},"mode":"append"}),
+                )
+            };
+            let cut = || {
+                fact(
+                    "create-4",
+                    4,
+                    4000,
+                    "branch",
+                    "create",
+                    json!({
+                        "branch":"b-7c",
+                        "at":{"kind":"sequence","sequence":3},
+                        "source":{"kind":"tool","turn_id":"turn","request_id":"request","call_id":"call"},
+                        "prompt":"parser race",
+                    }),
+                )
+            };
+            let history = loop {
+                let request = wire.read_any();
+                match request["method"].as_str().unwrap() {
+                    "account.providers" => wire.reply(&request, json!([])),
+                    "session.context.usage" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    "session.history.display" => break request,
+                    method => assert!(
+                        wire.empty_state(&request),
+                        "unexpected startup read {method}: {request}"
+                    ),
+                }
+            };
+            assert_eq!(history["params"]["transcript"], true);
+            assert_eq!(history["params"]["limit"], 32);
+            let items = if at_start {
+                vec![said(2, "find the leak"), said(3, "try the parser"), cut()]
+            } else {
+                vec![said(3, "try the parser"), cut()]
+            };
+            wire.reply(
+                &history,
+                json!({
+                    "items": items,
+                    "through": 8,
+                    "nextAfter": 8,
+                    "nextBefore": if at_start { 2 } else { 3 },
+                    "done": at_start,
+                }),
+            );
+            let mut earlier = 0;
+            loop {
+                let request = wire.read_any();
+                match request["method"].as_str().unwrap() {
+                    "account.providers" => wire.reply(&request, json!([])),
+                    "session.context.usage" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{"code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
+                    "session.history.display" => {
+                        earlier += 1;
+                        let page = if !at_start && earlier == 1 {
+                            assert_eq!(request["params"]["before"], 3);
+                            json!({
+                                "items": [said(2, "find the leak")],
+                                "through": 8,
+                                "nextAfter": 8,
+                                "nextBefore": 2,
+                                "done": true,
+                            })
+                        } else {
+                            json!({
+                                "items": [],
+                                "through": 8,
+                                "nextAfter": 8,
+                                "nextBefore": null,
+                                "done": true,
+                            })
+                        };
+                        wire.reply(&request, page);
+                    }
+                    method => assert!(
+                        wire.empty_state(&request),
+                        "unexpected read {method}: {request}"
+                    ),
+                }
+            }
+        });
+        let mut terminal = Terminal::resume_tui(home.command());
+        terminal.until("test / model");
+        terminal.write(b"/lines\r");
+        terminal.until("parser race");
+        if at_start {
+            terminal.until("after message 2");
+        } else {
+            assert!(
+                !terminal.transcript.contains("after message"),
+                "the window stops before the branch start: {}",
+                terminal.transcript
+            );
+            terminal.write(b"\r");
+            terminal.write(b"/earlier\r");
+            terminal.write(b"/lines\r");
+            terminal.until("after message 2");
+        }
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
+
+#[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn native_tui_stop_all_settles_the_member_and_reports_cancellation_to_the_leader() {
     fn rpc(stream: &mut BufReader<UnixStream>, method: &str, params: Value) -> Value {

@@ -852,6 +852,44 @@ mod tests {
         serde_json::from_value(text(sequence, request, delta)).expect("a text event")
     }
 
+    /// One user message, as the daemon sends it on the wire and in a page.
+    fn said(sequence: u64, message: &str) -> serde_json::Value {
+        json!({
+            "id": format!("in-{sequence}"), "sequence": sequence, "create_at": 2000,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [{"type": "text", "text": message}]}}
+        })
+    }
+
+    /// The creation of `branch` in `parent`'s history, cut after `at`.
+    fn line_created(sequence: u64, branch: &str, at: u64) -> serde_json::Value {
+        json!({
+            "id": format!("create-{branch}"), "sequence": sequence, "create_at": 2000,
+            "type": "branch", "name": "create",
+            "data": {
+                "branch": branch, "at": {"kind": "sequence", "sequence": at},
+                "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                "prompt": branch,
+            }
+        })
+    }
+
+    /// The same `input` or `branch` event, decoded as the live stream decodes it.
+    fn tell(event: serde_json::Value) -> Event {
+        serde_json::from_value(event).expect("a Session event")
+    }
+
+    /// The line `id` of the Session's line list.
+    fn listed(worker: &Worker, id: &str) -> crate::model::view::LineView {
+        worker
+            .projection
+            .line_views()
+            .iter()
+            .find(|line| line.id == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("line {id} is listed"))
+    }
+
     /// Answers the outstanding history read with the daemon's failure.
     async fn fail(worker: &mut Worker, what: &str) {
         let id = worker
@@ -1133,6 +1171,116 @@ mod tests {
         assert!(
             worker.task_history_queue.is_empty(),
             "a press during the retried read queues nothing"
+        );
+    }
+    /// A line's own window can start after its start. The lines it opened show
+    /// no count then, and the earlier page that reaches the start fills it in.
+    #[tokio::test]
+    async fn an_earlier_page_of_a_line_counts_the_lines_it_opened() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+        assert_eq!(
+            listed(&worker, "b-7c").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 2,
+                messages: 1,
+            }),
+            "the line b-7c is cut after main's first message"
+        );
+
+        worker.task_history_queue.clear();
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(10, "carry on"), line_created(12, "b-90", 10)],
+                "through": 12, "nextBefore": 10, "nextAfter": 12,
+            }),
+        )
+        .await;
+        worker.task_history_queue.clear();
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the line's window starts after its start, so the cut counts nothing"
+        );
+
+        worker.earlier();
+        assert_eq!(worker.earlier_view(), Earlier::Reading);
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(5, "the first ask")],
+                "through": 12, "nextBefore": 1, "nextAfter": 5,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "the earlier page reaches the line's start and the cut counts every message"
+        );
+    }
+
+    /// A line read only through `session.turn.get` never loaded its history:
+    /// the cuts that count it show nothing, even when live events already
+    /// counted them.
+    #[tokio::test]
+    async fn a_line_read_only_through_its_cut_counts_nothing() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+
+        worker.task_history_queue.clear();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        worker.apply("b-7c", tell(said(10, "carry on")));
+        worker.apply("b-7c", tell(line_created(12, "b-90", 10)));
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 2,
+            }),
+            "the live events counted the cut before the read settled"
+        );
+
+        answer(
+            &mut worker,
+            json!({"branchId":"b-7c","through":12,"turn":null,"output":null}),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the line was never read from its start, so its cut counts nothing"
         );
     }
 }
