@@ -971,14 +971,6 @@ impl Projection {
                     .or_default()
                     .progress(progress.text_offset, progress.text),
             );
-            messages.chunk(
-                acp::SessionUpdate::AgentThoughtChunk,
-                &id,
-                self.thoughts
-                    .entry(id.clone())
-                    .or_default()
-                    .progress(progress.thinking_offset, progress.thinking),
-            );
         }
         messages.updates
     }
