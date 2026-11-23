@@ -565,7 +565,7 @@ export type MethodReply<T = BridgeJsonValue> = { kind: 'value'; value?: T } | Me
 export type CheckedData<T> = T extends BridgeJsonValue | undefined ? T
   : T extends ((...args: never[]) => unknown) | (abstract new (...args: never[]) => unknown) ? never
   : T extends object ? keyof T extends never ? never : { [K in keyof T]: CheckedData<T[K]> } : never;
-export type MethodProgress = <T>(data: T & CheckedData<T>) => void;
+export type MethodProgress = <T>(data: T & CheckedData<T>) => Promise<void>;
 export type SessionMethodDeclaration = MethodDeclaration;
 export type SessionMethodReply<T = BridgeJsonValue> = MethodReply<T>;
 /** How a registered management namespace serves one call. */

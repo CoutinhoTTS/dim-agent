@@ -48,6 +48,7 @@ struct Fixture {
     refreshes: Arc<AtomicUsize>,
     polls: Arc<AtomicUsize>,
     device_requests: Arc<AtomicUsize>,
+    device_successes: Arc<AtomicUsize>,
     block_refresh: Arc<AtomicBool>,
     started: Arc<Notify>,
     release: Arc<Notify>,
@@ -136,9 +137,16 @@ async fn token(State(f): State<Fixture>, headers: HeaderMap, body: String) -> Re
             assert_eq!(fields["client_id"], "grok-fixture");
             assert_eq!(fields["device_code"], "device-secret");
             match f.polls.fetch_add(1, Ordering::SeqCst) {
-                0 => (StatusCode::BAD_REQUEST, Json(json!({"error":"authorization_pending"}))).into_response(),
+                0 => (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error":"authorization_pending"})),
+                )
+                    .into_response(),
                 1 => (StatusCode::BAD_REQUEST, Json(json!({"error":"slow_down"}))).into_response(),
-                _ => Json(json!({"access_token":jwt(json!({"sub":"grok-account", "email":"grok@example.test", "name":"Grok Name"})), "id_token":jwt(json!({"tier":"super"})), "refresh_token":"grok-refresh", "expires_in":3600})).into_response(),
+                _ => {
+                    f.device_successes.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({"access_token":jwt(json!({"sub":"grok-account", "email":"grok@example.test", "name":"Grok Name"})), "id_token":jwt(json!({"tier":"super"})), "refresh_token":"grok-refresh", "expires_in":3600})).into_response()
+                }
             }
         }
         other => panic!("unexpected grant: {other}"),
@@ -167,6 +175,7 @@ async fn fixture() -> (Fixture, tokio::task::JoinHandle<()>, PathBuf) {
         refreshes: Arc::default(),
         polls: Arc::default(),
         device_requests: Arc::default(),
+        device_successes: Arc::default(),
         block_refresh: Arc::default(),
         started: Arc::default(),
         release: Arc::default(),
@@ -999,15 +1008,23 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         "{signed_out:?}"
     );
     login(&codex, "account-a").await;
+    let token_responses = f.device_successes.load(Ordering::SeqCst);
     f.polls.store(2, Ordering::SeqCst);
     let begin = grok.begin_device(&cancel).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while f.device_successes.load(Ordering::SeqCst) == token_responses {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the device token response did not arrive");
     tokio::time::timeout(Duration::from_secs(3), async {
         while grok.attempt_status(begin.attempt_id).await.unwrap() == AttemptStatus::Pending {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("the device login did not complete after the token response");
     assert_eq!(
         grok.attempt_status(begin.attempt_id).await.unwrap(),
         AttemptStatus::Completed
@@ -1378,15 +1395,23 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
         );
     }
 
+    let token_responses = f.device_successes.load(Ordering::SeqCst);
     f.polls.store(2, Ordering::SeqCst);
     let begin = grok.begin_device(&cancel).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while f.device_successes.load(Ordering::SeqCst) == token_responses {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the device token response did not arrive");
     tokio::time::timeout(Duration::from_secs(3), async {
         while grok.attempt_status(begin.attempt_id).await.unwrap() == AttemptStatus::Pending {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
-    .unwrap();
+    .expect("the device login did not complete after the token response");
     assert!(grok.status(&cancel).await.unwrap().authenticated);
     let auxiliary = root.get::<AuxiliaryModel>().unwrap();
     let sent = f.model_requests.lock().unwrap().len();

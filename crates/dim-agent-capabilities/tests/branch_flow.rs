@@ -12,6 +12,7 @@ use dim_agent_capabilities::{
     },
     timeline_tree::{BranchToolConfig, TreeCommands},
     tool_registry::ToolRegistry,
+    wait::Wait,
     workspace_tools::{file_reads::FileReads, files::FileTools},
 };
 use dim_agent_runtime::testing::MinimalHost;
@@ -617,6 +618,52 @@ fn builder_with_tools(probe: &Arc<Probe>, tools: Arc<dyn ToolDriver>) -> AgentBu
     );
     defaults::tool_host(&mut builder, tools);
     defaults::install(&mut builder);
+    probe_features(&mut builder, probe);
+    builder
+}
+
+/// An `echo` tool and nothing else, so the registry's `wait` is Wait's own
+/// rather than the host [`MockTools`] declares.
+struct EchoOnly;
+impl ToolDriver for EchoOnly {
+    fn definitions(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition {
+            risk: Some("session".into()),
+            ..dim_agent_capabilities::tool_registry::definition(
+                "echo",
+                "Return text without side effects.",
+                serde_json::json!({"type":"object","required":["text"],"additionalProperties":false,"properties":{"text":{"type":"string"}}}),
+            )
+        }]
+    }
+    fn execute(
+        &self,
+        call: ToolCall,
+        _: ToolExecutionContext,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ToolResult> {
+        Box::pin(async move {
+            let text = call
+                .input
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            Ok(ToolResult::text(text))
+        })
+    }
+}
+
+/// [`builder_with`](builder_with) with Wait installed and a host that declares
+/// only `echo`, so a `tool:wait` call runs the capability's `wait`.
+fn builder_with_wait(probe: &Arc<Probe>, model: Arc<dyn ModelDriver>) -> AgentBuilder {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+        dim_agent_runtime::MemoryTimelineStore::default(),
+    )));
+    defaults::mock_model_hosts_with_model(&mut builder, HistoryRenderer::default(), model);
+    defaults::tool_host(&mut builder, Arc::new(EchoOnly));
+    defaults::install(&mut builder);
+    dim_agent_capabilities::wait::install(&mut builder);
     probe_features(&mut builder, probe);
     builder
 }
@@ -1361,16 +1408,21 @@ impl TestStore {
             self.memory.append(key, events, publish).unwrap();
         }
     }
-    /// Answers the held append as a failed transaction that wrote nothing, then
-    /// commits what the store accepted behind it.
+    /// Answers the held append as a failed transaction that wrote nothing and
+    /// settles every batch already queued behind it in the same Session with
+    /// the same failure. A later append of that Session writes directly, and
+    /// another Session queued on the same line still commits.
     fn release_failed(&self) {
         let mut seam = self.seam.lock().unwrap();
-        let (_, _, publish) = seam.front.take().expect("a held append");
-        publish(Err(AgentError::Storage(
-            "injected transaction failure".into(),
-        )));
+        let (front, _, publish) = seam.front.take().expect("a held append");
+        let error = AgentError::Storage("injected transaction failure".into());
+        publish(Err(error.clone()));
         for (key, events, publish) in std::mem::take(&mut seam.behind) {
-            self.memory.append(key, events, publish).unwrap();
+            if key.session_id == front.session_id {
+                publish(Err(error.clone()));
+            } else {
+                self.memory.append(key, events, publish).unwrap();
+            }
         }
     }
     /// The pages `branch` was read with while selecting exactly `kinds`.
@@ -4874,6 +4926,107 @@ async fn the_branch_tool_reports_invalid_arguments() {
     soon(agent.close()).await.unwrap();
 }
 
+/// #2000: `title` is no argument of the branch tool, and the refusal says what
+/// names a line; a call that leaves `title` out opens a line named by the
+/// prompt's first line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_title_is_refused_with_what_names_a_line() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let refused = tool_call(
+        &session,
+        "main",
+        r#"{"action":"create","title":"watch the tests","prompt":"watch the tests\nreport once"}"#,
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true), "{:?}", refused.content);
+    assert!(
+        matches!(
+            &refused.content,
+            ToolContent::Text(shown)
+                if shown
+                    == "Invalid branch arguments: no `title` parameter; a line's name is the \
+                        first line of `prompt`."
+        ),
+        "{:?}",
+        refused.content
+    );
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let tools = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.tools.clone(),
+            _ => None,
+        })
+        .expect("the request carries the declarations");
+    let branch = tools
+        .iter()
+        .find(|tool| tool.name == "branch")
+        .expect("the branch tool is declared");
+    let schema = serde_json::to_value(&branch.input_schema).unwrap();
+    assert_eq!(
+        schema["properties"]["prompt"]["description"],
+        serde_json::json!(
+            "create: the purpose of the new line; its first line is the line's name."
+        )
+    );
+    let mut properties: Vec<&str> = schema["properties"]
+        .as_object()
+        .expect("the schema declares properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    properties.sort_unstable();
+    assert_eq!(
+        properties,
+        [
+            "action",
+            "after",
+            "at",
+            "branch",
+            "content",
+            "idleNotice",
+            "limit",
+            "mode",
+            "prompt",
+            "to"
+        ]
+    );
+    let child = open_line(&session, "watch the tests\nreport once").await;
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let created: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchCreate(data) => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        created.len(),
+        1,
+        "the refused call opened no line: {created:?}"
+    );
+    assert_eq!(created[0].branch, child);
+    assert_eq!(created[0].prompt, "watch the tests\nreport once");
+    let events = until_events(&session, "main", |events| {
+        blocks_with(events, "<dim-branch-lines")
+            .last()
+            .is_some_and(|text| text.contains(&child))
+    })
+    .await;
+    let (roster, _) = roster_block(&events).expect("the roster is keyed `branch:roster`");
+    assert!(
+        roster.contains(&format!("\n- {child}: watch the tests\n")),
+        "the line is named by the prompt's first line: {roster}"
+    );
+    assert!(!roster.contains("report once"));
+    soon(agent.close()).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
     let probe = Arc::new(Probe::default());
@@ -6094,7 +6247,7 @@ async fn a_nested_line_whose_opening_read_fails_is_a_failed_create() {
     builder
         .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()))
         .session_value(Arc::new(HistoryRenderer::default()))
-        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(FlowModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
@@ -6454,7 +6607,7 @@ async fn the_parent_block_replays_after_a_compaction() {
             MemoryTimelineStore::default(),
         )))
         .session_value(Arc::new(HistoryRenderer::default()))
-        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(FlowModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
@@ -7493,6 +7646,200 @@ async fn an_end_from_outside_a_tool_line_wakes_main_with_a_notice() {
     soon(agent.close()).await.unwrap();
 }
 
+/// Starts Wait's `wait` in a turn on `main` and answers its call id and
+/// sequence once the call is written and no result has landed, so a notice
+/// written after this reaches a wait that is still waiting.
+async fn start_wait(session: &Session) -> (String, u64) {
+    soon(session.submit(
+        r#"tool:wait {"timeoutMs":3000}"#.into(),
+        InputMode::Queue,
+        "main",
+    ))
+    .await
+    .unwrap();
+    let events = until_events(session, "main", |events| {
+        events.iter().any(
+            |event| matches!(&event.kind, EventKind::ToolUse(data) if data.call.name == "wait"),
+        )
+    })
+    .await;
+    let (sequence, call) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolUse(data) if data.call.name == "wait" => {
+                Some((event.sequence, data.call.id.clone()))
+            }
+            _ => None,
+        })
+        .expect("the wait call");
+    assert!(
+        !events.iter().any(
+            |event| event.sequence > sequence && matches!(event.kind, EventKind::ToolResult(_))
+        ),
+        "the wait is still waiting"
+    );
+    (call, sequence)
+}
+
+/// The text of the result the wait call `call` ended with on `main`.
+async fn wait_ended(session: &Session, call: &str) -> String {
+    let events = until_events(session, "main", |events| {
+        events.iter().any(|event| {
+            matches!(&event.kind, EventKind::ToolResult(data)
+                if data.results.iter().any(|result| result.call_id == call))
+        })
+    })
+    .await;
+    let result = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ToolResult(data) => data
+                .results
+                .iter()
+                .find(|result| result.call_id == call)
+                .map(|result| result.result.clone()),
+            _ => None,
+        })
+        .expect("the wait result");
+    let ToolContent::Text(text) = result.content else {
+        panic!("a wait result is text: {result:?}")
+    };
+    text
+}
+
+/// The notice block at or after `after` on `main`, as a steer, and the first
+/// request after it that carries it.
+async fn notice_in_a_request(session: &Session, after: u64, marker: &str) -> String {
+    let events = until_events(session, "main", |events| {
+        events.iter().any(|event| {
+            event.sequence > after
+                && matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.effective_mode() == InputMode::Steer
+                        && data.blocks.iter().any(|block| matches!(block, InputBlock::Raw { text, .. }
+                            if text.starts_with(marker))))
+        })
+    })
+    .await;
+    let (sequence, notice) = events
+        .iter()
+        .filter(|event| event.sequence > after)
+        .find_map(|event| match &event.kind {
+            EventKind::InputMessage(data) => data.blocks.iter().find_map(|block| match block {
+                InputBlock::Raw { text, .. } if text.starts_with(marker) => {
+                    Some((event.sequence, text.clone()))
+                }
+                _ => None,
+            }),
+            _ => None,
+        })
+        .expect("the notice was written as a steer");
+    until_events(session, "main", |events| {
+        events.iter().any(|event| {
+            event.sequence > sequence
+                && matches!(&event.kind, EventKind::ModelCall(data)
+                    if data.request.messages.iter().any(|message| said(message).contains(&notice)))
+        })
+    })
+    .await;
+    notice
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_line_wakes_the_wait_of_the_main_that_opened_it() {
+    let probe = Arc::new(Probe::default());
+    let gates = Arc::new(GateModel::default());
+    let agent = MinimalHost::start(&builder_with_wait(&probe, gates.clone()))
+        .await
+        .unwrap();
+    let session = patient(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    patient(session.idle("main")).await.unwrap();
+    patient(session.submit("GATE-LINE".into(), InputMode::Queue, &child))
+        .await
+        .unwrap();
+    patient(gates.line_entered.notified()).await;
+    let mut subscribed = session.service::<Wait>("main").unwrap().subscription();
+    let (call, at) = start_wait(&session).await;
+    patient(subscribed.subscribed()).await;
+    gates.line_release.notify_one();
+    assert_eq!(wait_ended(&session, &call).await, "wait ended: steer");
+    let notice = notice_in_a_request(&session, at, "<dim-branch-idle").await;
+    assert!(
+        notice.starts_with(&format!(
+            "<dim-branch-idle branch=\"{child}\" status=\"completed\">"
+        )),
+        "{notice}"
+    );
+    patient(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ended_line_wakes_the_wait_of_the_main_that_opened_it() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_wait(&probe, Arc::new(FlowModel)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    soon(session.idle("main")).await.unwrap();
+    let mut subscribed = session.service::<Wait>("main").unwrap().subscription();
+    let (call, at) = start_wait(&session).await;
+    soon(subscribed.subscribed()).await;
+    soon(session.end_branch(
+        &child,
+        BranchSource::Host {
+            operation_id: "test-end".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(wait_ended(&session, &call).await, "wait ended: steer");
+    let notice = notice_in_a_request(&session, at, "<dim-branch-ended").await;
+    assert!(
+        notice.starts_with(&format!("<dim-branch-ended branch=\"{child}\">")),
+        "{notice}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_steer_message_from_a_line_wakes_the_wait_of_the_main_that_opened_it() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_wait(&probe, Arc::new(FlowModel)))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let child = open_line(&session, "watch the tests").await;
+    soon(session.idle("main")).await.unwrap();
+    let mut subscribed = session.service::<Wait>("main").unwrap().subscription();
+    let (call, at) = start_wait(&session).await;
+    soon(subscribed.subscribed()).await;
+    let sent = tool_call(
+        &session,
+        &child,
+        r#"{"action":"message","to":"main","content":"the leak is in cache.rs","mode":"steer"}"#,
+    )
+    .await;
+    assert_eq!(sent.is_error, None, "{:?}", sent.content);
+    assert_eq!(wait_ended(&session, &call).await, "wait ended: steer");
+    let notice = notice_in_a_request(&session, at, "<dim-branch-message").await;
+    assert!(
+        notice.starts_with(&format!(
+            "<dim-branch-message from=\"{child}\" to=\"main\">"
+        )),
+        "{notice}"
+    );
+    assert!(notice.contains("the leak is in cache.rs"), "{notice}");
+    soon(agent.close()).await.unwrap();
+}
+
 #[derive(Clone, Copy)]
 struct Compact;
 impl ResolveContextModel for Compact {
@@ -7584,7 +7931,7 @@ async fn a_roster_and_an_identity_replay_separately_after_a_compaction() {
             MemoryTimelineStore::default(),
         )))
         .session_value(Arc::new(HistoryRenderer::default()))
-        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(FlowModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
@@ -9622,7 +9969,7 @@ async fn a_multi_paragraph_purpose_survives_a_move_and_a_compaction() {
             MemoryTimelineStore::default(),
         )))
         .session_value(Arc::new(HistoryRenderer::default()))
-        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(FlowModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
@@ -11296,7 +11643,7 @@ fn compacting_builder(store: Arc<dyn TimelineStore>) -> AgentBuilder {
     builder
         .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store))
         .session_value(Arc::new(HistoryRenderer::default()))
-        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(FlowModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))

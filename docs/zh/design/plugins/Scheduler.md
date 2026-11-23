@@ -579,6 +579,8 @@ loop pass 与 job 窗口、wakeup 在同一个每秒 pass 中运行（§3.1）�
 
 工具与方法对非交互 Session 和 Collaboration member 一律拒绝，与 `schedule`、`wakeup` 相同。`session.loop.start` 与 `session.loop.list` 作用于所命名的分支；省略 `branchId` 时到达该 Session 的默认分支，`loops` 或 `wakeups` 数据面中命名了 Session 但未命名分支的请求也一样(timeline branches §20.22)，每个请求读取一次。一轮的工具由目标分支自己的 Permission 状态授权；loop 不携带 policy，也不预批准任何东西。记录是 Scheduler 自己的业务存储，工具与方法都通过同一 typed 服务访问它：Session 部分用 `names.key()` 声明 `loops` 并直接调用原生 `Loops` 绑定，其他语言通过 `loops` 数据面访问同一 owner 操作。投递 pass、恢复与 `settle_delivering` 不在该面上。
 
+模型工具的 `start`、`next`、`stop` 回复带至多 4 KiB 的 UTF-8 prompt 预览与显式 `prompt_truncated` 标志，`list` 也限制它显示的 prompt。`next` 与 `stop` 按 Session 范围的 id 到达 loop，因此别的分支的 loop 只回状态与时间：prompt 属于拥有该 loop 的分支，而 wire 记录照旧为客户端保留完整 prompt。
+
 `/loop` 的读法：`/loop` 打印用法与本分支的 loop，`/loop <prompt>` 开始自定节奏 loop，`/loop <interval> <prompt>` 开始固定节奏，`/loop stop [id]` 停止一个。间隔只在行首且能解析时才算，否则整行都是 prompt。
 
 ### 12.7 规则检查

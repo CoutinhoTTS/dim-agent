@@ -229,7 +229,15 @@ pub struct LineView {
     /// The first line of the purpose it was opened with.
     pub purpose: String,
     pub state: LineState,
-    /// Where it was cut from its parent; `None` for `main`.
+    /// The running state the daemon last reported for this line; `None`
+    /// until it reports one. Readiness and busy both come from here.
+    pub running: Option<bool>,
+    /// The parent's sequence the line was cut at, once a creation or a
+    /// directory row names it, whether or not its count is known; the line
+    /// list orders siblings by it. `None` for `main`.
+    pub branch_point: Option<u64>,
+    /// Where it was cut from its parent and how many messages it inherits;
+    /// `None` while the count is unknown.
     pub cut: Option<LineCut>,
 }
 
@@ -476,7 +484,6 @@ pub struct ViewSnapshot {
     /// Shared with the worker's projection: publishing copies pointers.
     pub rows: Vec<std::sync::Arc<ViewRow>>,
     pub running: bool,
-    pub main_running: bool,
     /// The first message the user sent on `main`: the window title's topic
     /// until the Session has a stored title (`ui::title`), whichever line is
     /// shown.
@@ -502,6 +509,9 @@ pub struct ViewSnapshot {
     /// `main` followed by this Session's lines, as the lines panel lists them.
     pub lines: Vec<LineView>,
     pub unread_lines: std::collections::BTreeSet<String>,
+    /// The line the Session's conversation is on (design §4): the lines panel
+    /// marks it and refuses to end it or an ancestor of it.
+    pub default_branch_id: String,
     pub focus: String,
     /// The line opened beside the shown one, while its panel is open.
     pub side: Option<SideLine>,

@@ -824,7 +824,11 @@ async fn run_connection(
                                             "session.create.origin",
                                             "session.language",
                                             "session.attach.expectedCwd",
+                                            "session.attach.expectedConfig",
                                         ]);
+                                        if hub.config().product_home.is_some() {
+                                            features.push("session.create.clearModelPreferences");
+                                        }
                                         if hub.config().database_path.is_some()
                                             && hub.config().product_home.is_some()
                                         {
@@ -844,9 +848,12 @@ async fn run_connection(
                                         }
                                         if local && hub.config().product_home.is_some() {
                                             features.push("session.create.modelFromSession");
+                                            features
+                                                .push("session.model.update.requireExpiredRoute");
                                         }
                                         if hub.config().database_path.is_some() {
                                             features.push("session.fork");
+                                            features.push("session.fork.expectedConfig");
                                             features.push("session.history.latestTurn");
                                             if params.protocol_version >= 3 {
                                                 features.push("session.history.display.tail");
