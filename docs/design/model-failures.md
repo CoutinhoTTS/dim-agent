@@ -158,18 +158,25 @@ ModelFailure {
   so a reply of thinking only counts as empty. The bridge decides it where the
   stream completes, because it is the only part that sees the whole response.
   Whether the request is retried depends on what the attempt committed: while
-  it committed nothing to the Timeline, it is retried once like any
-  `malformed_response`, and the failed attempt's progress is dropped before the
-  retry starts, so the next attempt replaces it. Once it committed anything, a
-  whitespace text part or a usage fact included, the request is past the point
-  where it may be retried
+  it committed nothing to the Timeline, a classified cut is retried once like
+  any `malformed_response`, and the failed attempt's progress is dropped before
+  the retry starts, so the next attempt replaces it. Once it committed
+  anything, a whitespace text part or a usage fact included, the request is
+  past the point where it may be retried
   ([output.rs](../../crates/dim-agent-capabilities/src/output.rs) clears replay
   safety when the attempt commits an event), so the turn ends with the failure
-  recorded and shown and the user resends by hand. Received thinking that was
-  never committed is not a fact and does not stop the retry; a cut flushes
-  buffered text before it decides, so text that already reached the screen is
-  committed at the failure and is never replaced by a retry. A retry cannot
-  follow committed output: what the request committed must match
+  recorded and shown and the user resends by hand. A cut flushes buffered text
+  before it decides: text that already reached the screen is committed at the
+  failure and is never replaced by a retry, and a final flush whose Timeline
+  append fails is a local write failure that ends the turn without a retry
+  instead of being reported as the provider's cut. Received thinking that was
+  never committed is not a fact and does not stop the retry; while it is still
+  private it is not visible output either, so a Steer still replaces the
+  request, and a retry starts from nothing with every client resetting what the
+  replaced attempt showed. An unclassified stream ending carries no failure
+  facts and is not retried; classifying an ending as a cut belongs to the
+  driver. A retry cannot follow committed output: what the request committed
+  must match
   the next complete reply, thinking included
   ([output.rs](../../crates/dim-agent-capabilities/src/output.rs)), and a second
   attempt brings its own thinking.

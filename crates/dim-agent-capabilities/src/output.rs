@@ -63,6 +63,13 @@ impl OutputGate {
     pub fn replaced(&self) -> bool {
         self.0.load(Ordering::Acquire) == REPLACED
     }
+    /// A retried attempt starts over: output the replaced attempt showed no
+    /// longer blocks a steer. A request already replaced stays replaced.
+    fn restart(&self) {
+        let _ = self
+            .0
+            .compare_exchange(RECEIVED, WAITING, Ordering::AcqRel, Ordering::Acquire);
+    }
 }
 
 /// A call of this request whose `step/tool-use-start` is committed.
@@ -261,6 +268,7 @@ impl Output {
     /// Forgets the failed attempt's output. None of it was committed, so the
     /// retry replaces it and the Timeline keeps nothing of it.
     fn forget_attempt(&mut self) {
+        self.gate.restart();
         self.committed = false;
         self.text.clear();
         self.text_part_id = None;
@@ -282,12 +290,14 @@ impl Output {
             }
         });
     }
-    /// Shows the thinking received since the last time it was shown.
-    fn show_thinking(&mut self) {
+    /// Shows the thinking received since the last time it was shown; this is
+    /// where the thought becomes visible output.
+    fn show_thinking(&mut self) -> Result<bool, HostError> {
         self.thinking_show_at = None;
         if self.thinking_pending.is_empty() {
-            return;
+            return Ok(false);
         }
+        self.receive()?;
         let thinking = std::mem::take(&mut self.thinking_pending);
         let part_id = self.thinking_part_id.clone();
         let started_at = self.thinking_started_at;
@@ -297,6 +307,7 @@ impl Output {
             progress.thinking_started_at = started_at;
             progress.thinking.push_str(&thinking);
         });
+        Ok(true)
     }
     /// Visible output arrived; a request replaced by a steer stops here.
     fn receive(&self) -> Result<(), HostError> {
@@ -423,7 +434,7 @@ impl Output {
     }
     fn thinking(&mut self, thinking: String) -> Result<(), HostError> {
         self.flush_text()?;
-        self.show_thinking();
+        self.show_thinking()?;
         self.text_part_id = None;
         self.text_part_committed = false;
         if thinking.is_empty() {
@@ -433,6 +444,7 @@ impl Output {
             self.replace_tail(true, "");
             return Ok(());
         }
+        self.receive()?;
         let started_at = self.open_thinking();
         let first = !self.thinking_part_committed;
         let event_id = if first {
@@ -460,7 +472,7 @@ impl Output {
     }
     fn tool_start(&mut self, call_id: String, name: String) -> Result<(), HostError> {
         self.flush_text()?;
-        self.show_thinking();
+        self.show_thinking()?;
         self.text_part_id = None;
         self.text_part_committed = false;
         self.thinking_part_id = None;
@@ -494,7 +506,7 @@ impl Output {
     }
     fn tool_use(&mut self, call: ToolCall) -> Result<(), HostError> {
         self.flush_text()?;
-        self.show_thinking();
+        self.show_thinking()?;
         self.text_part_id = None;
         self.text_part_committed = false;
         self.thinking_part_id = None;
@@ -525,7 +537,7 @@ impl Output {
     }
     fn content(&mut self, content: Vec<MessagePart>) -> Result<(), HostError> {
         self.flush_text()?;
-        self.show_thinking();
+        self.show_thinking()?;
         let text = content
             .iter()
             .filter_map(|part| match part {
@@ -610,18 +622,28 @@ pub(crate) async fn consume_output(
 ) -> Result<FinishReason, HostError> {
     let mut stream = stream.fuse();
     let result = parse_output(&mut stream, output, cancel.clone()).await;
-    if result.is_err() {
-        cancel.cancel();
-        let _ = output.flush_text();
-        // A retry may follow only an attempt that left no fact behind: its
-        // progress is dropped and the next attempt starts from nothing.
-        *replay_safe = !output.committed;
-        if *replay_safe {
-            output.forget_attempt();
-        }
-        while stream.next().await.is_some() {}
+    let error = match result {
+        Ok(finish) => return Ok(finish),
+        Err(error) => error,
+    };
+    cancel.cancel();
+    let flushed = output.flush_text();
+    // A retry may follow only an attempt that left no fact behind and whose
+    // shown text reached the Timeline: its progress is dropped and the next
+    // attempt starts from nothing.
+    *replay_safe = flushed.is_ok() && !output.committed;
+    if *replay_safe {
+        output.forget_attempt();
     }
-    result
+    while stream.next().await.is_some() {}
+    // A failed final flush is a local write failure, not the provider's cut:
+    // the text the client already saw must not be replaced by a retry.
+    if !matches!(error, HostError::Cancelled(_))
+        && let Err(storage) = flushed
+    {
+        return Err(storage);
+    }
+    Err(error)
 }
 
 async fn parse_output(
@@ -649,8 +671,13 @@ async fn parse_output(
                 continue;
             }
             _ = tokio::time::sleep_until(until), if show_at.is_some() => {
-                output.show_thinking();
+                if output.show_thinking()? {
+                    visible = true;
+                }
                 continue;
+            }
+            _ = cancel.cancelled() => {
+                return Err(HostError::Cancelled("Model invocation cancelled".into()));
             }
         };
         let Some(chunk) = next else { break };
@@ -706,15 +733,10 @@ async fn parse_output(
             ));
         }
         match chunk {
-            ModelChunk::Thinking(delta) => {
-                output.receive()?;
-                visible = true;
-                output.thinking_delta(delta)?;
-            }
+            ModelChunk::Thinking(delta) => output.thinking_delta(delta)?,
             ModelChunk::ThinkingEnd { thinking } => {
-                output.receive()?;
-                visible = true;
                 output.thinking(thinking)?;
+                visible = true;
             }
             ModelChunk::Text(delta) => {
                 output.receive()?;
