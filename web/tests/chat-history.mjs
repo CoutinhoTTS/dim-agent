@@ -114,6 +114,171 @@ test("a move whose new centre cannot be read reports the failure instead of an e
   assert.equal(chat.views.session.error, "the line could not be read")
 })
 
+test("a failed move recovers on the accepted line when the failed page is retried", async t => {
+  let fail = true
+  let moves = 0
+  let reads = 0
+  const chat = session(t, params => {
+    if (params.branchId !== "worker") return page([input(1, "on the root")], 1)
+    reads++
+    if (fail) throw new Error("the line could not be read")
+    return page([input(1, "on the worker")], 1)
+  }, {
+    "session.branch_set_default": () => {
+      moves++
+      return "worker"
+    },
+  })
+  await flush()
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.status, "failed")
+  receive(chat, "worker", input(2, "live while failed"))
+  await flush()
+  assert.deepEqual(chat.views.session.rows, [], "the failed centre shows no transcript")
+  fail = false
+  chat.retryCentre("session")
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(moves, 1, "the retry reads the accepted line instead of moving again")
+  assert.equal(reads, 2, "a second click during the retry starts no second read")
+  assert.equal(chat.views.session.status, "ready")
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the worker", "live while failed"], "the events buffered by the failure are replayed after the retry's window")
+})
+
+test("a Session whose first sync failed retries the whole attach", async t => {
+  let attaches = 0
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.attach": () => {
+      attaches++
+      if (attaches === 1) throw new Error("attach failed")
+      return { providerId: "test", modelId: "test" }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(attaches, 2, "before the directory is read, the retry repeats the attach")
+  assert.equal(chat.views.session.status, "ready")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored"])
+})
+
+test("a retry a later move overtakes does not replace the line that moved", async t => {
+  const held = deferred()
+  let fail = true
+  let retrying = false
+  const chat = session(t, params => {
+    if (params.branchId !== "worker") return page([input(1, `on ${params.branchId}`)], 1)
+    if (fail) throw new Error("the line could not be read")
+    if (retrying) return held.promise
+    return page([input(1, "on the worker")], 1)
+  }, {
+    "session.branch_set_default": params => params.branchId,
+  })
+  await flush()
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  retrying = true
+  chat.retryCentre("session")
+  await flush()
+  await chat.setDefaultBranch("session", "third")
+  retrying = false
+  held.resolve(page([input(1, "on the worker")], 1))
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "third")
+  assert.equal(chat.views.session.status, "ready")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on third"], "the overtaken retry's window is discarded")
+})
+
+test("a reconnect that overlaps a retry reads after it, not beside it", async t => {
+  const held = deferred()
+  let fail = true
+  let retrying = false
+  let attaches = 0
+  let directory = "main"
+  const chat = session(t, params => {
+    if (params.branchId !== "worker") return page([], 0)
+    if (fail) throw new Error("the line could not be read")
+    if (retrying) return held.promise
+    return page([input(1, "on the worker")], 1)
+  }, {
+    "session.branch_set_default": () => "worker",
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: directory }),
+    "session.attach": () => {
+      attaches++
+      return { providerId: "test", modelId: "test" }
+    },
+  })
+  await flush()
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.status, "failed")
+  fail = false
+  retrying = true
+  directory = "worker"
+  chat.retryCentre("session")
+  await flush()
+  void chat.resync()
+  await flush()
+  assert.equal(attaches, 1, "the reconnect waits for the retry instead of attaching beside it")
+  retrying = false
+  held.resolve(page([input(1, "on the worker")], 1))
+  await flush()
+  assert.equal(attaches, 2, "the reconnect runs once the retry settles")
+  assert.equal(chat.views.session.status, "ready")
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+})
+
+test("a failed model read during sync keeps the centre readable", async t => {
+  const chat = session(t, params => params.branchId === "worker"
+    ? page([input(1, "on the worker")], 1)
+    : page([], 0), {
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "worker" }),
+    "session.model.get": () => {
+      throw new Error("the model read failed")
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready", "a failed model read alone does not fail the page")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the worker"])
+  assert.equal(chat.views.session.model, undefined)
+})
+
+test("a move whose goal refresh fails keeps its failure and reads no policy", async t => {
+  const policy = { preset: "workspace-write", allowedTools: [], disallowedTools: [] }
+  let failGoal = false
+  let permissions = 0
+  const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
+    "session.branch_set_default": () => {
+      failGoal = true
+      return "worker"
+    },
+    "session.goal.get": params => {
+      if (failGoal) throw new Error("the goal read failed")
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+    "session.permission.get": () => {
+      permissions++
+      return { version: 1, policy }
+    },
+  })
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name === "session.permission.get" || supports(name)
+  await flush()
+  assert.equal(permissions, 1, "the first sync reads the policy once")
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.status, "failed")
+  assert.equal(chat.views.session.error, "the goal read failed")
+  assert.equal(permissions, 1, "a failed goal refresh ends the move before its policy read")
+  assert.equal(chat.views.session.permission, undefined)
+  failGoal = false
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  assert.deepEqual(chat.views.session.permission, policy)
+})
+
 for (const display of [true, false]) test(`conversation windows negotiate ${display ? "display summaries" : "bounded legacy history"}`, async t => {
   let attached = 0
   let windows = 0

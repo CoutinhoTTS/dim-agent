@@ -63,7 +63,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-async function mountPage(defaultBranchId: string): Promise<HTMLElement> {
+async function mountPage(defaultBranchId: string, status: "ready" | "failed" = "ready", error = ""): Promise<HTMLElement> {
   const container = document.createElement("div")
   document.body.append(container)
   const pinia = createPinia()
@@ -73,8 +73,8 @@ async function mountPage(defaultBranchId: string): Promise<HTMLElement> {
   chat.views["s-1"] = {
     sessionId: "s-1",
     defaultBranchId,
-    status: "ready",
-    error: "",
+    status,
+    error,
     rows: [],
     running: false,
     stopping: false,
@@ -105,7 +105,10 @@ async function mountPage(defaultBranchId: string): Promise<HTMLElement> {
   await router.push("/chat/s-1")
   const app = createApp({ render: () => h(ChatPage, { sessionId: "s-1" }) })
   app.use(pinia).use(i18n).use(router)
-  app.component("UButton", simple("UButton"))
+  app.component("UButton", defineComponent({
+    name: "UButton",
+    setup: (_, { attrs, slots }) => () => h("button", attrs, slots.default?.()),
+  }))
   app.component("UBadge", simple("UBadge"))
   app.component("UCollapsible", defineComponent({
     name: "UCollapsible",
@@ -122,5 +125,17 @@ describe("ChatPage", () => {
     await mountPage("worker")
     expect(mocks.branchIds).toContain("worker")
     expect(mocks.branchIds).not.toContain("main")
+  })
+
+  it("retries the accepted line's reads from the failed page", async () => {
+    const container = await mountPage("worker", "failed", "the line could not be read")
+    const chat = useChatStore()
+    const retry = vi.spyOn(chat, "retryCentre").mockImplementation(() => {})
+    expect(container.textContent).toContain("the line could not be read")
+    const button = container.querySelector("button")
+    expect(button?.textContent?.trim()).toBe("Retry")
+    button!.click()
+    await nextTick()
+    expect(retry).toHaveBeenCalledWith("s-1")
   })
 })
