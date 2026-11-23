@@ -99,8 +99,8 @@ pub enum Stage {
     Cutoff,
     /// After the evaluation decision and before `treeCommands.create`.
     Create,
-    /// After a record's `settle_decisions` returned, before its final decision
-    /// and write.
+    /// After a record took its write guard, before its final decision and
+    /// write: nothing of the record has happened yet.
     Settle,
     /// Before a settle task ends the evaluator of `evaluation`, after it
     /// decided the end is due.

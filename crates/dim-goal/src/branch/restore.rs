@@ -87,9 +87,9 @@ impl Owner {
         Ok(())
     }
 
-    pub(super) async fn write_guard(&self) -> Result<tokio::sync::MutexGuard<'_, ()>, AgentError> {
+    pub(super) async fn write_guard(&self) -> Result<tokio::sync::OwnedMutexGuard<()>, AgentError> {
         let write = tokio::select! {
-            guard = self.write.lock() => guard,
+            guard = self.write.clone().lock_owned() => guard,
             _ = self.stop.cancelled() => return Err(AgentError::Closed(self.branch_id.clone())),
         };
         self.await_fold().await?;

@@ -242,7 +242,7 @@ impl DynPlugin for GoalBranch {
                 ready,
                 write_status,
                 state: Mutex::new(State::default()),
-                write: tokio::sync::Mutex::new(()),
+                write: Arc::new(tokio::sync::Mutex::new(())),
             });
             let key = TimelineKey {
                 session_id: identity.session_id.clone(),
@@ -442,18 +442,6 @@ impl Record {
     }
 }
 
-/// What one record did when its writer reached the fold.
-enum Recorder {
-    /// The record stated its state.
-    Written,
-    /// An automatic pause no longer holds after the writer's last wait: the
-    /// decisions `settle_decisions` cancelled are taken again.
-    Superseded,
-    /// The fold moved past the record before it wrote, or the record was
-    /// already stated: nothing waits for it.
-    Answered,
-}
-
 struct Owner {
     branch_id: String,
     #[cfg(feature = "testing")]
@@ -480,8 +468,10 @@ struct Owner {
     state: Mutex<State>,
     /// Serializes state records: each is composed from the fold as it stands
     /// when the lock is taken and commits before the next one is composed, so
-    /// the newest record is the one that states the newest state (D3).
-    write: tokio::sync::Mutex<()>,
+    /// the newest record is the one that states the newest state (D3). An
+    /// automatic pause passes the guard it decided under into its writer, which
+    /// commits under that guard and takes no side effect before it does.
+    write: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl Owner {
@@ -1251,7 +1241,8 @@ impl Owner {
                 let evaluation = self.state.lock().unwrap().fold.evaluation_of(&data.branch);
                 if let Some(evaluation) = evaluation {
                     let state = self.state.lock().unwrap();
-                    if state.fold.is_current(evaluation)
+                    if state.fold.running()
+                        && state.fold.is_current(evaluation)
                         && !state.fold.conclusions.contains_key(&evaluation)
                     {
                         drop(state);
@@ -1377,6 +1368,7 @@ impl Owner {
                 };
                 owner
                     .record(
+                        None,
                         at,
                         Record::Stated(Some(text::State::Paused(reason.to_owned()))),
                         false,
@@ -1388,6 +1380,7 @@ impl Owner {
 
     async fn record(
         self: &Arc<Self>,
+        write: Option<tokio::sync::OwnedMutexGuard<()>>,
         after: u64,
         record: Record,
         answer: bool,
@@ -1395,12 +1388,8 @@ impl Owner {
         let (reply, result) = tokio::sync::oneshot::channel();
         let owner = self.clone();
         self.tasks.spawn(async move {
-            let result = owner.record_inner(after, record, answer).await;
-            owner.state.lock().unwrap().terminating = false;
-            if matches!(&result, Ok(Recorder::Superseded)) {
-                owner.resume_decisions();
-            }
-            if let Err(Err(error)) = reply.send(result.map(|_| ())) {
+            let result = owner.record_inner(write, after, record, answer).await;
+            if let Err(Err(error)) = reply.send(result) {
                 tracing::warn!(%error, "Goal terminal state could not be saved");
                 let _ = owner.write_status.send_replace(Err(error));
             }
@@ -1412,11 +1401,15 @@ impl Owner {
 
     async fn record_inner(
         self: &Arc<Self>,
+        write: Option<tokio::sync::OwnedMutexGuard<()>>,
         after: u64,
         record: Record,
         answer: bool,
-    ) -> Result<Recorder, AgentError> {
-        let _write = self.write_guard().await?;
+    ) -> Result<(), AgentError> {
+        let _write = match write {
+            Some(write) => write,
+            None => self.write_guard().await?,
+        };
         {
             let state = self.state.lock().unwrap();
             if answer && state.fold.pending_change() != Some(after)
@@ -1425,10 +1418,9 @@ impl Owner {
                 || state.written.contains(&after)
                 || record.automatic() && record.pause(&state, after).is_none()
             {
-                return Ok(Recorder::Answered);
+                return Ok(());
             }
         }
-        self.settle_decisions().await?;
         #[cfg(feature = "testing")]
         crate::testing::stage_held(
             &self.session_id,
@@ -1438,10 +1430,12 @@ impl Owner {
         )
         .await;
         self.write_status.borrow().clone()?;
-        // The settle is this writer's last wait, and a driving Queue can fold
-        // while it runs: the decision is taken again here, under the lock and
-        // at the latest committed cutoff, so the fact wins instead of being
-        // stated over (C4, C5, Pursuit §4.1).
+        // This is the writer's last wait: the decision is taken again here,
+        // under the fold lock and at the latest committed cutoff, so a fact
+        // that commits while it waits wins instead of being stated over (C4,
+        // C5, Pursuit §4.1). Nothing before the append is undone when the
+        // writer gives up: a superseded pause only leaves what it never
+        // touched.
         let status = match &record {
             Record::Stated(status) => status.clone(),
             Record::TurnEndPause { .. } | Record::ConclusionPause { .. } => {
@@ -1454,19 +1448,18 @@ impl Owner {
                     })
                     .await?;
                 let Some(reason) = decided else {
-                    return Ok(Recorder::Superseded);
+                    return Ok(());
                 };
                 Some(text::State::Paused(reason.to_owned()))
             }
         };
         let (objective, status, judge, live) = {
             let state = self.state.lock().unwrap();
-            if state.fold.last_change > after || after < state.recorded {
-                return Ok(if record.automatic() {
-                    Recorder::Superseded
-                } else {
-                    Recorder::Answered
-                });
+            if state.fold.last_change > after
+                || after < state.recorded
+                || (!answer && !state.fold.running())
+            {
+                return Ok(());
             }
             (
                 state.fold.objective.clone(),
@@ -1493,23 +1486,29 @@ impl Owner {
         );
         let business = recovery::BusinessState::new(operation, objective, status, judge, None);
         self.append_business(vec![input], business, None)?;
-        let mut state = self.state.lock().unwrap();
-        state.written.insert(after);
-        state.recorded = state.recorded.max(after);
-        Ok(Recorder::Written)
+        {
+            let mut state = self.state.lock().unwrap();
+            state.written.insert(after);
+            state.recorded = state.recorded.max(after);
+            // The record is committed from here on, and the evaluator lines it
+            // replaces are ended next. Setting this flag after the commit keeps
+            // every fact that arrives before it out of a second record, while the
+            // fold still has to consume the record that was just written.
+            state.terminating = true;
+        }
+        let ended = async {
+            self.await_fold().await?;
+            self.end_evaluations().await
+        }
+        .await;
+        self.state.lock().unwrap().terminating = false;
+        ended
     }
 
-    async fn settle_decisions(&self) -> Result<(), AgentError> {
-        let previous = {
-            let mut state = self.state.lock().unwrap();
-            state.terminating = true;
-            state.decisions.cancel();
-            state.decisions = CancellationToken::new();
-            std::mem::take(&mut state.decision_tasks)
-        };
-        previous.close();
-        previous.wait().await;
-        self.await_fold().await?;
+    /// Ends every evaluator line this branch no longer needs (Pursuit §13 E2).
+    /// Its callers hold the commit that makes the endings final: an abandoned
+    /// record ends nothing.
+    async fn end_evaluations(&self) -> Result<(), AgentError> {
         let evaluations = {
             let state = self.state.lock().unwrap();
             state
@@ -1540,6 +1539,23 @@ impl Owner {
         Ok(())
     }
 
+    /// Stops the branch's running decisions and ends the evaluator lines a
+    /// change replaces, before the change composes its record: nothing a
+    /// stopped decision would state can follow the change.
+    async fn settle_decisions(&self) -> Result<(), AgentError> {
+        let previous = {
+            let mut state = self.state.lock().unwrap();
+            state.terminating = true;
+            state.decisions.cancel();
+            state.decisions = CancellationToken::new();
+            std::mem::take(&mut state.decision_tasks)
+        };
+        previous.close();
+        previous.wait().await;
+        self.await_fold().await?;
+        self.end_evaluations().await
+    }
+
     /// States the newest change trigger, once (D3): the record names the
     /// trigger in `after`, so the fold and every client read the same state.
     fn answer_change(self: &Arc<Self>) {
@@ -1547,7 +1563,7 @@ impl Owner {
             return;
         };
         self.task(format!("state:{last}"), None, move |owner| {
-            Box::pin(async move { owner.record(last, Record::Stated(None), true).await })
+            Box::pin(async move { owner.record(None, last, Record::Stated(None), true).await })
         });
     }
 
@@ -1742,6 +1758,7 @@ impl Owner {
                     && self.state.lock().unwrap().fold.is_current(after)
                 {
                     self.record(
+                        None,
                         after,
                         Record::Stated(Some(text::State::Paused("evaluation_failed".to_owned()))),
                         false,
@@ -1829,9 +1846,13 @@ impl Owner {
                 self.write(input).await?;
             }
             Decision::Pause { .. } => {
-                drop(write);
-                self.record(after, Record::TurnEndPause { limit, progress }, false)
-                    .await?;
+                self.record(
+                    Some(write),
+                    after,
+                    Record::TurnEndPause { limit, progress },
+                    false,
+                )
+                .await?;
             }
         }
         Ok(())
@@ -2071,12 +2092,16 @@ impl Owner {
     fn evaluation_failed(self: &Arc<Self>, evaluation: u64, at: u64) {
         self.task(format!("failed:{evaluation}"), None, move |owner| {
             Box::pin(async move {
-                let current = owner.state.lock().unwrap().fold.is_current(evaluation);
+                let current = {
+                    let state = owner.state.lock().unwrap();
+                    state.fold.running() && state.fold.is_current(evaluation)
+                };
                 if !current {
                     return Ok(());
                 }
                 owner
                     .record(
+                        None,
                         at,
                         Record::Stated(Some(text::State::Paused("evaluation_failed".to_owned()))),
                         false,
@@ -2114,6 +2139,7 @@ impl Owner {
         match action {
             ConclusionAction::Failed => {
                 self.record(
+                    None,
                     sequence,
                     Record::Stated(Some(text::State::Paused("evaluation_failed".to_owned()))),
                     false,
@@ -2122,6 +2148,7 @@ impl Owner {
             }
             ConclusionAction::Completed(text) => {
                 self.record(
+                    None,
                     sequence,
                     Record::Stated(Some(text::State::Completed(text))),
                     false,
@@ -2130,6 +2157,7 @@ impl Owner {
             }
             ConclusionAction::Blocked(text) => {
                 self.record(
+                    None,
                     sequence,
                     Record::Stated(Some(text::State::Blocked(text))),
                     false,
@@ -2197,8 +2225,8 @@ impl Owner {
                         self.state.lock().unwrap().written.insert(sequence);
                     }
                     Decision::Pause { .. } => {
-                        drop(write);
                         self.record(
+                            Some(write),
                             sequence,
                             Record::ConclusionPause {
                                 end: end.sequence,
