@@ -2449,6 +2449,25 @@ mod tests {
         .unwrap()
     }
 
+    fn part_progress(thinking: &str, part_id: &str, started_at: u64) -> Progress {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0,
+            "thinking": thinking, "thinkingOffset": 0,
+            "thinkingPartId": part_id,
+            "thinkingStartedAt": started_at,
+        }))
+        .unwrap()
+    }
+
+    fn empty_progress() -> Progress {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0, "thinking": "", "thinkingOffset": 0,
+        }))
+        .unwrap()
+    }
+
     #[test]
     fn reasoning_streams_from_progress_and_settles_as_written() {
         let mut projection = Projection::default();
@@ -4124,5 +4143,75 @@ mod tests {
         .unwrap();
         projection.progress(&done);
         assert!(projection.snapshot().retry.is_none());
+    }
+
+    /// The clear between the two attempts can be coalesced away; the new
+    /// attempt's block identity still rebuilds the row, and its span starts
+    /// there rather than at the replaced attempt's block.
+    #[test]
+    fn a_coalesced_clear_rebuilds_the_thought_row_from_the_new_attempt() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        let first = projection.snapshot().rows[0].row_id.clone();
+        projection.progress(&part_progress("a longer successful thought", "second", 5000));
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the replaced attempt leaves one thought row: {rows:?}"
+        );
+        assert_ne!(
+            rows[0].row_id, first,
+            "the rebuilt thought row has a new identity"
+        );
+        assert_eq!(rows[0].text, "a longer successful thought");
+        apply(&mut projection, &[step(6, "text", "Done.")]);
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows[0].elapsed_ms,
+            Some(1000),
+            "the span starts at the new attempt: {rows:?}"
+        );
+    }
+
+    /// A retry that starts with text and never shows a thought leaves no
+    /// empty thought row, and the replaced attempt's thought does not make
+    /// the failure claim that a response is incomplete.
+    #[test]
+    fn a_retry_without_thinking_leaves_no_empty_thought_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        projection.progress(&empty_progress());
+        projection.progress(
+            &serde_json::from_value(serde_json::json!({
+                "sessionId": "s", "branchId": "main", "requestId": "r1",
+                "text": "partial answer", "textOffset": 0,
+                "thinking": "", "thinkingOffset": 0,
+            }))
+            .unwrap(),
+        );
+        apply(
+            &mut projection,
+            &[model_end(
+                2,
+                failure_data(serde_json::json!({"failure": failure_fact()})),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert!(
+            !row.text.starts_with("The response above is incomplete."),
+            "nothing showed above the failure: {}",
+            row.text
+        );
     }
 }
