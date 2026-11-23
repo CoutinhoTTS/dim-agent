@@ -1795,10 +1795,8 @@ impl Projection {
                 self.showed.remove(request_id);
             }
         }
-        if !progress.thinking.is_empty() {
-            if self.showed.insert(request_id.clone()) {
-                self.showed_thinking.insert(request_id.clone());
-            }
+        if !progress.thinking.is_empty() && self.showed.insert(request_id.clone()) {
+            self.showed_thinking.insert(request_id.clone());
         }
         if !progress.text.is_empty() {
             self.showed.insert(request_id.clone());
