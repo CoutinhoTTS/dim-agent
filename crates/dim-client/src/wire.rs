@@ -47,6 +47,8 @@ impl From<DisplayNotice> for EventNotice {
 #[derive(Clone, Deserialize)]
 pub struct Configuration {
     pub provider_id: String,
+    #[serde(default)]
+    pub catalog_provider_id: Option<String>,
     pub model_id: String,
     /// The adopted model's capability declaration, including temporary routes.
     #[serde(default)]
@@ -74,6 +76,8 @@ pub struct AdoptedConfiguration {
 pub struct AdoptedModel {
     pub model: dim_agent_types::ModelId,
     #[serde(default)]
+    pub catalog_provider_id: Option<String>,
+    #[serde(default)]
     pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     #[serde(default)]
     pub model_preferences: Option<dim_agent_types::ModelPreferences>,
@@ -82,6 +86,7 @@ impl From<AdoptedModel> for Configuration {
     fn from(adopted: AdoptedModel) -> Self {
         Self {
             provider_id: adopted.model.provider_id,
+            catalog_provider_id: adopted.catalog_provider_id,
             model_id: adopted.model.model_id,
             capability_snapshot: adopted.capability_snapshot,
             model_preferences: adopted.model_preferences,
@@ -443,6 +448,8 @@ pub struct Attached {
     #[serde(default)]
     pub model: Option<dim_agent_types::ModelId>,
     #[serde(default)]
+    pub catalog_provider_id: Option<String>,
+    #[serde(default)]
     pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     /// The adopted configuration's preferences; absent when it carries none.
     #[serde(default)]
@@ -465,6 +472,7 @@ impl Attached {
     pub fn configuration(&self) -> Option<Configuration> {
         self.model.as_ref().map(|model| Configuration {
             provider_id: model.provider_id.clone(),
+            catalog_provider_id: self.catalog_provider_id.clone(),
             model_id: model.model_id.clone(),
             capability_snapshot: self.capability_snapshot.clone(),
             model_preferences: self.model_preferences.clone(),

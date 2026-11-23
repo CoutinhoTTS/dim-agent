@@ -529,6 +529,9 @@ impl Collaboration {
         };
         let mut relations = BTreeMap::new();
         for (member, leader) in stored {
+            if self.index.closed(&member) || self.index.closed(&leader) {
+                continue;
+            }
             let (Some(host), Some(_)) = (
                 self.index.host_by_session(&member),
                 self.index.host_by_session(&leader),
@@ -545,9 +548,21 @@ impl Collaboration {
         }
         *self.directory.relations.lock().unwrap() = relations;
     }
-    /// Removes a relation; the member Session and its Agent stay.
+    /// Removes a relation. The member Session and its Agent outlive it:
+    /// `close` ends the Session in this process, and a delete removes the
+    /// records.
     fn remove(&self, member: &str) {
         self.directory.relations.lock().unwrap().remove(member);
+    }
+    /// Closes a member Session in this process once its request settled: it
+    /// ends here and does not load again, while its Session records, its
+    /// leader's and its Agent's stay, so a restart loads it again as an
+    /// ordinary Session its leader may address (design §6.3). A close that
+    /// reports an error still ended the Session; the error names cleanup.
+    async fn close_member(&self, member: &str) {
+        if let Err(error) = self.index.close_session(member).await {
+            tracing::error!(%error, session_id = member, "Member Session close failed");
+        }
     }
     /// Checks the persisted identity without loading a participant.
     fn authorize_peer(&self, from: &str, agent_id: &str, session_id: &str) -> Result<(), Refusal> {
@@ -2126,6 +2141,7 @@ impl CollaborationSession {
                     }
                 }
                 self.collaboration.remove(&data.session_id);
+                self.collaboration.close_member(&data.session_id).await;
                 Ok(delivered(&peer, None, None))
             }
             _ => unreachable!("operation event"),

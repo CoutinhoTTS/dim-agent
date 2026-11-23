@@ -294,7 +294,7 @@ AcpGateway、RemoteGateway、Attachments 与 Hooks 的设计在 `session.input_l
 
 Agents 在该分支上用 `Session::service::<InputQueue>` 取得 S1 的 InputQueue，调用 `withdraw(InputWithdrawData { input_id, reason, steer: None })`，并返回它的决定。S1 在写入 `input/deleted` 后就回复，此时该事件已提交但不一定已发布，因此对 `deleted`，Agents 与 `input` 一样等它发布后才回复（D8）；分支先关闭或失败时回复 `publication_unknown`。S2 不增加语义：不检查归属，因为调用方凭写入时拿到的 `input_id` 撤回（合同 §9.3）；不重试，也不写自己的事件。指令、决定、结果事实与格式决定都归 S1（[A.4](../contracts/session-access.md#a4-撤回)）；§14.1 记录了 S1 交付的内容。
 
-错误：`rejected`（S1 的校验：`inputId` 为空、`reason` 超过 2048 字节）、`session_closed`、`branch_missing`、`reloading`、`publication_unknown`。指令写入后才收到的 `reloading`，结果交给 InputQueue 的后继实例决定。指令写入后才开始的关闭同样回复 `reloading`，而不是 `session_closed`：InputQueue 在作出决定前随关闭结束，S1 将其报告为 `Reloading`。这是准确的错误码，因为 `session_closed` 表示什么都没写入，而这条指令已提交，Session 下次装载时按历史决定。之后重试会以 `session_closed` 失败。分发越过该指令之后（之后任何 `idle` 截止点都已越过），历史中对调用方写入的输入恰好有 `input/applied` 与 `input/deleted` 之一。
+错误：`rejected`（S1 的校验：`inputId` 为空、`reason` 超过 2048 字节）、`session_closed`、`branch_missing`、`reloading`、`publication_unknown`。`reloading` 的来源见 §9。指令写入之后，只有调用期间索引卸载才回复它，结果仍归 InputQueue：索引卸载不会结束该分支的队列，因此在同一个 Session 里，分发越过这条指令时，由这个队列作出决定——`deleted` 并带删除的序号，或 `notHeld`，不需要装载 Session。指令写入后才开始的关闭既不回复 `reloading`，也不回复 `session_closed`：指令已提交，而关闭的分支 `stop/interrupt` 写在它之后，因此分发先越过这条指令，由 InputQueue 作出同样的决定。指令留在历史中，因此关闭之后再次装载的 Session 从历史读到它的结果。之后重试会以 `session_closed` 失败。分发越过该指令之后（之后任何 `idle` 截止点都已越过），历史中对调用方写入的输入恰好有 `input/applied` 与 `input/deleted` 之一。
 
 ### 6.7 history
 
@@ -310,7 +310,7 @@ Agents 在该分支上用 `Session::service::<InputQueue>` 取得 S1 的 InputQu
 
 ### 6.8 delete
 
-`{sessionId}` → `{}`。Agents 执行 S5c 的 `AgentIndex::delete`（[S5c §3.2](session-deletion-and-fork.md#32-顺序)）：检查 id，取得该 Session 的准入闸门，Session 已装载时关闭它，由 SessionStore 删除它的命令输出，再在一个事务中删除它的全部行，最后遗忘它。该 Session 上进行中的调用（包括 `idle`，§6.4）以 `session_closed` 结束，之后的调用也一样。不存在或已删除的 Session 回复 `{}`。和每个 `sessions` 方法一样，调用不携带调用方身份，因此不检查调用方是否启动过该 Session（§11）。
+`{sessionId}` → `{}`。Agents 执行 S5c 的 `AgentIndex::delete`（[S5c §3.2](session-deletion-and-fork.md#32-顺序)）：检查 id，取得该 Session 的准入闸门，Session 已装载时关闭它，由 SessionStore 删除它的命令输出，再在一个事务中删除它的全部行，最后遗忘它。该 Session 上进行中的调用（包括 `idle`，§6.4）以 `session_closed` 结束，之后的调用也一样；`withdraw` 的指令写在关闭之前时除外，由 InputQueue 作出决定（§6.6）。不存在或已删除的 Session 回复 `{}`。和每个 `sessions` 方法一样，调用不携带调用方身份，因此不检查调用方是否启动过该 Session（§11）。
 
 删除一旦开始就执行到它自己的结果，与 Rpc 的 `session.delete` 相同：索引重载不会截断它，因为各 Session 及其存储比索引活得更久（D1），而中途停下的删除会让 Session 保持关闭、行仍保留，直到重试。放弃调用的 Rust 调用方可能让删除只执行了一部分，与 Rpc 回复丢失相同（S5c §3.5）；再次删除即可完成。
 
@@ -380,7 +380,7 @@ AgentScope 与各 Session 继续运行，`sessions` 服务也保留。旧索引�
 
 ### 8.5 删除（S5c）
 
-删除（[#97](https://github.com/arcships/dim/pull/97)，客户端经 `session.delete`，进程插件经 `sessions.delete`，§6.8）取得该 Session 的准入闸门并关闭它。该 Session 上进行中的调用（包括 `idle`）以 `session_closed` 结束，之后的调用也一样。启动方已被删除的启动以 `session_closed` 失败。启动方被删除后，已启动的 Session 继续运行。
+删除（[#97](https://github.com/arcships/dim/pull/97)，客户端经 `session.delete`，进程插件经 `sessions.delete`，§6.8）取得该 Session 的准入闸门并关闭它。该 Session 上进行中的调用（包括 `idle`）以 `session_closed` 结束，之后的调用也一样；`withdraw` 的指令写在关闭之前时除外，由 InputQueue 作出决定（§6.6）。启动方已被删除的启动以 `session_closed` 失败。启动方被删除后，已启动的 Session 继续运行。
 
 ### 8.6 目标：空闲卸载（后续项）
 
@@ -415,7 +415,7 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 | `agent_unknown` | `launch` | 没有已装载的 Agent 使用该 id | false |
 | `session_closed` | 除 `delete` 外全部（对 `launch` 指启动方） | Session 已关闭、已删除或未知；未写入 | false |
 | `branch_missing` | 除 `delete` 外全部（对 `launch` 指启动方） | 没有该分支；未写入 | false |
-| `reloading` | 全部 | Agents 索引、模型选择宿主、启动方的 Permission 或 S1 的撤回服务未激活（`withdraw` 写入指令后 Session 关闭时也是，§6.6），或调用期间索引卸载。对 `input` 以同一 `submissionId` 重新提交；对 `withdraw` 结果不确定：先 `history`。`delete` 只在开始前以 `reloading` 失败（§6.8） | true |
+| `reloading` | 全部 | Agents 索引、模型选择宿主、启动方的 Permission 或 S1 的撤回服务未激活，或调用期间索引卸载。对 `input` 以同一 `submissionId` 重新提交；对 `withdraw` 结果不确定：先 `history`。`delete` 只在开始前以 `reloading` 失败（§6.8） | true |
 | `future_sequence` | `history` | `atLeast` 或 `through` 超过已发布 head | false |
 | `ambiguous` | `input`、`lookup` | 不止一条输入使用该 `submissionId`，写于分支只接受一次之前；未写入 | false |
 | `publication_unknown` | `input`、`withdraw` | 已提交，发布未确认；恢复后重新提交、`lookup` 或 `history` | true |
@@ -435,7 +435,7 @@ S2 不需要为此改动。每次调用都持有租约，`sessions` 不在已装
 | Loop 在某输入的 `input/applied` 与 `stop/interrupt` 之间重载 | applied < interrupt，没有 `turn/start` | 排在后面的 Queue 输入到 `idle` 截止点仍被持有，直到之后某个 turn 结束；调用方撤回或重新写入 | InputQueue、Loop |
 | 调用期间 Agents 索引重载 | — | `reloading`，已受理的 `launch` 与 `delete` 除外，它们回复自己的结果；使用方保持装载 | Agents |
 | `idle` 期间使用方重载 | — | 旧等待持续到结束，其回复被丢弃；新一代重新读取 | Agents、使用方 |
-| 调用期间 Session 被关闭或删除 | — | `session_closed` | Agents |
+| 调用期间 Session 被关闭或删除 | — | `session_closed`；`withdraw` 的指令写在关闭之前时除外，由 InputQueue 作出决定（§6.6） | Agents |
 | 两个调用方写同一个 Session | Timeline 顺序 | 按序号顺序、按模式采纳 | InputQueue |
 | 提交后重启，回复丢失 | — | `lookup`：已发布则 `accepted`，随未发布尾部丢失则 `unknown` | 调用方 |
 

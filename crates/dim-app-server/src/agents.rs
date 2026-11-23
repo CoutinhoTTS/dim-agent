@@ -35,6 +35,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod configuration;
+pub(crate) use configuration::check_configuration;
 mod fork;
 pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
@@ -171,6 +172,10 @@ struct SessionSlot {
     /// Incremented by every `acquire`: while it stays unchanged and `uses`
     /// stays 0, no lease has held the Session (idle unload §6.1).
     acquired: AtomicU64,
+    /// Set by a business close before its runtime close: an `acquire` that
+    /// would restore the Session refuses it, while a use of the loaded
+    /// Session is still admitted until `closed`.
+    closing: AtomicBool,
     /// Set by `session.close` and by a delete's close: the Session does not
     /// load again in this process (S5c D5).
     closed: AtomicBool,
@@ -193,6 +198,15 @@ pub(crate) struct SessionUse {
     pub session: Session,
     slot: Arc<SessionSlot>,
     activity: Arc<ProcessHold>,
+}
+impl SessionUse {
+    pub(crate) async fn admission(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.slot.gate.clone().lock_owned().await
+    }
+
+    pub(crate) fn is_exclusive(&self, attached: bool) -> bool {
+        self.slot.uses.load(Ordering::Acquire) == 1 + usize::from(attached)
+    }
 }
 impl Clone for SessionUse {
     fn clone(&self) -> Self {
@@ -408,6 +422,10 @@ pub struct AgentIndex {
     /// waiting on its branch. Feature `testing` only.
     #[cfg(feature = "testing")]
     idle_admitted: Arc<tokio::sync::Notify>,
+    /// The hold the next business close of a Session takes. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    close_hold: Arc<Mutex<Option<Arc<crate::CloseHold>>>>,
 }
 /// One page of `branch`'s own facts after `after` through its Session's query:
 /// at most `limit`, never past `through`, ending on an atomic batch.
@@ -530,6 +548,14 @@ impl AgentIndex {
     pub(crate) fn idle_admitted(&self) -> Arc<tokio::sync::Notify> {
         self.idle_admitted.clone()
     }
+    /// The hold the next business close of a Session takes. Feature `testing`
+    /// only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_close(&self) -> Arc<crate::CloseHold> {
+        let hold = Arc::new(crate::CloseHold::default());
+        *self.close_hold.lock().expect("close hold") = Some(hold.clone());
+        hold
+    }
     /// How many uses Session `id` has right now. Feature `testing` only.
     #[cfg(feature = "testing")]
     pub(crate) fn uses(&self, id: &str) -> usize {
@@ -643,6 +669,41 @@ impl AgentIndex {
         let mut inner = self.directory.inner.lock().unwrap();
         inner.versions.remove(session_id);
         inner.sessions.remove(session_id);
+    }
+    /// The business close of Session `id`: it stops the Session's restoration
+    /// first, so an `acquire` that finds no loaded Session while this runs
+    /// does not load it again, and waits for a restore that already holds the
+    /// slot gate to end before closing what it loaded. The runtime close then
+    /// completes and the index records that the Session does not load again in
+    /// this process. The Session records stay, so a restart loads it again. A
+    /// Session no loaded instance holds is already closed.
+    pub(crate) async fn close_session(&self, id: &str) -> dim_agent_runtime::Result<()> {
+        #[cfg(feature = "testing")]
+        let close_hold = self.close_hold.lock().expect("close hold").take();
+        if let Some((_, slot)) = self.owned_slot(id) {
+            slot.closing.store(true, Ordering::Release);
+            #[cfg(feature = "testing")]
+            if let Some(hold) = &close_hold {
+                hold.admission.notify_one();
+            }
+            drop(slot.gate.clone().lock_owned().await);
+        }
+        let result = match self.session(id) {
+            Some((_, session)) => session.close().await,
+            None => match self
+                .host_by_session(id)
+                .and_then(|host| host.agent.get_session(id))
+            {
+                Some(session) => session.closed().await,
+                None => Ok(()),
+            },
+        };
+        #[cfg(feature = "testing")]
+        if let Some(hold) = close_hold {
+            hold.wait().await;
+        }
+        self.remove_version(id);
+        result
     }
     /// Sessions can also close through the runtime fault supervisor.
     /// Versions of a closing Agent stay until its settlement forgets them.
@@ -910,6 +971,9 @@ impl AgentIndex {
                 (session, gate, activity)
             }
             None if self.session_store.is_some() => {
+                if slot.closing.load(Ordering::Acquire) {
+                    return Err(AgentError::Closed(id.into()));
+                }
                 if self.settings.is_some() || expected_cwd.is_some() {
                     let config = self
                         .session_store
@@ -949,11 +1013,19 @@ impl AgentIndex {
                     .expect("AgentsPlugin apply sets its context")
                     .clone();
                 tokio::spawn(async move {
-                    let _slot = slot;
                     let session = host
                         .agent
                         .restore_session_for_version(id.clone(), version)
                         .await?;
+                    if slot.closing.load(Ordering::Acquire) {
+                        // The close stopped this Session's restoration while
+                        // this restore ran: release what it loaded and refuse
+                        // it.
+                        if let Err(error) = session.close().await {
+                            tracing::warn!(%error, session_id = %id, "Restored Session close failed");
+                        }
+                        return Err(AgentError::Closed(id));
+                    }
                     ctx.parallel(SessionRestored {
                         agent_id: host.agent_id.clone(),
                         session_id: id,
@@ -1866,7 +1938,13 @@ impl AgentIndex {
     /// fork is a prepared creation whose prepare step is SessionStore's fork
     /// transaction; it belongs to the source's Agent and protocol version,
     /// and its `main` opens with `branch/resume`.
-    pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session> {
+    pub(crate) async fn fork(
+        &self,
+        source: &str,
+        at: u64,
+        expected: Option<&dim_agent_types::SessionConfigExpectation>,
+        scope: Option<(&crate::provider::ProviderService, &str)>,
+    ) -> Result<Session, RpcError> {
         let store = self
             .session_store
             .clone()
@@ -1874,9 +1952,9 @@ impl AgentIndex {
         let usage = self.acquire(source).await?;
         let session = &usage.session;
         if session.config().collaboration_role == CollaborationRole::Member {
-            return Err(AgentError::InvalidInput(
-                "a member conversation cannot be forked".into(),
-            ));
+            return Err(
+                AgentError::InvalidInput("a member conversation cannot be forked".into()).into(),
+            );
         }
         let checked = async {
             dim_agent_capabilities::history::validate_context_boundary_in(
@@ -1890,7 +1968,7 @@ impl AgentIndex {
         }
         .await;
         if session.is_closing() {
-            return Err(AgentError::Closed(source.into()));
+            return Err(AgentError::Closed(source.into()).into());
         }
         checked?;
         let version = self
@@ -1907,6 +1985,20 @@ impl AgentIndex {
             .ok_or_else(|| AgentError::Closed(source.to_owned()))?;
         let mut config = serde_json::from_str::<SessionConfig>(&stored)
             .map_err(|error| AgentError::Storage(format!("the source configuration: {error}")))?;
+        if let Some(expected) = expected {
+            check_configuration(session, &config, at, expected).await?;
+        }
+        if let Some((provider, scope)) = scope {
+            let (adopted, _) = session
+                .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
+                .adopted_configuration(ROOT_BRANCH_ID.into(), Some(at))
+                .await?;
+            let (provider_id, metadata) = match &adopted {
+                Some(adopted) => (&adopted.provider_id, adopted.metadata.as_ref()),
+                None => (&config.model.provider_id, config.model.metadata.as_ref()),
+            };
+            provider.check_fork_route(scope, provider_id, metadata)?;
+        }
         // A fork of an older protocol keeps the live Session's codemode
         // exclusion; the stored record is written without it, as on create.
         config.exclude_codemode_below(version);
@@ -1924,7 +2016,8 @@ impl AgentIndex {
             let Some(members) = value.as_object_mut() else {
                 return Err(AgentError::Storage(
                     "the source configuration is not an object".into(),
-                ));
+                )
+                .into());
             };
             members.remove(INITIAL_TITLE);
             record = serde_json::to_string(&value)
@@ -1948,7 +2041,8 @@ impl AgentIndex {
                 agent_id: usage.host.agent_id.clone(),
                 session_id: id,
             })
-            .await?;
+            .await
+            .map_err(AgentError::from)?;
         Ok(fork)
     }
     /// `agent.create`: one more Agent, a peer of every other. A requested
@@ -2325,6 +2419,8 @@ impl DynPlugin for AgentsPlugin {
                 stopping: CancellationToken::new(),
                 #[cfg(feature = "testing")]
                 idle_admitted: Arc::new(tokio::sync::Notify::new()),
+                #[cfg(feature = "testing")]
+                close_hold: Arc::new(Mutex::new(None)),
             };
             let index = Arc::new(index);
             let cleanup = index.clone();

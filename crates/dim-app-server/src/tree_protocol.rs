@@ -184,6 +184,11 @@ impl Serialize for ProductEvent {
                 view["data"]["model_preferences"] =
                     serde_json::to_value(preferences).map_err(serde::ser::Error::custom)?;
             }
+            if let Some(provider) = crate::provider::scoped_routes::logical_provider(
+                configured.settings.metadata.as_ref(),
+            ) {
+                view["data"]["catalog_provider_id"] = provider.into();
+            }
             if let Some(snapshot) = &configured.settings.capability_snapshot {
                 view["data"]["capability_snapshot"] =
                     serde_json::to_value(snapshot).map_err(serde::ser::Error::custom)?;

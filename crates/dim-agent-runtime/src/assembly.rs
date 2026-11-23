@@ -38,15 +38,62 @@ impl rutis::Event for OpeningAdvanced {
 }
 
 /// Reports that the opening this context's plugin belongs to advanced: the
-/// plugin made real progress in its `apply`. Any plugin whose opening can run
-/// long may call it; it renews the [`StartupProgress`] inactivity interval of
-/// every opening whose subtree contains the plugin's row, and changes nothing
-/// else about the opening. A report is a synchronous event, so a plugin whose
-/// work runs on a blocking thread reports from there. A context whose plugin
-/// has no live fiber reports nothing: the report would be dropped anyway.
+/// plugin made real progress in work the opening waits for, its own `apply` or
+/// a restore of the lines it owns. Any plugin whose opening can run long may
+/// call it; it renews the [`StartupProgress`] inactivity interval of every
+/// opening whose subtree contains the plugin's row, and changes nothing else
+/// about the opening. A report is a synchronous event, so a plugin whose work
+/// runs on a blocking thread reports from there. A context whose plugin has no
+/// live fiber reports nothing: the report would be dropped anyway.
+///
+/// The report is attributed to this context's instance and costs no
+/// diagnostics snapshot; a task that reports at many steps may resolve its
+/// plugin id once with [`OpeningReporter::new`] and report through it instead.
 pub fn opening_advanced(ctx: &Ctx) {
     if !ctx.cancellation_token().is_cancelled() {
         let _ = ctx.emit(OpeningAdvanced::Instance(ctx.instance().to_string()));
+    }
+}
+
+/// The identity an opening report is attributed to, resolved once and reused at
+/// every report. A task that reports at many steps, such as a restore after
+/// each read, costs one process diagnostics snapshot for the whole task instead
+/// of one per step.
+///
+/// Every report still counts only the openings whose subtree contains the row
+/// when they read it; a report after the row has ended extends no opening.
+pub struct OpeningReporter {
+    ctx: Ctx,
+    id: PluginId,
+}
+
+impl OpeningReporter {
+    /// Resolves the plugin id of `ctx`'s plugin, or none when no live fiber has
+    /// that instance.
+    pub fn new(ctx: &Ctx) -> Option<Self> {
+        let instance = ctx.instance();
+        let id = ctx
+            .diagnostics()
+            .plugins
+            .into_iter()
+            .find(|plugin| plugin.instance == instance)
+            .map(|plugin| plugin.id)?;
+        Some(Self {
+            ctx: ctx.clone(),
+            id,
+        })
+    }
+
+    /// Reports real progress; see [`opening_advanced`].
+    pub fn report(&self) {
+        let _ = self.ctx.emit(OpeningAdvanced::Plugin(self.id));
+    }
+
+    /// The fiber this reporter's reports are attributed to. Feature `testing`
+    /// only: a flow test asserts which tree's fiber a report lands on.
+    #[cfg(feature = "testing")]
+    pub fn id(&self) -> PluginId {
+        self.id
     }
 }
 
@@ -1594,7 +1641,7 @@ async fn create_instance(
                 .and_then(|instance| locate(loader, ctx, instance));
             let error = match &found {
                 _ if cancel.is_cancelled() => AgentError::Cancelled("initialization".into()),
-                Some(created) => timed_out(ctx, &created.children),
+                Some(created) => timed_out(ctx, &created.children, None),
                 None => AgentError::Build(format!("initialization timed out: {group}")),
             };
             if found.is_none() {
@@ -1636,7 +1683,7 @@ async fn create_instance(
     let mut ready = progress
         .wait(active_rows(&group, cancel), || vec![created.view.id])
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, &group)));
+        .unwrap_or_else(|| Err(timed_out(ctx, &group, None)));
     // Read after the group is Active: a settle can return while it still waits,
     // and its rows are the ones the required-row wait has to name.
     let mut waiting: Vec<FiberView> = loader
@@ -1649,7 +1696,7 @@ async fn create_instance(
         ready = progress
             .wait(active_rows(&waiting, cancel), || vec![created.view.id])
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &waiting)));
+            .unwrap_or_else(|| Err(timed_out(ctx, &waiting, None)));
     }
     let mut handed = Handed::default();
     if ready.is_ok() {
@@ -1660,7 +1707,7 @@ async fn create_instance(
                 vec![created.view.id]
             })
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &handed.required)));
+            .unwrap_or_else(|| Err(timed_out(ctx, &handed.required, None)));
         if let Err(error) = &ready
             && failed_mounter(&handed.required).is_some()
         {
@@ -1673,7 +1720,7 @@ async fn create_instance(
         ready = progress
             .wait(active_rows(&parts, cancel), || vec![created.view.id])
             .await
-            .unwrap_or_else(|| Err(timed_out(ctx, &parts)));
+            .unwrap_or_else(|| Err(timed_out(ctx, &parts, None)));
     }
     // Parts create nested instances while they load, and their rows are this
     // creation's members: read them once the waits above are done.
@@ -1705,7 +1752,7 @@ async fn create_instance(
             || vec![created.view.id],
         )
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, &created.children)));
+        .unwrap_or_else(|| Err(timed_out(ctx, &created.children, None)));
     match settled {
         Ok(()) => Ok(created),
         Err(error) => Err((error, Some(created))),
@@ -1886,6 +1933,12 @@ pub(crate) async fn build_session(
             &session.ctx,
             session.scope.key::<dyn TimelineTreeControl>(),
         )?;
+        let phase = match &initialization {
+            SessionInitialization::Prepared(_) | SessionInitialization::Restore(_) => {
+                Some("restore")
+            }
+            SessionInitialization::New => None,
+        };
         let initialize = async {
             match initialization {
                 SessionInitialization::Prepared(branches)
@@ -1900,7 +1953,7 @@ pub(crate) async fn build_session(
                 match result {
                     Some(result) => result,
                     None => {
-                        let error = timed_out(host, std::slice::from_ref(&created.view));
+                        let error = timed_out(host, std::slice::from_ref(&created.view), phase);
                         tree.begin_close();
                         let _ = initialize.await;
                         Err(error)
@@ -1995,7 +2048,7 @@ pub async fn wait_active(
             views.iter().map(|view| view.id).collect()
         })
         .await
-        .unwrap_or_else(|| Err(timed_out(ctx, views)))
+        .unwrap_or_else(|| Err(timed_out(ctx, views, None)))
 }
 
 async fn active_rows(views: &[FiberView], cancel: &CancellationToken) -> Result<()> {
@@ -2042,7 +2095,7 @@ async fn active_rows(views: &[FiberView], cancel: &CancellationToken) -> Result<
         }
     }
 }
-fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
+fn timed_out(ctx: &Ctx, views: &[FiberView], phase: Option<&str>) -> AgentError {
     let snapshot = ctx.diagnostics();
     let ids: HashSet<_> = views
         .iter()
@@ -2062,6 +2115,13 @@ fn timed_out(ctx: &Ctx, views: &[FiberView]) -> AgentError {
             format!("{} {:?} [{}]", p.name, p.state, unmet.join(", "))
         })
         .collect();
+    if pending.is_empty()
+        && let Some(phase) = phase
+    {
+        return AgentError::Build(format!(
+            "initialization timed out: no pending row in this wait; still running: {phase}"
+        ));
+    }
     AgentError::Build(format!("initialization timed out: {}", pending.join("; ")))
 }
 

@@ -7,8 +7,8 @@ use crate::{
 };
 use dim_agent_runtime::{
     AgentError, Branch, BranchDirectoryEntry, BranchDirectoryState, BranchLifecycle, BranchOptions,
-    BranchRefusal, Dispatcher, Names, QueryComparison, QueryFilter, QueryOperand, QueryOutput,
-    QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Result, SessionIdentity,
+    BranchRefusal, Dispatcher, Names, OpeningReporter, QueryComparison, QueryFilter, QueryOperand,
+    QueryOutput, QueryPage, QueryPick, QuerySelect, QuerySpec, QueryValue, Result, SessionIdentity,
     StoredBranch, StoredEvent, Timeline, TimelineContext, TimelineFactory, TimelineIdentity,
     TimelineInfo, TimelineKey, TimelineQuery, TimelineQueryReply, TimelineQueryScope,
     TimelineStore, TimelineTreeControl,
@@ -24,7 +24,7 @@ use std::{
     num::NonZeroU64,
     panic::AssertUnwindSafe,
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -39,6 +39,8 @@ use tokio_util::{sync::CancellationToken, task::TaskTracker};
 /// its writer starting. Feature `testing` only: a production build has no hook.
 #[cfg(feature = "testing")]
 pub mod testing {
+    use rutis::host::PluginId;
+    use std::sync::Arc;
     use std::sync::Mutex;
     use tokio::sync::{mpsc, watch};
 
@@ -190,6 +192,107 @@ pub mod testing {
             }
         }
     }
+
+    static RESTORE_DELAYS: Mutex<Vec<(String, std::time::Duration)>> = Mutex::new(Vec::new());
+
+    /// Slows every restore step of one Session until dropped, so a flow test
+    /// can make a restore outlast a short opening bound.
+    pub struct SlowRestore {
+        session: String,
+    }
+    impl Drop for SlowRestore {
+        fn drop(&mut self) {
+            let session = std::mem::take(&mut self.session);
+            RESTORE_DELAYS
+                .lock()
+                .unwrap()
+                .retain(|(held, _)| *held != session);
+        }
+    }
+
+    /// Slows every restore step of `session_id` by `delay`. The tests of one
+    /// process run in parallel, so the key is the Session.
+    pub fn slow_restore_steps(session_id: &str, delay: std::time::Duration) -> SlowRestore {
+        RESTORE_DELAYS
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), delay));
+        SlowRestore {
+            session: session_id.to_owned(),
+        }
+    }
+
+    pub(crate) async fn restore_step(session_id: &str) {
+        let delay = {
+            let delays = RESTORE_DELAYS.lock().unwrap();
+            delays
+                .iter()
+                .find(|(held, _)| held == session_id)
+                .map(|(_, delay)| *delay)
+        };
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
+    }
+
+    type Resolutions = Arc<Mutex<Vec<PluginId>>>;
+    static IDENTITY_RESOLUTIONS: Mutex<Vec<(String, Resolutions)>> = Mutex::new(Vec::new());
+
+    /// Counts how often one Session's trees resolve the identity their opening
+    /// progress is reported under, and names the fibers they resolved, until
+    /// dropped. A restore resolves it once, so the list does not grow with the
+    /// restore's steps.
+    pub struct IdentityResolutions {
+        session: String,
+        ids: Resolutions,
+    }
+    impl IdentityResolutions {
+        /// The fibers the trees of `session_id` resolved since this was armed,
+        /// oldest first.
+        pub fn ids(&self) -> Vec<PluginId> {
+            self.ids.lock().unwrap().clone()
+        }
+        /// The resolutions of `session_id`'s trees since this was armed.
+        pub fn count(&self) -> usize {
+            self.ids.lock().unwrap().len()
+        }
+    }
+    impl Drop for IdentityResolutions {
+        fn drop(&mut self) {
+            let session = std::mem::take(&mut self.session);
+            IDENTITY_RESOLUTIONS
+                .lock()
+                .unwrap()
+                .retain(|(held, _)| *held != session);
+        }
+    }
+
+    /// Counts the opening report identity resolutions of `session_id`'s trees.
+    /// The tests of one process run in parallel, so the key is the Session.
+    pub fn count_identity_resolutions(session_id: &str) -> IdentityResolutions {
+        let ids = Arc::new(Mutex::new(Vec::new()));
+        IDENTITY_RESOLUTIONS
+            .lock()
+            .unwrap()
+            .push((session_id.to_owned(), ids.clone()));
+        IdentityResolutions {
+            session: session_id.to_owned(),
+            ids,
+        }
+    }
+
+    pub(crate) fn identity_resolved(session_id: &str, id: PluginId) {
+        let ids = {
+            let resolutions = IDENTITY_RESOLUTIONS.lock().unwrap();
+            resolutions
+                .iter()
+                .find(|(held, _)| held == session_id)
+                .map(|(_, ids)| ids.clone())
+        };
+        if let Some(ids) = ids {
+            ids.lock().unwrap().push(id);
+        }
+    }
 }
 
 /// How a loaded branch begins on its Timeline.
@@ -294,6 +397,17 @@ pub struct TimelineTree {
     factory: Arc<TimelineFactory>,
     store: Arc<dyn TimelineStore>,
     session_id: String,
+    /// The plugin's context; the restore resolves the identity it reports
+    /// progress under from it once.
+    ctx: Ctx,
+    /// The restore's reporting identity, resolved on the first finished step
+    /// so a Session that never restores costs no diagnostics snapshot. It is
+    /// the id of the copy that creates this tree and closes it again
+    /// (`TimelineTreePlugin::apply` below); the owning row's unload disposes
+    /// that copy, and so the tree, before the next generation applies
+    /// (`PartRegistry::register`), so a row reload rebuilds the tree and its id
+    /// rather than leaving a stale one behind.
+    reporter: OnceLock<Option<OpeningReporter>>,
     cancel: CancellationToken,
     builds: TaskTracker,
     close_result: watch::Sender<Option<Result<()>>>,
@@ -855,15 +969,19 @@ impl TimelineTree {
                 .parent
                 .clone()
                 .expect("a stored descendant has a parent");
-            if matches!(
+            let ended = matches!(
                 self.child_terminal(&parent, &id, stored[&parent].sequence)
                     .await?,
                 Some(ChildTerminal::Ended(_))
-            ) {
+            );
+            self.step_finished().await;
+            if ended {
                 continue;
             }
             let head = stored[&id].sequence;
-            let Some((end_event, data)) = self.own_end(&id, head).await? else {
+            let own_end = self.own_end(&id, head).await?;
+            self.step_finished().await;
+            let Some((end_event, data)) = own_end else {
                 continue;
             };
             let parent_head = stored[&parent].sequence;
@@ -879,6 +997,7 @@ impl TimelineTree {
                     },
                 )
                 .await?;
+            self.step_finished().await;
             stored
                 .get_mut(&parent)
                 .expect("the parent is stored")
@@ -1018,6 +1137,7 @@ impl TimelineTree {
         factory: Arc<TimelineFactory>,
         store: Arc<dyn TimelineStore>,
         session_id: String,
+        ctx: Ctx,
     ) -> Arc<Self> {
         Arc::new_cyclic(|weak| Self {
             weak: weak.clone(),
@@ -1035,6 +1155,8 @@ impl TimelineTree {
             factory,
             store,
             session_id,
+            ctx,
+            reporter: OnceLock::new(),
             cancel: CancellationToken::new(),
             builds: TaskTracker::new(),
             close_result: watch::channel(None).0,
@@ -2621,6 +2743,27 @@ impl TimelineTree {
         });
         *self.close_task.lock().unwrap() = Some(task);
     }
+    /// Reports the restore step that just finished as opening progress, so a
+    /// store read or a line's build that runs long renews the Session opening's
+    /// inactivity bound instead of looking idle. A `testing` build pauses here
+    /// first, so a flow test can make a restore outlast a short bound.
+    async fn step_finished(&self) {
+        #[cfg(feature = "testing")]
+        testing::restore_step(&self.session_id).await;
+        let reporter = self.reporter.get_or_init(|| {
+            let reporter = OpeningReporter::new(&self.ctx);
+            #[cfg(feature = "testing")]
+            {
+                if let Some(reporter) = &reporter {
+                    testing::identity_resolved(&self.session_id, reporter.id());
+                }
+            }
+            reporter
+        });
+        if let Some(reporter) = reporter {
+            reporter.report();
+        }
+    }
     /// The default branch the root's stored facts name, or the root: the
     /// newest `branch/default` or `session/forked` on the root, by the same
     /// kind index the writer's cache uses (design §5, §20.20). A
@@ -2822,17 +2965,22 @@ impl TimelineTreeControl for TimelineTree {
                 self.create_main().await?;
                 return Ok(());
             }
-            let restored = match branches.len() {
-                1 => None,
-                _ => self.recorded_default(&branches).await?,
+            let restored = if branches.len() > 1 {
+                let restored = self.recorded_default(&branches).await?;
+                self.step_finished().await;
+                restored
+            } else {
+                None
             };
             // The fact as of load is the tree's default before any line loads:
             // BranchLine reconciles its note in `apply`, which runs before the
             // line is ready and the Session publishes (design §5, §20.24a).
-            if let Some(default) = &restored
-                && self.restorable_default(&branches, default).await?
-            {
-                self.state.lock().unwrap().default = default.clone();
+            if let Some(default) = &restored {
+                let restorable = self.restorable_default(&branches, default).await?;
+                self.step_finished().await;
+                if restorable {
+                    self.state.lock().unwrap().default = default.clone();
+                }
             }
             let mut remaining: BTreeMap<_, _> = branches
                 .into_iter()
@@ -2874,7 +3022,9 @@ impl TimelineTreeControl for TimelineTree {
                 let mut next: TimelineInfo = stored.info.into();
                 let terminal = if let Some(parent) = &next.parent {
                     let head = self.head(parent).unwrap_or(0);
-                    self.child_terminal(parent, &next.id, head).await?
+                    let terminal = self.child_terminal(parent, &next.id, head).await?;
+                    self.step_finished().await;
+                    terminal
                 } else {
                     None
                 };
@@ -2902,6 +3052,7 @@ impl TimelineTreeControl for TimelineTree {
                     {
                         let (opening, end_event) =
                             self.lifecycle(&next.id, stored.sequence).await?;
+                        self.step_finished().await;
                         if opening.is_some() {
                             self.state.lock().unwrap().ended.insert(
                                 next.id.clone(),
@@ -2917,21 +3068,29 @@ impl TimelineTreeControl for TimelineTree {
                     inactive.insert(next.id);
                     continue;
                 }
-                let own_end = if next.parent.is_some()
-                    && self.lifecycle(&next.id, stored.sequence).await?.1.is_some()
-                {
-                    self.own_end(&next.id, stored.sequence).await?
+                let own_end = if next.parent.is_some() {
+                    let ended = self.lifecycle(&next.id, stored.sequence).await?;
+                    self.step_finished().await;
+                    if ended.1.is_some() {
+                        let own_end = self.own_end(&next.id, stored.sequence).await?;
+                        self.step_finished().await;
+                        own_end
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 };
                 if let Some((end_event, data)) = own_end {
                     self.complete_stored_ends(&next, &mut remaining).await?;
+                    self.step_finished().await;
                     if let (Some(message), Some(parent)) =
                         (&data.final_message, next.parent.as_deref())
                         && self.owned_context(parent).is_some()
                     {
                         self.deliver_final(parent, &next.id, message, end_event)
                             .await?;
+                        self.step_finished().await;
                     }
                     let head = remaining[&next.id].sequence;
                     self.complete_end(&next, end_event, data)?;
@@ -2947,13 +3106,18 @@ impl TimelineTreeControl for TimelineTree {
                     inactive.insert(next.id);
                     continue;
                 }
-                if next.parent.is_some() && !self.created(&next.id, stored.sequence).await? {
-                    let error =
-                        AgentError::Build("branch creation interrupted by process restart".into());
-                    self.record_create_failed(&next, &error)?;
-                    remaining.remove(&next.id);
-                    inactive.insert(next.id);
-                    continue;
+                if next.parent.is_some() {
+                    let created = self.created(&next.id, stored.sequence).await?;
+                    self.step_finished().await;
+                    if !created {
+                        let error = AgentError::Build(
+                            "branch creation interrupted by process restart".into(),
+                        );
+                        self.record_create_failed(&next, &error)?;
+                        remaining.remove(&next.id);
+                        inactive.insert(next.id);
+                        continue;
+                    }
                 }
                 if let Some(parent) = &next.parent {
                     next.source = self
@@ -2963,6 +3127,7 @@ impl TimelineTreeControl for TimelineTree {
                             next.create_anchor.expect("child creation position"),
                         )
                         .await?;
+                    self.step_finished().await;
                 }
                 let ancestors = match &next.parent {
                     Some(parent) => {
@@ -2993,6 +3158,7 @@ impl TimelineTreeControl for TimelineTree {
                     ready
                 };
                 Self::await_branch(ready).await?;
+                self.step_finished().await;
                 remaining.remove(&next.id);
             }
             if let Some(default) = restored.filter(|default| self.selectable_now(default)) {
@@ -3241,7 +3407,7 @@ impl DynPlugin for TimelineTreePlugin {
                     text: PARENT_ENTRY.into(),
                 },
             )?;
-            let tree = TimelineTree::new(factory, store, identity.session_id.clone());
+            let tree = TimelineTree::new(factory, store, identity.session_id.clone(), ctx.clone());
             let owner = tree.clone();
             ctx.effect(move || async move { owner.close().await.map_err(Into::into) })?;
             let commands = Arc::new(TreeCommands {

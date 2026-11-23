@@ -1,6 +1,6 @@
 use crate::rpc::Rpc;
 use agent_client_protocol::{Error, schema::v1 as acp};
-use dim_agent_types::{ModelId, PermissionPolicy, PermissionPreset};
+use dim_agent_types::{ModelId, PermissionPolicy, PermissionPreset, ROOT_BRANCH_ID};
 use dim_client::wire::{AdoptedConfiguration, Configuration, Event, EventContent};
 use serde::Deserialize;
 use serde_json::json;
@@ -245,10 +245,14 @@ impl Config {
             ));
         }
         if let Some(current) = &self.model
-            && self
-                .models
-                .iter()
-                .any(|model| model.id == current.model_id && model.provider == current.provider_id)
+            && self.models.iter().any(|model| {
+                model.id == current.model_id
+                    && model.provider
+                        == current
+                            .catalog_provider_id
+                            .as_deref()
+                            .unwrap_or(&current.provider_id)
+            })
         {
             options.push(select(
                 "model",
@@ -308,6 +312,91 @@ impl Config {
         Some((choices, adopted))
     }
 
+    pub(crate) async fn recover_model(rpc: &Rpc, id: &str, value: &str) -> Result<Self, Error> {
+        let branch = if rpc.supports("session.branches") {
+            let directory: dim_client::wire::BranchDirectory = rpc
+                .typed("session.branches", json!({"sessionId":id}))
+                .await?;
+            directory
+                .default_branch_id
+                .unwrap_or_else(|| ROOT_BRANCH_ID.to_owned())
+        } else {
+            ROOT_BRANCH_ID.to_owned()
+        };
+        let mut config = Self::read(rpc, id, &branch, None).await?;
+        // `session.attach` checks its route against the root and `session.submit`
+        // against the line it targets: restore an expired route on both.
+        let root = config.set_model(rpc, id, ROOT_BRANCH_ID, value, true).await;
+        if branch == ROOT_BRANCH_ID {
+            root?;
+        } else {
+            let line = config.set_model(rpc, id, &branch, value, true).await;
+            match (root, line) {
+                (Ok(()), Ok(())) => {}
+                (Ok(()), Err(error)) | (Err(error), Ok(()))
+                    if error.data.as_ref().is_some_and(|data| {
+                        data["nativeAppError"] == "provider_route_not_expired"
+                    }) => {}
+                (Err(error), _) => return Err(error),
+                (_, Err(error)) => return Err(error),
+            }
+        }
+        let (_, current) = adopted(rpc, id, &branch, None).await?;
+        config.model = Some(current.ok_or_else(Error::internal_error)?);
+        Ok(config)
+    }
+
+    async fn set_model(
+        &mut self,
+        rpc: &Rpc,
+        id: &str,
+        branch: &str,
+        value: &str,
+        require_expired_route: bool,
+    ) -> Result<(), Error> {
+        #[derive(Deserialize)]
+        struct Adopted {
+            model: ModelId,
+            outcome: String,
+        }
+        #[derive(serde::Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Select<'a> {
+            session_id: &'a str,
+            branch_id: &'a str,
+            provider_id: &'a str,
+            model_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            require_expired_route: Option<bool>,
+        }
+        let model = self
+            .models
+            .iter()
+            .find(|model| model.id == value)
+            .ok_or_else(Error::invalid_params)?;
+        let params = serde_json::to_value(Select {
+            session_id: id,
+            branch_id: branch,
+            provider_id: &model.provider,
+            model_id: &model.id,
+            require_expired_route: require_expired_route.then_some(true),
+        })
+        .map_err(|_| Error::internal_error())?;
+        let result: Adopted = rpc.typed("session.model.update", params).await?;
+        if !matches!(result.outcome.as_str(), "adopted" | "unchanged") {
+            return Err(Error::internal_error());
+        }
+        self.model = Some(Configuration {
+            catalog_provider_id: (model.provider != result.model.provider_id)
+                .then(|| model.provider.clone()),
+            provider_id: result.model.provider_id,
+            model_id: result.model.model_id,
+            capability_snapshot: None,
+            model_preferences: None,
+        });
+        Ok(())
+    }
+
     pub(crate) async fn set(
         mut self,
         rpc: &Rpc,
@@ -362,26 +451,7 @@ impl Config {
                 }
             }
             "model" => {
-                #[derive(Deserialize)]
-                struct Adopted {
-                    model: ModelId,
-                    outcome: String,
-                }
-                let model = self
-                    .models
-                    .iter()
-                    .find(|model| model.id == value)
-                    .ok_or_else(Error::invalid_params)?;
-                let result: Adopted = rpc.typed("session.model.update",json!({"sessionId":id,"branchId":branch,"providerId":model.provider,"modelId":model.id})).await?;
-                if !matches!(result.outcome.as_str(), "adopted" | "unchanged") {
-                    return Err(Error::internal_error());
-                }
-                self.model = Some(Configuration {
-                    provider_id: result.model.provider_id,
-                    model_id: result.model.model_id,
-                    capability_snapshot: None,
-                    model_preferences: None,
-                });
+                self.set_model(rpc, id, branch, value, false).await?;
                 self.models = models(rpc).await?;
             }
             _ => return Err(Error::invalid_params()),

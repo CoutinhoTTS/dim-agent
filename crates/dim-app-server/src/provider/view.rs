@@ -40,14 +40,13 @@ pub struct ManagementProvider {
     pub info: ManagementInfo,
     pub models: Option<Vec<ManagementModel>>,
     pub preferences: BTreeMap<String, ModelPreferences>,
-    /// What an update did with the record's models; absent from the reads and
-    /// from a patch that did not change `baseUrl`, `credential` or `headers`.
+    /// What a connection update did with the record's models, including an
+    /// enable that fills an empty bundled catalog or endpoint listing. Absent from reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub models_listed: Option<ModelsListed>,
 }
 
-/// What `provider.update` did with the record's models when the patch changed
-/// the endpoint or the account it reaches.
+/// What `provider.update` did with the record's models for a connection change.
 #[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ModelsListed {
