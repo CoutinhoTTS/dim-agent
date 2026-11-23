@@ -1158,4 +1158,54 @@ mod tests {
         assert!(result.is_ok(), "the attempt completes: {result:?}");
         assert_eq!(output.committed_thinking, "abcabcd");
     }
+
+    /// An expired thinking interval wins over an item that is ready at the
+    /// same time: the buffered thought is shown before the next delta joins
+    /// it. With both branches ready the choice must not be left to chance.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_thinking_deadline_shows_before_a_ready_item() {
+        for attempt in 0..32 {
+            let gate = Arc::new(OutputGate::default());
+            let progress = Arc::new(StateCell::new(ModelProgress::default()));
+            let mut output = Output::new(timeline("main").await, gate, progress.clone(), scope());
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let stream: ModelStream = Box::pin(stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|chunk| (chunk, rx))
+            }));
+            tx.send(Ok(ModelChunk::MessageStart {
+                message_id: "m".into(),
+            }))
+            .unwrap();
+            tx.send(Ok(ModelChunk::Thinking("first".into()))).unwrap();
+            let mut replay_safe = true;
+            let run = consume_output(
+                stream,
+                &mut output,
+                CancellationToken::new(),
+                &mut replay_safe,
+            );
+            tokio::pin!(run);
+            let first =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+            assert!(
+                first.is_pending(),
+                "attempt {attempt}: the read loop waits for the interval"
+            );
+            tokio::time::advance(THINKING_SHOW_AGE + Duration::from_millis(1)).await;
+            tx.send(Ok(ModelChunk::Thinking("second".into()))).unwrap();
+            let second =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+            assert!(
+                second.is_pending(),
+                "attempt {attempt}: the read loop waits for the next item"
+            );
+            assert_eq!(
+                progress.get().thinking,
+                "first",
+                "attempt {attempt}: the expired interval shows its thought before a ready item joins it"
+            );
+            drop(tx);
+            let _ = run.await;
+        }
+    }
 }
