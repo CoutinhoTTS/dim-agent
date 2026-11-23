@@ -1584,4 +1584,125 @@ mod tests {
             "the line was never read from its start, so its cut counts nothing"
         );
     }
+
+    /// The methods a test worker offers when its history reads use display
+    /// transcript pages, whose `done` flag says the page reached the start.
+    const TRANSCRIPT_FEATURES: [&str; 7] = [
+        "session.create",
+        "session.history",
+        "session.history.latestTurn",
+        "session.input.pending.blockPresence",
+        "session.history.display",
+        "session.history.detail",
+        "session.history.display.transcript",
+    ];
+
+    /// A display transcript page carrying `items` and the cursor below them.
+    fn transcript_page(
+        items: Vec<serde_json::Value>,
+        next_before: u64,
+        done: bool,
+    ) -> serde_json::Value {
+        json!({
+            "items": items, "through": 1000, "nextBefore": next_before,
+            "nextAfter": 1000, "done": done,
+        })
+    }
+
+    /// `count` display-only text events from `first`; each request id is its
+    /// own transcript row.
+    fn draft_page(first: u64, count: u64) -> Vec<serde_json::Value> {
+        (first..first + count)
+            .map(|sequence| text(sequence, &format!("r{sequence}"), "draft "))
+            .collect()
+    }
+
+    /// `count` user messages from `first`, each its own transcript row and each
+    /// one a message a cut counts.
+    fn asked_page(first: u64, count: u64) -> Vec<serde_json::Value> {
+        (first..first + count)
+            .map(|sequence| said(sequence, &format!("ask {sequence}")))
+            .collect()
+    }
+
+    /// Opens `b-7c` in a transcript window that starts after its own start,
+    /// then answers an `/earlier` read whose pages carry 10, 20, 30 and 250
+    /// rows. The retention budget keeps the newest 300 rows, so the oldest
+    /// page is dropped even though its `done` flag reached the line's start;
+    /// that page carries every user message `b-90` inherits.
+    async fn a_transcript_read_that_drops_its_oldest_page() -> Worker {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&TRANSCRIPT_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+
+        let mut head = draft_page(331, 10);
+        head.push(line_created(341, "b-90", 240));
+        worker.task_history_queue.clear();
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(head, 331, false)).await;
+        worker.task_history_queue.clear();
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+
+        worker.earlier();
+        for (first, count) in [(321, 10), (301, 20), (271, 30)] {
+            worker.poll_task_history().await.unwrap();
+            answer(
+                &mut worker,
+                transcript_page(draft_page(first, count), first, false),
+            )
+            .await;
+        }
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(asked_page(11, 250), 11, true)).await;
+        worker
+    }
+
+    /// The page that reached the line's start is dropped under the retention
+    /// budget, so the retained history does not cover the start: the cut stays
+    /// unknown instead of counting the messages that happened to survive.
+    #[tokio::test]
+    async fn a_history_read_that_drops_its_oldest_page_leaves_the_cut_unknown() {
+        let worker = a_transcript_read_that_drops_its_oldest_page().await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the retained history misses the dropped page, so the count is unknown"
+        );
+    }
+
+    /// The dropped page loaded on a later `/earlier` fills the gap: the cut is
+    /// recalculated from the whole history, equal to a complete read.
+    #[tokio::test]
+    async fn loading_the_page_a_retention_drop_omitted_recounts_the_cut() {
+        let mut worker = a_transcript_read_that_drops_its_oldest_page().await;
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::Unread,
+            "the dropped page is the earlier history left to read"
+        );
+        worker.earlier();
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(asked_page(11, 250), 11, true)).await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 240,
+                messages: 231,
+            }),
+            "the page that fills the gap counts what a complete read counts"
+        );
+    }
 }

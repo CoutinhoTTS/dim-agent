@@ -3129,6 +3129,23 @@ mod tests {
                 expected,
                 "the pages {pages:?} again count nothing twice"
             );
+            projection.missing_history("main");
+            assert_eq!(
+                counted(&projection),
+                [None, None],
+                "a history that lost a page counts every cut as unknown"
+            );
+            for &(start, end) in pages {
+                for event in &events[start..=end] {
+                    projection.line_event("main", event);
+                }
+            }
+            projection.whole_history("main");
+            assert_eq!(
+                counted(&projection),
+                expected,
+                "the pages that fill the gap count what a complete read counts"
+            );
         };
 
         let ranges: Vec<(usize, usize)> = (0..events.len())

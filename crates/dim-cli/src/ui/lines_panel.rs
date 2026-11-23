@@ -450,6 +450,46 @@ mod tests {
     }
 
     #[test]
+    fn a_line_whose_count_is_unknown_is_listed_where_it_was_cut() {
+        let mut projection = crate::projection::Projection::default();
+        projection.missing_history("main");
+        let created = |sequence: u64, branch: &str, at: u64| {
+            serde_json::json!({
+                "id": format!("create-{branch}"), "sequence": sequence, "create_at": 2000,
+                "type": "branch", "name": "create",
+                "data": {
+                    "branch": branch, "at": {"kind": "sequence", "sequence": at},
+                    "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                    "prompt": branch,
+                },
+            })
+        };
+        for (sequence, branch, at) in [(9, "b-02", 9), (10, "b-7c", 3)] {
+            let event = serde_json::from_value(created(sequence, branch, at)).expect("a creation");
+            projection.line_event("main", &event);
+        }
+        let mut snapshot = snapshot("main");
+        snapshot.lines.truncate(1);
+        snapshot
+            .lines
+            .extend(projection.line_views().iter().cloned());
+        assert!(
+            snapshot.lines.iter().all(|line| line.cut.is_none()),
+            "the parent history is incomplete, so no count is known"
+        );
+        let rows = LinesPanel::new(&snapshot)
+            .render(100, 20, &palette(), &markdown())
+            .into_iter()
+            .map(|row| crate::ui::render::panel::strip_escapes(&row))
+            .collect::<Vec<_>>();
+        let position = |id: &str| rows.iter().position(|row| row.contains(id)).unwrap();
+        assert!(
+            position("b-7c") < position("b-02"),
+            "the earlier cut comes first although neither count is known: {rows:#?}"
+        );
+    }
+
+    #[test]
     fn a_line_an_ancestor_ended_names_that_ancestor() {
         let mut snapshot = snapshot("main");
         snapshot.lines[1].state = LineState::EndedWith("main".into());
