@@ -1716,3 +1716,224 @@ test("a resumed live consumer applies each event once", async t => {
   assert.equal(chat.views.session.rows.filter(row => row.kind === "tool").length, 1)
   assert.equal(toolReads, 1, "a consumer that is already running is not started again for the event it holds")
 })
+
+/**
+ * Opens a Session whose centre read fails, retries it, and returns with the
+ * retry's live consumer suspended on `session.tool.get`: the tool event it
+ * replays and anything received later wait in the centre's queue.
+ */
+async function retrySuspended(t, history, duringGoal = () => {}) {
+  const goalRead = deferred()
+  const hydration = deferred()
+  const state = { arm: false, toolReads: 0 }
+  const chat = session(t, history, {
+    "session.branch_set_default": params => params.branchId,
+    "session.goal.get": params => {
+      if (!state.arm) return { branchId: params.branchId, through: 1, goal: null }
+      state.arm = false
+      receive(chat, "main", event(2, { kind: "tool-completed", requestId: "r1", callId: "call-1", result: { content: [], isError: false } }))
+      duringGoal(chat)
+      return goalRead.promise
+    },
+    "session.tool.get": () => {
+      state.toolReads++
+      return state.toolReads === 1 ? hydration.promise : { requestId: "r1", callId: "call-1", name: "exec", input: {} }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "failed", "the centre starts on a failed page")
+  state.arm = true
+  chat.retryCentre("session")
+  await flush()
+  goalRead.resolve({ branchId: "main", through: 1, goal: null })
+  await flush()
+  assert.equal(chat.views.session.status, "ready", "the retry's reads finish")
+  await until(() => state.toolReads === 1)
+  return { chat, hydration, state }
+}
+
+test("a stale replayed failure does not stop the centre the line returned to", async t => {
+  const workerPage = deferred()
+  let mainReads = 0
+  let workerRead = false
+  const { chat, hydration } = await retrySuspended(t, params => {
+    if (params.branchId === "worker") {
+      workerRead = true
+      return workerPage.promise
+    }
+    if (++mainReads === 1) throw new Error("the line could not be read")
+    return page([input(1, "stored")], 1)
+  })
+  const away = chat.setDefaultBranch("session", "worker")
+  await until(() => workerRead)
+  workerPage.resolve(page([input(1, "on the worker")], 1))
+  await away
+  await flush()
+  await chat.setDefaultBranch("session", "main")
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "main")
+  hydration.reject(new Error("the tool lookup failed"))
+  await flush()
+  receive(chat, "main", input(4, "after the stale failure"))
+  await flush()
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored", "after the stale failure"], "the centre the line returned to keeps consuming its live events")
+})
+
+test("a stale replayed failure does not stop the side line reopened on the old centre", async t => {
+  const workerPage = deferred()
+  let mainReads = 0
+  let workerRead = false
+  const { chat, hydration } = await retrySuspended(t, params => {
+    if (params.branchId === "worker") {
+      workerRead = true
+      return workerPage.promise
+    }
+    if (++mainReads === 1) throw new Error("the line could not be read")
+    return page([input(1, "stored")], 1)
+  })
+  const away = chat.setDefaultBranch("session", "worker")
+  await until(() => workerRead)
+  workerPage.resolve(page([input(1, "on the worker")], 1))
+  await away
+  await flush()
+  chat.ensureLine("session", "main")
+  await until(() => chat.views.session.branches["main"]?.status === "ready")
+  assert.equal(chat.views.session.branches["main"].status, "ready", "the reopened line reads its own window")
+  hydration.reject(new Error("the tool lookup failed"))
+  await flush()
+  assert.equal(chat.views.session.branches["main"].status, "ready", "the reopened line keeps the state its own read published")
+  receive(chat, "main", input(4, "on the reopened line"))
+  await flush()
+  assert.deepEqual(chat.views.session.branches["main"].rows.map(row => row.text), ["stored", "on the reopened line"], "the reopened line keeps consuming its live events")
+})
+
+test("a stale replayed failure does not stop the centre after an in-place reload", async t => {
+  const workerPage = deferred()
+  const reload = deferred()
+  let mainReads = 0
+  const { chat, hydration } = await retrySuspended(t, params => {
+    if (params.branchId === "worker") return workerPage.promise
+    mainReads++
+    if (mainReads === 1) throw new Error("the line could not be read")
+    if (mainReads === 3) return reload.promise
+    return page([input(1, "stored")], 1)
+  })
+  const reconnecting = chat.resync()
+  await until(() => mainReads === 3)
+  hydration.reject(new Error("the tool lookup failed"))
+  await flush()
+  reload.resolve(page([input(1, "stored")], 1))
+  await reconnecting
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  receive(chat, "main", input(4, "after the reload"))
+  await flush()
+  assert.deepEqual(chat.views.session.rows.filter(row => row.kind === "user").map(row => row.text), ["stored", "after the reload"], "the reloaded centre keeps consuming its live events")
+})
+
+test("a stale live consumer that finishes late does not write into the stream that replaced it", async t => {
+  const workerPage = deferred()
+  let mainReads = 0
+  let workerRead = false
+  const { chat, hydration } = await retrySuspended(t, params => {
+    if (params.branchId === "worker") {
+      workerRead = true
+      return workerPage.promise
+    }
+    if (++mainReads === 1) throw new Error("the line could not be read")
+    return page([input(1, "stored")], 1)
+  }, chat => receive(chat, "main", input(3, "while the retry read")))
+  const away = chat.setDefaultBranch("session", "worker")
+  await until(() => workerRead)
+  workerPage.resolve(page([input(1, "on the worker")], 1))
+  await away
+  await flush()
+  chat.ensureLine("session", "main")
+  await until(() => chat.views.session.branches["main"]?.status === "ready")
+  hydration.resolve({ requestId: "r1", callId: "call-1", name: "exec", input: {} })
+  await flush()
+  assert.deepEqual(chat.views.session.branches["main"].rows.map(row => row.text), ["stored"], "the replaced stream keeps its own window")
+  receive(chat, "main", input(4, "after the handover"))
+  await flush()
+  assert.deepEqual(chat.views.session.branches["main"].rows.map(row => row.text), ["stored", "after the handover"], "the replaced stream consumes its own events once")
+})
+
+test("a goal read from before a move away does not fail the centre that came back", async t => {
+  const workerPage = deferred()
+  const goalRead = deferred()
+  let goalArmed = false
+  let workerRead = false
+  const chat = session(t, params => {
+    if (params.branchId === "worker") {
+      workerRead = true
+      return workerPage.promise
+    }
+    return page([input(1, "stored")], 1)
+  }, {
+    "session.branch_set_default": params => params.branchId,
+    "session.goal.set": () => undefined,
+    "session.goal.get": params => {
+      if (goalArmed && params.branchId === "main") {
+        goalArmed = false
+        return goalRead.promise
+      }
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  goalArmed = true
+  const writing = chat.writeGoal("session", "set", "on the main line")
+  writing.catch(() => {})
+  await until(() => !goalArmed)
+  assert.equal(chat.views.session.status, "ready", "the goal read is out on the ready page")
+  const away = chat.setDefaultBranch("session", "worker")
+  await until(() => workerRead)
+  workerPage.resolve(page([input(1, "on the worker")], 1))
+  await until(() => chat.views.session.defaultBranchId === "worker")
+  const back = chat.setDefaultBranch("session", "main")
+  await until(() => chat.views.session.defaultBranchId === "main")
+  goalRead.reject(new Error("the goal read failed"))
+  await flush()
+  await away
+  await back
+  assert.equal(chat.views.session.status, "ready", "a goal read from before the centre moved away does not fail the centre that came back")
+  assert.equal(chat.views.session.error, "")
+})
+
+test("a goal read the next move overtook does not put the ready page back to loading", async t => {
+  const workerPage = deferred()
+  const goalRead = deferred()
+  let goalArmed = false
+  let workerRead = false
+  const chat = session(t, params => {
+    if (params.branchId === "worker") {
+      workerRead = true
+      return workerPage.promise
+    }
+    return page([input(1, "stored")], 1)
+  }, {
+    "session.branch_set_default": params => params.branchId,
+    "session.goal.get": params => {
+      if (goalArmed && params.branchId === "worker") {
+        goalArmed = false
+        return goalRead.promise
+      }
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  goalArmed = true
+  const moving = chat.setDefaultBranch("session", "worker")
+  await until(() => workerRead)
+  workerPage.resolve(page([input(1, "on the worker")], 1))
+  await until(() => chat.views.session.defaultBranchId === "worker")
+  await until(() => !goalArmed)
+  assert.equal(chat.views.session.status, "ready", "the move's goal read is out on the ready page")
+  await chat.setDefaultBranch("session", "worker")
+  goalRead.reject(new ConnectionLost("the connection went away"))
+  await flush()
+  await moving
+  assert.equal(chat.views.session.status, "ready", "a goal read the next move overtook does not put the ready page back to loading")
+})
