@@ -1,10 +1,23 @@
 import {execFileSync,spawnSync} from 'node:child_process';
 import {appendFileSync} from 'node:fs';
 
-export const groups=['rust','windows','static','xtask','node','eval','execution','web','scripts','macos_scripts','dependencies'];
+export const groups=['rust','windows','windows_native','static','xtask','node','eval','execution','web','scripts','macos_scripts','dependencies'];
 const everything=Object.fromEntries(groups.map(group=>[group,true]));
 const documentation=/^docs\/|^[^/]+\.md$/;
 const cargoManifest=/(?:^|\/)Cargo\.toml$/;
+// The Windows-only boundary flows no other platform compiles (#2065): the
+// product files behind crates/dim-agent-capabilities/tests/file_storage_flow.rs,
+// tests/host_platform_windows_flow.rs and crates/dim-app-server/tests/named_pipe_flow.rs,
+// the test targets that include them, and the runner that selects them. A file
+// missing here still reaches the Windows step on the daily sweep, so add it when
+// a Windows branch of those flows moves or gains another file.
+const windowsNative=[
+  /^crates\/dim-agent-capabilities\/src\/(?:file_storage\.rs|file_storage\/|host_platform\.rs|host_platform\/)/,
+  /^crates\/dim-agent-capabilities\/tests\/(?:capabilities_flow|file_storage_flow|host_platform_windows_flow)\.rs$/,
+  /^crates\/dim-app-server\/src\/(?:transport|pipe_client|cli)\.rs$/,
+  /^crates\/dim-app-server\/tests\/(?:app_server_flow|named_pipe_flow)\.rs$/,
+  /^scripts\/test-windows-native\.mjs$/,
+];
 
 const rules=[
   [/^benchmarks\/baselines\/[^/]+\.json$/,[]],
@@ -52,6 +65,7 @@ export function classify(files) {
     const rule=rules.find(([pattern])=>pattern.test(file));
     for (const group of rule?rule[1]:groups) needed.add(group);
     if (cargoManifest.test(file)) needed.add('dependencies');
+    if (windowsNative.some(pattern=>pattern.test(file))) needed.add('windows_native');
   }
   return Object.fromEntries(groups.map(group=>[group,needed.has(group)]));
 }
