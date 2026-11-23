@@ -51,6 +51,7 @@ pub(crate) fn convert(
         let mut completed_calls = HashSet::new();
         let mut thinking = HashMap::<String, String>::new();
         let mut answered = false;
+        let mut unfinished_call = None;
         let terminal = loop {
             let next = tokio::select! {
                 biased;
@@ -62,11 +63,35 @@ pub(crate) fn convert(
                 }
                 next = stream.next() => next,
             };
-            let Some(next) = next else { break None };
+            let Some(next) = next else {
+                break unfinished_call.take().map(Err);
+            };
             let part = match next {
                 Ok(part) => part,
-                Err(failure) => break Some(Err(error(failure, &cancel))),
+                Err(failure) => {
+                    break Some(Err(match unfinished_call.take() {
+                        Some(unfinished) => unfinished,
+                        None => error(failure, &cancel),
+                    }));
+                }
             };
+            // A call whose arguments could not be parsed is not yet a terminal:
+            // a content-filter finish reason that cut them short outranks it.
+            if let Some(failure) = unfinished_call.take() {
+                match &part {
+                    StreamPart::Finish { finish_reason, .. } => {
+                        if finish_reason.unified == FinishReasonUnified::ContentFilter {
+                            break Some(Err(content_filter_failure()));
+                        }
+                        break Some(Err(failure));
+                    }
+                    StreamPart::Error { .. } => break Some(Err(failure)),
+                    _ => {
+                        unfinished_call = Some(failure);
+                        continue;
+                    }
+                }
+            }
             match part {
                 StreamPart::StreamStart { warnings } => {
                     let mut unsupported = None;
@@ -284,8 +309,14 @@ pub(crate) fn convert(
                     };
                     let input = match parse_json_input(&raw) {
                         Ok(Value::Object(input)) => input,
-                        Ok(_) => break Some(Err(HostError::failed("Tool arguments must be a JSON object"))),
-                        Err(failure) => break Some(Err(error(failure, &cancel))),
+                        Ok(_) => {
+                            unfinished_call = Some(HostError::failed("Tool arguments must be a JSON object"));
+                            continue;
+                        }
+                        Err(failure) => {
+                            unfinished_call = Some(error(failure, &cancel));
+                            continue;
+                        }
                     };
                     let name = tool_names.original(&raw.tool_name).to_owned();
                     let started = calls.remove(&raw.tool_call_id).is_some();
@@ -329,10 +360,7 @@ pub(crate) fn convert(
                         FinishReasonUnified::ToolCalls => ModelStopReason::ToolUse,
                         FinishReasonUnified::Length => ModelStopReason::MaxTokens,
                         FinishReasonUnified::ContentFilter => {
-                            break Some(Err(reply_failure(
-                                ModelFailureKind::ContentFiltered,
-                                "the stream ended on a content-filter finish reason",
-                            )));
+                            break Some(Err(content_filter_failure()));
                         }
                         FinishReasonUnified::Error => {
                             break Some(Err(reply_failure(
@@ -475,6 +503,13 @@ fn empty_reply() -> HostError {
     reply_failure(
         ModelFailureKind::MalformedResponse,
         "the response had no text and no tool call",
+    )
+}
+
+fn content_filter_failure() -> HostError {
+    reply_failure(
+        ModelFailureKind::ContentFiltered,
+        "the stream ended on a content-filter finish reason",
     )
 }
 
