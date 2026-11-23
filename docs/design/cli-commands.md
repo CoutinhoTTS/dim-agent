@@ -2911,19 +2911,26 @@ Every other error, including `submission_unknown` and opaque publication/storage
 can follow commit and must not trigger another send.
 
 In its default text mode, `exec` writes only the turn's final reply to stdout.
-Text a model writes before or between tool calls goes to stderr, together with
-the `[tool]`, `[done]` and `[failed]` lines. Whether a request's text is the
-turn's final reply is known only when the turn ends, so a request's text is
-held until then: a request that ends in a tool call, fails (including at its
-output limit) or is cancelled writes its text to stderr; a request that ends
-normally stays the candidate reply, and a turn that completes successfully
-writes it to stdout while a later request in the same turn, or a turn that
-fails or is cancelled, writes it to stderr. `exec resume` first settles a turn
-an earlier invocation left running, and that turn's text goes to stderr: only
-the submitted prompt's turn can write a reply to stdout. A diagnostic line does
-not by itself decide where held text goes. An interrupted run leaves no partial
-text on stdout; a turn whose final reply is empty writes nothing there.
-`exec --json` and a one-shot `dimcode --prompt` run keep their existing routing.
+That turn is the one consuming the input this invocation submitted; text from
+any other turn on the branch, whether it completes before or after, goes to
+stderr. Text a model writes before or between tool calls goes to stderr,
+together with the `[tool]`, `[done]` and `[failed]` lines. Whether a request's
+text is the turn's final reply is known only when the turn ends, so each
+request's text is held until then: a request that ends in a tool call, fails
+(including at its output limit) or is cancelled writes its text to stderr; a
+request that ends normally stays the candidate reply, and a turn that
+completes successfully writes its last request's text to stdout while an
+earlier request in the same turn, or a turn that fails or is cancelled, writes
+it to stderr. Requests are routed by their own id, so an earlier request that
+ends late does not cut a reply that already started. `exec resume` first
+settles a turn an earlier invocation left running, and that turn's text goes
+to stderr. The reply stream closes for good when the submitted turn ends, when
+the run is interrupted, when a line run stops at a question or approval (exit
+3), when the submission fails or the Session closes (exit 1), and when the
+submitted input is deleted (exit 1); text that arrives afterwards is
+diagnostics. A diagnostic line does not by itself decide where held text goes.
+A turn whose final reply is empty writes nothing to stdout. `exec --json` and a
+one-shot `dimcode --prompt` run keep their existing routing.
 
 In JSON mode, stdout contains one compact JSON-RPC notification per line using
 the daemon's existing `method` and `params`. Only notifications for the selected
