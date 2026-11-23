@@ -20,6 +20,11 @@ use tokio_util::sync::CancellationToken;
 const TEXT_FLUSH_BYTES: usize = 4 * 1024;
 /// ... or once the oldest buffered text is this old, checked as text arrives.
 const TEXT_FLUSH_AGE: Duration = Duration::from_secs(1);
+/// Thinking progress is shown at most once per this interval, so a long
+/// thought does not send its whole text on every delta; the block end, a
+/// switch to text or a tool call, a retry and a cleared progress show it at
+/// once, and a timer shows the last delta within one interval.
+const THINKING_SHOW_AGE: Duration = Duration::from_millis(250);
 
 /// Progress that an event now holds; it leaves the progress once that event
 /// is published, so a client never sees neither (ADR agent-029, decision 2).
@@ -112,6 +117,12 @@ pub(crate) struct Output {
     /// Unix milliseconds at which the current thinking block started.
     thinking_started_at: Option<u64>,
     text_since: Option<Instant>,
+    /// Thinking of the open block not shown as progress yet.
+    thinking_pending: String,
+    /// When the pending thinking is shown at the latest.
+    thinking_show_at: Option<Instant>,
+    /// Whether this attempt committed an event to the Timeline.
+    committed: bool,
     pub started: Vec<StartedCall>,
     committed_text: String,
     committed_thinking: String,
@@ -143,6 +154,9 @@ impl Output {
             thinking_part_committed: false,
             thinking_started_at: None,
             text_since: None,
+            thinking_pending: String::new(),
+            thinking_show_at: None,
+            committed: false,
             started: Vec::new(),
             committed_text: String::new(),
             committed_thinking: String::new(),
@@ -235,12 +249,61 @@ impl Output {
         self.clear_progress();
     }
     /// The request ended: its progress is gone.
-    pub fn clear_progress(&self) {
+    pub fn clear_progress(&mut self) {
+        self.thinking_pending.clear();
+        self.thinking_show_at = None;
         self.progress.update(|progress| {
             if progress.request_id.as_deref() == Some(self.scope.request_id.as_str()) {
                 *progress = ModelProgress::default();
             }
         });
+    }
+    /// One attempt starts; nothing of it is committed yet.
+    fn begin_attempt(&mut self) {
+        self.committed = false;
+    }
+    /// Forgets the failed attempt's output. None of it was committed, so the
+    /// retry replaces it and the Timeline keeps nothing of it.
+    fn forget_attempt(&mut self) {
+        self.text.clear();
+        self.text_part_id = None;
+        self.text_part_committed = false;
+        self.text_since = None;
+        self.thinking_part_id = None;
+        self.thinking_part_committed = false;
+        self.thinking_started_at = None;
+        self.thinking_pending.clear();
+        self.thinking_show_at = None;
+        let (turn_id, request_id) = (&self.scope.turn_id, &self.scope.request_id);
+        self.progress.update(|progress| {
+            if progress.request_id.as_deref() == Some(request_id.as_str()) {
+                *progress = ModelProgress {
+                    turn_id: Some(turn_id.clone()),
+                    request_id: Some(request_id.clone()),
+                    ..ModelProgress::default()
+                };
+            }
+        });
+    }
+    /// Shows the thinking received since the last time it was shown.
+    fn show_thinking(&mut self) {
+        self.thinking_show_at = None;
+        if self.thinking_pending.is_empty() {
+            return;
+        }
+        let thinking = std::mem::take(&mut self.thinking_pending);
+        let part_id = self.thinking_part_id.clone();
+        let started_at = self.thinking_started_at;
+        self.show(|progress| {
+            progress.text_part_id = None;
+            progress.thinking_part_id = part_id;
+            progress.thinking_started_at = started_at;
+            progress.thinking.push_str(&thinking);
+        });
+    }
+    /// When the pending thinking must be shown without another delta.
+    fn thinking_show_deadline(&self) -> Option<Instant> {
+        self.thinking_show_at
     }
     /// Visible output arrived; a request replaced by a steer stops here.
     fn receive(&self) -> Result<(), HostError> {
@@ -267,6 +330,7 @@ impl Output {
             None => self.timeline.append(draft),
         }
         .map_err(|error| HostError::failed(error.to_string()))?;
+        self.committed = true;
         let (turn_id, request_id) = match &event.kind {
             EventKind::Text(d) | EventKind::Thinking(d) => (&d.turn_id, &d.request_id),
             EventKind::ToolUseStart(d) => (&d.turn_id, &d.request_id),
@@ -285,11 +349,16 @@ impl Output {
             self.text_part_id = Some(uuid::Uuid::new_v4().to_string());
             self.text_part_committed = false;
         }
+        let pending = std::mem::take(&mut self.thinking_pending);
+        self.thinking_show_at = None;
         self.thinking_part_id = None;
         self.thinking_part_committed = false;
         self.thinking_started_at = None;
         let part_id = self.text_part_id.clone();
         self.show(|progress| {
+            if !pending.is_empty() {
+                progress.thinking.push_str(&pending);
+            }
             progress.text_part_id = part_id;
             progress.thinking_part_id = None;
             progress.thinking_started_at = None;
@@ -351,18 +420,17 @@ impl Output {
         self.flush_text()?;
         self.text_part_id = None;
         self.text_part_committed = false;
-        let started_at = self.open_thinking();
-        let part_id = self.thinking_part_id.clone();
-        self.show(|progress| {
-            progress.text_part_id = None;
-            progress.thinking_part_id = part_id;
-            progress.thinking_started_at = started_at;
-            progress.thinking.push_str(&thinking);
-        });
+        self.open_thinking();
+        self.thinking_pending.push_str(&thinking);
+        if !self.thinking_pending.is_empty() {
+            self.thinking_show_at
+                .get_or_insert_with(|| Instant::now() + THINKING_SHOW_AGE);
+        }
         Ok(())
     }
     fn thinking(&mut self, thinking: String) -> Result<(), HostError> {
         self.flush_text()?;
+        self.show_thinking();
         self.text_part_id = None;
         self.text_part_committed = false;
         if thinking.is_empty() {
@@ -399,6 +467,7 @@ impl Output {
     }
     fn tool_start(&mut self, call_id: String, name: String) -> Result<(), HostError> {
         self.flush_text()?;
+        self.show_thinking();
         self.text_part_id = None;
         self.text_part_committed = false;
         self.thinking_part_id = None;
@@ -432,6 +501,7 @@ impl Output {
     }
     fn tool_use(&mut self, call: ToolCall) -> Result<(), HostError> {
         self.flush_text()?;
+        self.show_thinking();
         self.text_part_id = None;
         self.text_part_committed = false;
         self.thinking_part_id = None;
@@ -462,6 +532,7 @@ impl Output {
     }
     fn content(&mut self, content: Vec<MessagePart>) -> Result<(), HostError> {
         self.flush_text()?;
+        self.show_thinking();
         let text = content
             .iter()
             .filter_map(|part| match part {
@@ -526,6 +597,7 @@ impl Output {
 
 impl crate::model_provider::RetryObserver for Output {
     fn waiting(&mut self, retry: Option<crate::model_provider::RetryWaiting<'_>>) {
+        self.show_thinking();
         self.show(|progress| {
             progress.retry = retry.map(|retry| RetryProgress {
                 attempt: retry.attempt,
@@ -544,11 +616,18 @@ pub(crate) async fn consume_output(
     cancel: CancellationToken,
     replay_safe: &mut bool,
 ) -> Result<FinishReason, HostError> {
+    output.begin_attempt();
     let mut stream = stream.fuse();
-    let result = parse_output(&mut stream, output, cancel.clone(), replay_safe).await;
+    let result = parse_output(&mut stream, output, cancel.clone()).await;
     if result.is_err() {
         cancel.cancel();
         let _ = output.flush_text();
+        // A retry may follow only an attempt that left no fact behind: its
+        // progress is dropped and the next attempt starts from nothing.
+        *replay_safe = !output.committed;
+        if *replay_safe {
+            output.forget_attempt();
+        }
         while stream.next().await.is_some() {}
     }
     result
@@ -558,7 +637,6 @@ async fn parse_output(
     stream: &mut (impl futures_util::Stream<Item = Result<ModelChunk, HostError>> + Unpin),
     output: &mut Output,
     cancel: CancellationToken,
-    replay_safe: &mut bool,
 ) -> Result<FinishReason, HostError> {
     let mut message_id = None;
     let mut finish = None;
@@ -567,6 +645,8 @@ async fn parse_output(
     let mut content_seen = false;
     let mut published = output.timeline.watch();
     loop {
+        let show_at = output.thinking_show_deadline();
+        let until = show_at.unwrap_or_else(Instant::now);
         let next = tokio::select! {
             chunk = stream.next() => chunk,
             changed = published.changed(), if !output.handoffs.is_empty() => {
@@ -575,6 +655,10 @@ async fn parse_output(
                 } else {
                     output.handoffs.clear();
                 }
+                continue;
+            }
+            _ = tokio::time::sleep_until(until), if show_at.is_some() => {
+                output.show_thinking();
                 continue;
             }
         };
@@ -597,21 +681,16 @@ async fn parse_output(
             }
             other => other?,
         };
-        if !matches!(chunk, ModelChunk::MessageStart { .. }) {
-            *replay_safe = false;
-        }
         if let ModelChunk::Usage(usage) = chunk {
-            output
-                .timeline
-                .append(
-                    EventKind::ModelUsage(ModelUsageData {
-                        turn_id: output.scope.turn_id.clone(),
-                        request_id: output.scope.request_id.clone(),
-                        usage,
-                    })
-                    .into(),
-                )
-                .map_err(|e| HostError::failed(e.to_string()))?;
+            output.commit(
+                EventKind::ModelUsage(ModelUsageData {
+                    turn_id: output.scope.turn_id.clone(),
+                    request_id: output.scope.request_id.clone(),
+                    usage,
+                }),
+                None,
+                None,
+            )?;
             continue;
         }
         if finish.is_some() {

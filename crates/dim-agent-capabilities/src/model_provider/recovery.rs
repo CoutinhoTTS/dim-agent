@@ -61,8 +61,8 @@ pub type Consume<S, T> = for<'a> fn(
 /// once, and a terminal rejection is settled with its credential owner. A
 /// request that continues a `chain` starts from the attempts and the wait it
 /// spent, so the chain keeps one budget. `consume` reads one attempt's stream
-/// into `state` and clears `replay_safe` once output that cannot be replayed
-/// was handed on.
+/// into `state` and clears `replay_safe` once the attempt committed an event
+/// to the Timeline.
 pub async fn invoke<S: Send + RetryObserver, T>(
     host: &ModelHost,
     request: &Arc<ModelRequest>,

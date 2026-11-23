@@ -77,7 +77,7 @@ ModelFailure {
 - 旧客户端读取的 `error` 是默认英文行 `<meaning>: <reason>. <action>`，没有 reason 时省略 `: <reason>`。传输层在本地拒绝请求且有 reason 时，只使用该 reason，不将拒绝归因于提供方。不再有 `ApiCall:` 前缀。当该失败使其 turn 结算为 Failed 时，该回合在 `TurnOutcome::Failed.error` 中携带同一字符串，客户端据此可以区分两者并去掉重复。不使 turn 失败的失败（例如输出上限停止）不在 turn 的结果中携带任何内容。
 - `max_tokens` 停止保留其 presentation，同时写入 `failure.kind = output_limit`。它不使 turn 失败：Loop 以 `output_limit` 为 reason 把该 turn 结算为 Completed（见 Loop.md「声明了调用却从未执行的失败步骤」一节）。
 - 工具参数始终没有完成时写入 `failure.kind = malformed_response`，与 `InvalidToolInput` 对同一缺陷的 kind 相同。
-- 以 end-turn 停止、既没有非空白文本也没有工具调用的回复写入 `failure.kind = malformed_response`，原因为 "the response had no text and no tool call"。只有 thinking 不算回答，所以只带 thinking 的回复同样算空回复。该判断落在桥接层流结束处，因为只有它看得到完整响应。是否重试取决于这次尝试交出了什么：只交出过消息开始的，与任何 `malformed_response` 一样重试一次；一旦交出过别的任何东西，包括只有空白的正文片段，就过了可重试的界线（`output.rs` 除消息开始外每个片段都清除 replay safety），因此 turn 带着已记录并展示的失败结束，由用户重新发送。重试在任何情况下都不能跟在已提交的输出之后：请求已提交的内容必须与下一份完整回复一致，thinking 也算在内（`output.rs`），而第二次尝试会带来它自己的 thinking。该规则适用于每个 turn，包括 Loop 与 Goal 的驱动 turn：空回复在那里同样不是一个有效步骤。
+- 以 end-turn 停止、既没有非空白文本也没有工具调用的回复写入 `failure.kind = malformed_response`，原因为 "the response had no text and no tool call"。只有 thinking 不算回答，所以只带 thinking 的回复同样算空回复。该判断落在桥接层流结束处，因为只有它看得到完整响应。是否重试取决于这次尝试提交了什么：尚未向 Timeline 提交任何事件时，与任何 `malformed_response` 一样重试一次，失败尝试的 progress 在重试开始前被丢弃，由下一次尝试替代；一旦提交过任何事件，包括只有空白的正文片段或 usage 事实，就过了可重试的界线（`output.rs` 在该次尝试提交事件时清除 replay safety），因此 turn 带着已记录并展示的失败结束，由用户重新发送。已收到但未提交的 progress，thinking 也算在内，不是事实，不会阻止重试。重试在任何情况下都不能跟在已提交的输出之后：请求已提交的内容必须与下一份完整回复一致，thinking 也算在内（`output.rs`），而第二次尝试会带来它自己的 thinking。该规则适用于每个 turn，包括 Loop 与 Goal 的驱动 turn：空回复在那里同样不是一个有效步骤。
 - 没有提供方边界的宿主机失败得到 kind `unknown` 和它原本携带的消息。
 
 ## 3. 谁来措辞
@@ -96,7 +96,7 @@ CLI 的 line 模式与 `exec` 只打印这一行。TUI 与 Web 把细节放在�
 
 ## 4. 重试
 
-`invoke` 由 ModelProvider、辅助模型和摘要策略共用，因此只有一份策略，也没有按调用方设置的配置，但结果并不总是相同：replay safety 由消费方自己清除，而辅助模型与摘要策略只是读取流、不交出任何片段，所以只流出 thinking 或空白正文的回复在它们那里会被重试，在主 turn 里不会。
+`invoke` 由 ModelProvider、辅助模型和摘要策略共用，因此只有一份策略，也没有按调用方设置的配置，但结果并不总是相同：replay safety 由消费方自己清除，而辅助模型与摘要策略只是读取流、不提交任何事件，所以收到输出之后失败在它们那里会被重试，在主 turn 里则要等到这次尝试提交过后才不重试。
 
 | 项 | 值 |
 | --- | --- |
@@ -106,7 +106,7 @@ CLI 的 line 模式与 `exec` 只打印这一行。TUI 与 Web 把细节放在�
 | 退避 | 第 n 次重试等待 1 秒 × 2^(n−1)，上限 30 秒，再乘以 [0.8, 1.0] 的均匀抖动 |
 | `Retry-After` | 在剩余预算内时原样用作延迟，即使超过 30 秒；放不下时立即停止并记录 `retryAfterMs` |
 | 等待预算 | 一个请求在失败前合计最多睡眠五分钟；放不进剩余预算的等待会让请求立即停止 |
-| 保持不变 | 一旦该次尝试交出了消息开始以外的任何东西（thinking 与空白正文都算）就不再重试；中断取消等待；凭据恢复一次且无延迟，仍计入 8 次上限；`ModelFailurePolicy::forbids_retry`；终止性凭据拒绝会被结清 |
+| 保持不变 | 一旦该次尝试向 Timeline 提交过事件（空白正文片段与 usage 事实都算）就不再重试；已收到未提交的 progress（thinking 也算）不阻止重试，并在重试前被丢弃；中断取消等待；凭据恢复一次且无延迟，仍计入 8 次上限；`ModelFailurePolicy::forbids_retry`；终止性凭据拒绝会被结清 |
 
 名义退避为 1、2、4、8、16、30、30 秒，合计约 91 秒。这些数字来自 #1197 的故障，它持续了数十秒：8 次尝试可撑过约 90 秒；1 秒基数避免亚秒级的尝试再次撞上同一故障；30 秒上限让最后几次尝试不会相隔数分钟；服务端自己的建议决定等待时长，但不能延长预算。一个请求在失败前合计最多可等待五分钟；被拒绝的凭据恢复从不等待，无论它携带了什么建议。
 
