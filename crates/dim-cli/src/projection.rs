@@ -37,6 +37,8 @@ struct OpenThought {
     /// When the block's first durable `step/thinking` arrived; the block's
     /// start. `None` while only progress shows it.
     started_at: Option<u64>,
+    /// The progress block's identity, as the notice named it.
+    part_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -80,6 +82,10 @@ pub struct Projection {
     ended: Option<(u64, TurnEnd)>,
     /// Requests whose text, thinking or tool row already showed.
     showed: HashSet<String>,
+    /// Requests whose only visible output so far is progress thinking.
+    showed_thinking: HashSet<String>,
+    /// Names each thinking row; a rebuilt row gets a new one.
+    thinking_seq: u64,
     /// The `error` of a model failure already shown this turn: the turn's
     /// repeat of it prints nothing.
     shown_failure: Option<String>,
@@ -423,6 +429,7 @@ impl Projection {
                     .entry(data.request_id.clone())
                     .or_default() += data.delta.chars().count() as u64;
                 self.showed.insert(data.request_id.clone());
+                self.showed_thinking.remove(&data.request_id);
                 let index = self.open_thinking(&data.request_id);
                 let thought = self
                     .thinking_rows
@@ -446,6 +453,7 @@ impl Projection {
             }
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
+                self.showed_thinking.remove(&data.request_id);
                 self.close_thinking(&data.request_id, event.create_at);
                 let index = match self.assistant_rows.get(&data.request_id) {
                     Some(index) => *index,
@@ -464,6 +472,7 @@ impl Projection {
             }
             EventContent::ToolUse(data) => {
                 self.showed.insert(data.request_id.clone());
+                self.showed_thinking.remove(&data.request_id);
                 self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
                 let row_id = serde_json::to_string(&(&data.request_id, &data.call.id))
@@ -531,6 +540,7 @@ impl Projection {
             EventContent::ModelEnd(data) => {
                 self.thinking_characters.remove(&data.request_id);
                 let incomplete = self.showed.remove(&data.request_id);
+                self.showed_thinking.remove(&data.request_id);
                 self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
                 self.retry = None;
@@ -1774,13 +1784,29 @@ impl Projection {
         let Some(request_id) = &progress.request_id else {
             return;
         };
-        if !progress.thinking.is_empty() || !progress.text.is_empty() {
+        if self.thinking_rows.get(request_id).is_some_and(|thought| {
+            thought.written.is_empty()
+                && (progress.thinking.is_empty() && progress.text.is_empty()
+                    || progress.thinking_part_id.is_some()
+                        && progress.thinking_part_id != thought.part_id)
+        }) {
+            self.discard_thinking(request_id);
+            if self.showed_thinking.remove(request_id) {
+                self.showed.remove(request_id);
+            }
+        }
+        if !progress.thinking.is_empty() {
             self.showed.insert(request_id.clone());
+            self.showed_thinking.insert(request_id.clone());
         }
         if progress.thinking.is_empty() {
             return;
         }
         let index = self.open_thinking(request_id);
+        self.thinking_rows
+            .get_mut(request_id)
+            .expect("opened above")
+            .part_id = progress.thinking_part_id.clone();
         if let Some(started_at) = progress.thinking_started_at {
             self.thinking_rows
                 .get_mut(request_id)
@@ -1812,10 +1838,11 @@ impl Projection {
             return thought.index;
         }
         let index = self.push(
-            format!("thinking-{request_id}-{}", self.rows.len()),
+            format!("thinking-{request_id}-{}", self.thinking_seq),
             RowKind::Thinking,
             String::new(),
         );
+        self.thinking_seq += 1;
         self.row(index).streaming = true;
         self.thinking_rows.insert(
             request_id.to_owned(),
@@ -1824,9 +1851,45 @@ impl Projection {
                 written: String::new(),
                 excerpt: thinking::Excerpt::default(),
                 started_at: None,
+                part_id: None,
             },
         );
         index
+    }
+
+    /// Drops a thought a replaced attempt opened; none of it was committed.
+    fn discard_thinking(&mut self, request_id: &str) {
+        let Some(thought) = self.thinking_rows.remove(request_id) else {
+            return;
+        };
+        self.remove_row(thought.index);
+    }
+
+    fn remove_row(&mut self, index: usize) {
+        self.rows.remove(index);
+        let shift = |value: &mut usize| {
+            if *value > index {
+                *value -= 1;
+            }
+        };
+        for value in self.assistant_rows.values_mut() {
+            shift(value);
+        }
+        for thought in self.thinking_rows.values_mut() {
+            shift(&mut thought.index);
+        }
+        for value in self.tool_rows.values_mut() {
+            shift(value);
+        }
+        for value in self.compaction_rows.values_mut() {
+            shift(value);
+        }
+        for value in self.input_rows.values_mut() {
+            shift(value);
+        }
+        for value in self.cards.values_mut() {
+            shift(value);
+        }
     }
 
     /// A thought settles when the request moves on, as the Timeline holds
@@ -4154,7 +4217,11 @@ mod tests {
         apply(&mut projection, &[model_start(1)]);
         projection.progress(&part_progress("failed attempt", "first", 1000));
         let first = projection.snapshot().rows[0].row_id.clone();
-        projection.progress(&part_progress("a longer successful thought", "second", 5000));
+        projection.progress(&part_progress(
+            "a longer successful thought",
+            "second",
+            5000,
+        ));
         let rows = projection.snapshot().rows;
         assert_eq!(
             rows.len(),
