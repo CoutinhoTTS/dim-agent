@@ -233,7 +233,6 @@ async fn unchanged_shell_preferences_reuse_detection_and_edits_recover() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: Some((0, "exec-shell.json".into())),
-                command_files: None,
                 home: None,
             },
         )
@@ -1239,7 +1238,6 @@ async fn the_host_platform_service_starts_and_waits_for_a_command() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )
@@ -1338,7 +1336,6 @@ async fn the_host_platform_service_serves_a_shell() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )
@@ -1455,7 +1452,6 @@ async fn the_host_platform_service_runs_a_command_with_stdin() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )
@@ -1513,7 +1509,6 @@ async fn the_host_platform_service_runs_a_confined_helper() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )
@@ -1573,7 +1568,6 @@ async fn the_host_platform_service_removes_output_and_composes_a_path() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )
@@ -1637,7 +1631,6 @@ async fn a_wait_timeout_leaves_the_command_running() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )
@@ -1713,7 +1706,6 @@ async fn output_removal_refuses_traversal_and_links() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )
@@ -1779,7 +1771,6 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )
@@ -1876,7 +1867,6 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
                 execution: names.key().unwrap(),
                 toolchain: names.key().unwrap(),
                 exec_shell_file: None,
-                command_files: None,
                 home: Some(dir.clone()),
             },
         )

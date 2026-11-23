@@ -994,7 +994,6 @@ pub async fn serve(mut builder: AgentBuilder, mut config: ServerConfig) -> Resul
                             execution: names.key()?,
                             toolchain: names.key()?,
                             exec_shell_file: Some((home_root, "exec-shell.json".into())),
-                            command_files: None,
                             home: platform_home.clone(),
                         },
                     )?,

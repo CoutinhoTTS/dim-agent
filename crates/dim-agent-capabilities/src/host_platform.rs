@@ -255,7 +255,6 @@ pub struct HostPlatform {
     pub(crate) command_workers: tokio_util::task::TaskTracker,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
-    command_files: Option<(Arc<FileStorage>, usize, PathBuf)>,
     pub(crate) execution: Option<Arc<ExecutionSettingsHost>>,
     /// The installed runtimes a started process finds at the end of its
     /// `PATH`; `None` is a host that installs none.
@@ -702,7 +701,6 @@ impl HostPlatform {
                 status: shell,
             })),
             shell_file: None,
-            command_files: None,
             mounted: std::sync::Weak::new(),
             commands: Arc::default(),
             command_shutdown: CancellationToken::new(),
@@ -1955,8 +1953,6 @@ pub struct HostPlatformConfig {
     /// `exec-shell.json`: FileStorage root index and relative path. `None`
     /// means the profile has no home; the shell is resolved automatically.
     pub exec_shell_file: Option<(usize, PathBuf)>,
-    /// Storage root and relative directory holding retained command logs.
-    pub command_files: Option<(usize, PathBuf)>,
     /// The user home the platform reports. `None` uses the process home; a
     /// host that runs with an isolated home sets it, so every capability
     /// resolves `~` and the user Skill root inside that home.
@@ -1988,7 +1984,7 @@ impl HostPlatformPlugin {
 }
 /// File storage only when a local configuration source is configured.
 fn uses_storage(config: &HostPlatformConfig) -> bool {
-    config.exec_shell_file.is_some() || config.command_files.is_some()
+    config.exec_shell_file.is_some()
 }
 impl DynPlugin for HostPlatformPlugin {
     fn name(&self) -> &str {
@@ -2026,12 +2022,6 @@ impl DynPlugin for HostPlatformPlugin {
                 platform.home = home.clone();
             }
             platform.shell_file = shell_file;
-            platform.command_files = self
-                .config
-                .command_files
-                .clone()
-                .zip(storage.clone())
-                .map(|((root, directory), files)| (files, root, directory));
             let execution = ctx.require_at(&self.execution)?;
             platform.execution = Some(execution.clone());
             let toolchain = ctx.require_at(&self.toolchain)?;
@@ -3337,44 +3327,6 @@ impl HostPlatform {
         };
         use std::io::SeekFrom;
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
-        if let Some((files, root, _)) = &self.command_files
-            && let Ok(relative) = path.strip_prefix(
-                files
-                    .root_path(*root)
-                    .map_err(|_| OutputPageError::Unavailable)?,
-            )
-        {
-            let file = files
-                .path(*root, relative)
-                .map_err(|_| OutputPageError::Unavailable)?;
-            let cancel = CancellationToken::new();
-            let _guard = cancel.clone().drop_guard();
-            let reader = files
-                .open_read(&file, &cancel)
-                .await
-                .map_err(|_| OutputPageError::Unavailable)?;
-            let size = reader
-                .len()
-                .saturating_sub(cursor)
-                .min((limit + PAGE_CHAR_TRAILING_BYTES) as u64) as usize;
-            let mut bytes = Vec::with_capacity(size);
-            while bytes.len() < size {
-                let chunk = reader
-                    .read_at(cursor + bytes.len() as u64, size - bytes.len(), &cancel)
-                    .await
-                    .map_err(|_| OutputPageError::Unavailable)?;
-                if chunk.is_empty() {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk);
-            }
-            return decode_page(
-                &bytes,
-                cursor,
-                limit,
-                reader.len() >= crate::workspace_tools::exec::OUTPUT_FILE_BYTE_LIMIT,
-            );
-        }
         let mut file = tokio::fs::File::open(path)
             .await
             .map_err(|_| OutputPageError::Unavailable)?;
