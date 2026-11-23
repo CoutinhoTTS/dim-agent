@@ -1432,6 +1432,7 @@ fn stop_name(stop: &str) -> Result<&'static str> {
         "switch_target_ended" => Ok("switch_target_ended"),
         "switch_target_unknown" => Ok("switch_target_unknown"),
         "switch_note_missing" => Ok("switch_note_missing"),
+        "switch_incomplete" => Ok("switch_incomplete"),
         "error" => Ok("error"),
         other => Err(format!("the saved run has an unknown stop {other}").into()),
     }
@@ -2737,8 +2738,8 @@ struct RunRecord {
     texts: Vec<ConfiguredText>,
     session: Option<String>,
     /// `idle`, `turns`, `seconds`, `switch_target_not_reached`,
-    /// `switch_target_ended`, `switch_target_unknown`, `switch_note_missing`
-    /// or `error`.
+    /// `switch_target_ended`, `switch_target_unknown`, `switch_note_missing`,
+    /// `switch_incomplete` or `error`.
     stop: &'static str,
     turns: u32,
     window: Option<f64>,
@@ -5597,6 +5598,7 @@ fn child_record(
         "switch_target_ended" => "switch_target_ended",
         "switch_target_unknown" => "switch_target_unknown",
         "switch_note_missing" => "switch_note_missing",
+        "switch_incomplete" => "switch_incomplete",
         _ => "error",
     };
     let error = match &outcome.harness {
@@ -6001,13 +6003,17 @@ async fn drive_once(
 }
 
 /// Whether the run is a failed run (model-prompts §8.1): it failed on its
-/// own, an error, its wall-clock budget or a switch that could not happen,
-/// or its judging did not happen — a judge call failed, there was no export
-/// to judge, or no model host for the judge.
+/// own, an error, its wall-clock budget or a switch that could not happen or
+/// did not send its scored follow-ups, or its judging did not happen — a judge
+/// call failed, there was no export to judge, or no model host for the judge.
 fn failed(stop: &str, error: Option<&str>, judge_outcome: JudgeOutcome) -> bool {
     matches!(
         stop,
-        "seconds" | "switch_target_not_reached" | "switch_target_ended" | "switch_target_unknown"
+        "seconds"
+            | "switch_target_not_reached"
+            | "switch_target_ended"
+            | "switch_target_unknown"
+            | "switch_incomplete"
     ) || error.is_some()
         || matches!(
             judge_outcome,
@@ -6824,37 +6830,51 @@ async fn drive(
             }
         }
     }
-    // A move that already happened leaves the outcome the run reached: the
-    // move is not the thing the run stopped waiting on (the run may have been
-    // waiting for its note or its input). A move that never happened keeps its
-    // own outcome, so a scenario that could not switch is not read as a run
-    // that reached its budget.
+    // A switch still at the front when the loop ended never completed. A move
+    // that never happened keeps its own outcome, so a scenario that could not
+    // switch is not read as a run that reached its budget. A move that
+    // happened without sending its scored follow-ups is incomplete: no request
+    // answered under the text the evaluation compares, so the run is failed
+    // instead of scored as a complete scenario. A run that stopped on its wall
+    // clock already named the switch it stopped waiting on and keeps that
+    // ending.
     if let Some(pending) = switches.front()
-        && !pending.moved
+        && !(driven.stop == "seconds" && driven.error.is_some())
     {
-        let reason = match (&pending.line, pending.triggered) {
-            _ if pending.previous.is_some() => match &pending.line {
-                Some(line) => format!(
-                    "the chained move to line {line} did not fire: the input before it was not consumed before the run stopped on {}",
+        let reason = if pending.moved {
+            let line = pending
+                .line
+                .as_deref()
+                .expect("a moved switch names its line");
+            format!(
+                "the move to line {line} happened but its scored follow-up was not sent before the run stopped on {}",
+                driven.stop
+            )
+        } else {
+            match (&pending.line, pending.triggered) {
+                _ if pending.previous.is_some() => match &pending.line {
+                    Some(line) => format!(
+                        "the chained move to line {line} did not fire: the input before it was not consumed before the run stopped on {}",
+                        driven.stop
+                    ),
+                    None => format!(
+                        "the chained move did not fire: its target was not opened and the input before it was not consumed before the run stopped on {}",
+                        driven.stop
+                    ),
+                },
+                (Some(line), true) => format!(
+                    "the move to line {line} did not complete before the run stopped on {}",
                     driven.stop
                 ),
-                None => format!(
-                    "the chained move did not fire: its target was not opened and the input before it was not consumed before the run stopped on {}",
+                (Some(line), false) => format!(
+                    "the switch never fired: line {line}'s first turn did not start before the run stopped on {}",
                     driven.stop
                 ),
-            },
-            (Some(line), true) => format!(
-                "the move to line {line} did not complete before the run stopped on {}",
-                driven.stop
-            ),
-            (Some(line), false) => format!(
-                "the switch never fired: line {line}'s first turn did not start before the run stopped on {}",
-                driven.stop
-            ),
-            (None, _) => format!(
-                "the switch never fired: the line its role names was never opened before the run stopped on {}",
-                driven.stop
-            ),
+                (None, _) => format!(
+                    "the switch never fired: the line its role names was never opened before the run stopped on {}",
+                    driven.stop
+                ),
+            }
         };
         if driven.stop == "error" {
             driven.error = Some(match driven.error.take() {
@@ -6862,7 +6882,11 @@ async fn drive(
                 None => reason,
             });
         } else {
-            driven.stop = "switch_target_not_reached";
+            driven.stop = if pending.moved {
+                "switch_incomplete"
+            } else {
+                "switch_target_not_reached"
+            };
             driven.error = Some(reason);
         }
     }
