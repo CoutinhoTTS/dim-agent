@@ -1502,3 +1502,105 @@ test("a side line keeps the events it received while the centre page was failed"
   assert.equal(chat.views.session.status, "ready", "the retry recovered the centre")
   assert.deepEqual(chat.views.session.branches.worker.rows.map(row => row.text), ["on worker", "arrived while the page was failed"], "the side line shows the event it received while the page was failed, once")
 })
+
+test("a retry's late policy read does not undo a failure a goal refresh published while it was out", async t => {
+  const policyRead = deferred()
+  const policy = { preset: "read-only", allowedTools: [], disallowedTools: [] }
+  const newer = { preset: "full-access", allowedTools: [], disallowedTools: [] }
+  let arm = false
+  let goalFails = false
+  let policyReads = 0
+  const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
+    "session.goal.get": params => {
+      if (goalFails) throw new Error("the goal read failed")
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+    "session.goal.set": () => ({}),
+    "session.permission.get": () => {
+      if (!arm) return { version: 1, policy }
+      policyReads++
+      return policyRead.promise
+    },
+  })
+  const supports = globalThis.historyStores.connection.supports
+  globalThis.historyStores.connection.supports = name => name === "session.permission.get" || supports(name)
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  goalFails = true
+  receive(chat, "main", goalInput(2, "goal: carry on"))
+  await flush()
+  assert.equal(chat.views.session.status, "failed")
+  goalFails = false
+  arm = true
+  chat.retryCentre("session")
+  await until(() => policyReads === 1)
+  assert.equal(chat.views.session.status, "failed", "the retry reads the policy while the failed page is shown")
+  goalFails = true
+  const writing = chat.writeGoal("session", "set", "carry on", "main").then(() => "ok", cause => `rejected: ${cause.message}`)
+  await flush()
+  assert.equal(chat.views.session.status, "failed", "the goal read that crossed the retry fails the page")
+  policyRead.resolve({ version: 2, policy: newer })
+  await flush()
+  assert.equal(chat.views.session.status, "failed", "the retry's late policy read does not undo the failure")
+  assert.equal(chat.views.session.error, "the goal read failed")
+  assert.deepEqual(chat.views.session.permission, policy, "the policy read that crossed the failure is not shown")
+  assert.equal(chat.views.session.permissionVersion, 1)
+  assert.equal(await writing, "rejected: the goal read failed")
+})
+
+test("a no-op move finishes the page a resync left loading on the line", async t => {
+  const modelRead = deferred()
+  const oldPage = deferred()
+  let armModel = false
+  let modelReads = 0
+  let rootReads = 0
+  const chat = session(t, params => {
+    if (params.branchId === "worker") return page([input(1, "on the worker")], 1)
+    rootReads++
+    return rootReads === 1 ? page([input(1, "on the root")], 1) : oldPage.promise
+  }, {
+    "session.branch_set_default": () => "worker",
+    "session.model.get": params => {
+      if (params.branchId === "worker" && armModel && ++modelReads === 1) return modelRead.promise
+      return { branchId: params.branchId, through: params.through }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  const reconnecting = chat.resync()
+  await until(() => rootReads === 2)
+  armModel = true
+  const moving = chat.setDefaultBranch("session", "worker")
+  await until(() => chat.views.session.defaultBranchId === "worker")
+  assert.equal(chat.views.session.status, "loading", "the resync's loading state is on the moved page")
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.status, "ready", "a no-op move finishes the page the resync left loading")
+  modelRead.resolve({ branchId: "worker", through: 1 })
+  await moving
+  oldPage.resolve(page([input(1, "on the root")], 1))
+  await reconnecting
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the worker"])
+})
+
+test("a return to the centre while another line's history loads cancels that move", async t => {
+  const workerPage = deferred()
+  const chat = session(t, params => params.branchId === "worker"
+    ? workerPage.promise
+    : page([input(1, "on the root")], 1), {
+    "session.branch_set_default": params => params.branchId,
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  const moving = chat.setDefaultBranch("session", "worker")
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "main", "the worker's history is still loading")
+  await chat.setDefaultBranch("session", "main")
+  workerPage.resolve(page([input(1, "on the worker")], 1))
+  await moving
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "main", "the accepted return to the centre cancels the earlier move")
+  assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on the root"])
+})
