@@ -34,7 +34,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 
 [dev-dependencies]
 dim-agent-runtime = { workspace = true, features = ["testing"] }
-tokio = { workspace = true, features = ["test-util"] }
 axum = { workspace = true, features = ["json"] }
 futures = "0.3"
 wiremock = "0.6"

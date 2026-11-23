@@ -25,28 +25,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::request::ToolNames;
 
-// An upper bound for a raw adapter stream that does not pass through strict
-// mode: there the client call and the finish reason arrive in separate events,
-// so the bridge may need to read on after a failed call. Every request streams
-// through strict mode, which holds each client call until `Finish` and
-// releases a held call directly before the terminal, so that path settles on
-// the next read and never waits here.
-const TERMINAL_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
-
-// Whether the protocol's raw adapter can learn the finish reason after the
-// event that carries a client tool call. Strict mode reorders that case, so
-// only a stream without strict needs the fallback.
-fn terminal_may_trail(protocol: ModelProtocol) -> bool {
-    matches!(
-        protocol,
-        ModelProtocol::OpenaiResponses
-            | ModelProtocol::XaiResponses
-            | ModelProtocol::Anthropic
-            | ModelProtocol::Gemini
-            | ModelProtocol::Bedrock
-    )
-}
-
 pub(crate) fn convert(
     result: StreamResult,
     tool_names: ToolNames,
@@ -74,40 +52,25 @@ pub(crate) fn convert(
         let mut thinking = HashMap::<String, String>::new();
         let mut answered = false;
         let mut unfinished_call = None;
-        let mut grace_deadline = None;
         let terminal = loop {
             // A chat-shaped stream queues a client tool call and the terminal
             // that may explain it in one flush, so a terminal behind a failed
             // call is already delivered; when none is, the parse failure is
             // final rather than holding the request open for a part that may
             // never arrive. Strict mode holds every client call until `Finish`
-            // and releases a held call directly before the terminal, so a
-            // failed call normally settles on the next read. Only a raw adapter
-            // stream that does not pass through strict, where the finish reason
-            // comes from a later event, reads on until the fallback deadline.
+            // and releases a held call directly before the terminal, so the
+            // failed call settles on the next read for every request.
             let next = if unfinished_call.is_some() {
-                if let Some(deadline) = grace_deadline {
-                    tokio::select! {
-                        biased;
-                        _ = generation.cancelled() => {
-                            break Some(Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")));
-                        }
-                        _ = cancel.cancelled() => {
-                            break Some(Err(HostError::Cancelled("Model request cancelled".into())));
-                        }
-                        next = stream.next() => next,
-                        _ = tokio::time::sleep_until(deadline) => {
-                            break unfinished_call.take().map(Err);
-                        }
+                let next = poll_immediate(stream.next());
+                tokio::select! {
+                    biased;
+                    _ = generation.cancelled() => {
+                        break Some(Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")));
                     }
-                } else if terminal_may_trail(protocol) {
-                    grace_deadline = Some(tokio::time::Instant::now() + TERMINAL_GRACE);
-                    continue;
-                } else {
-                    match poll_immediate(stream.next()).await {
-                        Some(next) => next,
-                        None => break unfinished_call.take().map(Err),
+                    _ = cancel.cancelled() => {
+                        break Some(Err(HostError::Cancelled("Model request cancelled".into())));
                     }
+                    next = next => next.flatten(),
                 }
             } else {
                 tokio::select! {
