@@ -291,10 +291,11 @@ A base is established by the first configuration of an untouched builtin or by
 the explicit source-adoption flow below.
 
 The shared default HTTP client for remote model listings is created by the first
-listing request. Local reads, selection and bundled connection configuration do
-not create it. Construction failure fails that operation with the existing
-Provider failure instead of failing process assembly. Per-request network
-overrides still build their own client with the requested proxy and timeout.
+listing request that uses the default network settings, including one triggered
+by a Provider update (§3.2). Local reads and selection do not create it.
+Construction failure fails that operation with the existing Provider failure
+instead of failing process assembly. Per-request network overrides still build
+their own client with the requested proxy and timeout.
 
 Display lists use bounded pages and server-side search. Opening a conversation
 reads its adopted model; it does not enumerate candidate catalogs. Web and CLI
@@ -442,9 +443,10 @@ Provider overview -> Connection -> Save (summary + committed version)
 ```
 
 This selection changes only the reply, not CAS, secret preservation, cancellation
-or discovery. Enablement, credential and network-only configuration of unchanged
-bundled defaults reads and writes no model payload. A full reply still constructs
-the requested complete edit snapshot. Existing method
+or discovery. For enablement, credential and network-only updates that keep
+inheriting an unchanged nonempty bundled catalog, the write itself reads and
+writes no model payload. A full reply still constructs the requested complete
+edit snapshot. Existing method
 request/reply shapes remain except the additive `provider.update.reply` selection,
 the explicit `ModelEdit.endpoint` addition and
 typed errors in §3.4. Existing writes retain `mutating:true`, `interruption:Drain`.
@@ -493,11 +495,12 @@ bundled updates still reach it. A connection change that leaves the record
 disabled makes no request and drops its own endpoint models, if any. Enabling a
 listable built-in Provider defined with an empty bundle (as with Magpie) fills
 its inherited catalog or an empty saved endpoint listing, including one cleared
-by a disabled connection change. User-added models are not part of either
-listing. A custom Provider can still be enabled on its own without listing;
-explicit refresh can fill its cleared endpoint models. A `network`-only change
-saves alone: it changes how the endpoint is reached, not what it serves. A
-driver that cannot list saves the connection alone.
+by a disabled connection change. A nonempty saved listing is kept on enablement
+without a request. User-added models do not count as endpoint models. An
+enable-only update does not fill a cleared endpoint listing for a custom Provider
+or a built-in defined with a nonempty bundle; use explicit refresh. A `network`-only
+change saves alone: it changes how the endpoint is reached, not what it serves.
+A driver that cannot list saves the connection alone.
 
 An invalid patch is rejected before discovery, as `provider_invalid_config`
 with its reason. The request runs outside the write and keeps `refresh`'s

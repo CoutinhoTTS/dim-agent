@@ -4039,12 +4039,43 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
     assert_eq!(
         reconnected
             .models
+            .as_ref()
             .unwrap()
-            .into_iter()
-            .map(|row| row.model.model_id)
+            .iter()
+            .map(|row| row.model.model_id.as_str())
             .collect::<Vec<_>>(),
         ["next-model", "manual"]
     );
+
+    let disabled = provider
+        .update(
+            "magpie".into(),
+            reconnected.info.version.unwrap(),
+            serde_json::from_value(json!({"enabled":false})).unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let retained = tokio::select! {
+        result = provider.update(
+            "magpie".into(),
+            disabled.info.version.unwrap(),
+            serde_json::from_value(json!({"enabled":true})).unwrap(),
+            &cancel,
+        ) => result.unwrap(),
+        request = requests.recv() => panic!(
+            "enabling Magpie with a saved listing must not request models: {:?}",
+            request.map(|(uri, _)| uri),
+        ),
+    };
+    assert_eq!(retained.info.enabled, Some(true));
+    let retained = serde_json::to_value(retained).unwrap();
+    assert!(retained.get("modelsListed").is_none());
+    assert_eq!(
+        retained["models"],
+        serde_json::to_value(reconnected.models).unwrap()
+    );
+    assert!(requests.try_recv().is_err());
 
     let azure = {
         let mut azure = input(
