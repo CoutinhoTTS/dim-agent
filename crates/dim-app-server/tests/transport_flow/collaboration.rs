@@ -2169,9 +2169,9 @@ async fn a_member_is_an_internal_child_of_its_leader() {
     server.join().await.unwrap();
 }
 
-/// cancel ends a request cancelled and stops other member work as idle,
-/// close removes the member but keeps its Session and its Agent's record, and
-/// an externally closed member fails its request.
+/// cancel ends a request cancelled and stops other member work as idle, close
+/// settles the request and closes the member Session in this process while its
+/// records stay, and an externally closed member fails its request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn members_cancel_close_and_leave_the_team() {
     let (server, agent) = launch_team().await;
@@ -2386,61 +2386,47 @@ async fn members_cancel_close_and_leave_the_team() {
         "queue",
     )
     .await;
-    say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
     idle(&mut client, &lead).await;
     let timeline = events(&lead_session).await;
-    let tail: Vec<Value> = results(&timeline)
-        .into_iter()
-        .rev()
-        .take(2)
-        .map(|(_, text)| serde_json::from_str(&text).unwrap())
-        .collect();
-    assert_eq!(tail[1]["status"], "closed");
-    assert_eq!(tail[0]["participants"], json!([]));
-    assert!(
-        tail[0]["agents"]
+    assert_eq!(last_ok(&timeline)["status"], "closed");
+    assert_eq!(result_of(&timeline, &member).len(), 2);
+    // Without a store the last member's close takes its temporary Agent with
+    // it, once the member Session is closed in this process.
+    let listed = poll("temporary Agent closed with its last Session", async || {
+        say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
+        idle(&mut client, &lead).await;
+        let listed = last_ok(&events(&lead_session).await);
+        (!listed["agents"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|agent| agent["agentId"] == temporary.as_str())
-    );
-    assert_eq!(result_of(&timeline, &member).len(), 2);
+            .any(|agent| agent["agentId"] == temporary.as_str()))
+        .then_some(listed)
+    })
+    .await;
+    assert_eq!(listed["participants"], json!([]));
     let agents = client.rpc("agent.list", json!({})).await;
     assert_eq!(
         agents["result"].as_array().unwrap().len(),
         1,
         "an owned Agent belongs to its Team, not the public directory"
     );
-    let listed = client.rpc("session.summaries", json!({})).await;
+    let summaries = client.rpc("session.summaries", json!({})).await;
     assert!(
-        listed["result"]
+        !summaries["result"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|info| info["sessionId"] == member.as_str())
+            .any(|info| info["sessionId"] == member.as_str()),
+        "a closed member keeps no open Session: {summaries}"
     );
-    assert_ok(
-        &client
-            .rpc("session.attach", json!({"sessionId": member}))
-            .await,
+    let attach = client
+        .rpc("session.attach", json!({"sessionId": member}))
+        .await;
+    assert_eq!(
+        attach["error"]["data"]["appError"], "session_closed",
+        "{attach}"
     );
-    assert_ok(
-        &client
-            .rpc("session.close", json!({"sessionId": member}))
-            .await,
-    );
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while client.rpc("agent.list", json!({})).await["result"]
-            .as_array()
-            .unwrap()
-            .len()
-            != 1
-        {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("temporary Agent closed with its last Session");
 
     say(
         &mut client,
@@ -2464,7 +2450,7 @@ async fn members_cancel_close_and_leave_the_team() {
         result_of(&timeline, &member)[..],
         [CollaborationOutcome::Cancelled { .. }]
     ));
-    assert!(agent.get_session(&member).is_some());
+    assert!(agent.get_session(&member).is_none());
     say(
         &mut client,
         &lead,
@@ -2540,6 +2526,211 @@ async fn members_cancel_close_and_leave_the_team() {
 
     server.shutdown();
     server.join().await.unwrap();
+}
+
+/// #2034: `close` settles the request and closes the member Session in this
+/// process. Its records stay, and closed is process state: an attached client
+/// reads `session.closed`, `session.attach` answers `session_closed`, and a
+/// restart loads the member again as a Session its leader addresses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closing_a_member_ends_its_session_here_and_a_restart_loads_it_again() {
+    let store = Store::new();
+    let config = store.config();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config.clone()).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    let lead = leader(&mut client, allowed()).await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    let holder = client.rpc("agent.list", json!({})).await["result"][0]["agentId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "request", "agentId": holder,
+            "prompt": "tool:wait {\"millis\":30000}"})),
+        "queue",
+    )
+    .await;
+    let member = next_member(&lead_session, 0).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": member}))
+            .await,
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "close", "agentId": holder, "sessionId": member})),
+        "queue",
+    )
+    .await;
+    let closed = client.notice("session.closed").await;
+    assert_eq!(closed["params"]["sessionId"], member.as_str());
+    idle(&mut client, &lead).await;
+    let timeline = events(&lead_session).await;
+    assert_eq!(last_ok(&timeline)["status"], "closed");
+    assert!(
+        matches!(
+            result_of(&timeline, &member)[..],
+            [CollaborationOutcome::Cancelled { .. }]
+        ),
+        "close settles the request cancelled, not failed: {:?}",
+        result_of(&timeline, &member)
+    );
+    let attach = client
+        .rpc("session.attach", json!({"sessionId": member}))
+        .await;
+    assert_eq!(
+        attach["error"]["data"]["appError"], "session_closed",
+        "{attach}"
+    );
+    let open = client.rpc("session.summaries", json!({})).await;
+    assert!(
+        !open["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|info| info["sessionId"] == member.as_str()),
+        "a closed member is not an open Session: {open}"
+    );
+    let kept = client
+        .rpc("session.summaries", json!({"includeClosed": true}))
+        .await;
+    let row = kept["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|info| info["sessionId"] == member.as_str())
+        .unwrap_or_else(|| panic!("the closed member keeps its records: {kept}"));
+    assert_eq!(row["closed"], true);
+    assert!(
+        store
+            .rows(&member)
+            .iter()
+            .any(|(table, _)| *table == "agent_sessions"),
+        "the member's rows stay stored: {:?}",
+        store.rows(&member)
+    );
+
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), config).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": member}))
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc("session.attach", json!({"sessionId": lead}))
+            .await,
+    );
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
+    idle(&mut client, &lead).await;
+    let listed = last_ok(&events(&lead_session).await);
+    assert!(
+        listed["participants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["sessionId"] == member.as_str()),
+        "a restart loads the member again for its leader: {listed}"
+    );
+    let listed = client.rpc("session.summaries", json!({})).await;
+    assert!(
+        listed["result"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|info| info["sessionId"] == member.as_str()),
+        "a restart lists the member's records: {listed}"
+    );
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "message", "agentId": holder, "sessionId": member,
+            "content": "again"}),
+        ),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    assert_eq!(last_ok(&events(&lead_session).await)["status"], "delivered");
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(&store.0).await.unwrap();
+}
+
+/// #2034: a reload of Collaboration rebuilds the Team from the store, and a
+/// member closed in this process stays out of it: closed is process state, and
+/// only a restart loads the member again. A stored member keeps its Agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_closed_member_stays_out_of_the_team_when_agents_reload() {
+    let store = Store::new();
+    let (server, agent) = launch_with_agent(Arc::new(MockTools), store.config()).await;
+    let mut client = Client::new_version(&server, false, 4).await;
+    let lead = leader(&mut client, allowed()).await;
+    let lead_session = agent.get_session(&lead).unwrap();
+    say(
+        &mut client,
+        &lead,
+        tool(
+            json!({"action": "request", "prompt": "done", "profile": {"name": "helper",
+            "description": "temporary", "systemPrompt": "", "tools": ["wait"]}}),
+        ),
+        "queue",
+    )
+    .await;
+    let started = poll("temporary request", async || {
+        let timeline = events(&lead_session).await;
+        (!results(&timeline).is_empty()).then(|| last_ok(&timeline))
+    })
+    .await;
+    let temporary = started["agentId"].as_str().unwrap().to_owned();
+    let member = started["sessionId"].as_str().unwrap().to_owned();
+    returned(&mut client, &lead, &lead_session, 1).await;
+    say(
+        &mut client,
+        &lead,
+        tool(json!({"action": "close", "agentId": temporary, "sessionId": member})),
+        "queue",
+    )
+    .await;
+    idle(&mut client, &lead).await;
+    assert_eq!(last_ok(&events(&lead_session).await)["status"], "closed");
+    say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
+    idle(&mut client, &lead).await;
+    let listed = last_ok(&events(&lead_session).await);
+    assert_eq!(listed["participants"], json!([]));
+    assert!(
+        listed["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|agent| agent["agentId"] == temporary.as_str()),
+        "a stored member keeps its Agent's record loaded: {listed}"
+    );
+    server.restart("Agents").await.unwrap();
+    assert!(server.agent().is_some());
+    say(&mut client, &lead, tool(json!({"action": "list"})), "queue").await;
+    idle(&mut client, &lead).await;
+    assert_eq!(
+        last_ok(&events(&lead_session).await)["participants"],
+        json!([]),
+        "a reload rebuilds the Team without the member closed in this process"
+    );
+    drop(client);
+    server.shutdown();
+    server.join().await.unwrap();
+    tokio::fs::remove_dir_all(&store.0).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
