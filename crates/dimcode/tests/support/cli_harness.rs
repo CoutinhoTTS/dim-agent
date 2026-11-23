@@ -99,6 +99,7 @@ impl Home {
     pub fn command(&self) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_dimcode"));
         command.args(["--home", self.0.to_str().unwrap()]);
+        command.env_remove("TMUX");
         command.env("DIMCODE_UPDATE_CHECK", "0");
         command
     }
