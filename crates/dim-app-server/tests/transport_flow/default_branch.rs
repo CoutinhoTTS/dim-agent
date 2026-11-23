@@ -576,6 +576,8 @@ async fn attach_checks_a_permission_preset_after_its_line_ends() {
     session.idle(&line).await.unwrap();
     set_preset(&session, &line, "read-only").await;
     assert_ok(&switch(&mut client, &id, &line).await);
+    wait_notes(&mut client, &id, &line, 1).await;
+    session.idle(&line).await.unwrap();
     let pinned = through(&mut client, &id, &line).await;
 
     let hold = server
