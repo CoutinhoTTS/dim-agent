@@ -4879,7 +4879,7 @@ async fn an_appended_note_does_not_wake_the_idle_former_default() {
     quiet(&session, &user).await;
     switch(&session, &user).await;
     owed_notes(&session, &line, 2).await;
-    soon(session.idle(&line)).await.unwrap();
+    quiet(&session, &line).await;
     let events = local_events(&session, &line).await;
     let note_at = events
         .iter()
