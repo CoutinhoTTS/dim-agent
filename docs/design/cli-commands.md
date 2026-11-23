@@ -706,8 +706,8 @@ only as the first token of the line and only when it parses; otherwise the whole
 so `/loop check the deploy` and `/loop 5m check the deploy` are two forms of the same command.
 
 The line-mode prompt prints usage and the loops; both TUI modes fill `/loop ` on selection and
-dispatch only on submission, as `/goal` does. A reply names the loop, its state, its round and, when
-one is armed, its next due time:
+dispatch only on submission, as `/goal` does. A reply names the loop, its state, its round, its
+prompt and, when one is armed, its next due time:
 
 ```text
 palette: loop + Enter -> /loop |          (completion only)
