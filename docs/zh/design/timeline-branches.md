@@ -476,9 +476,11 @@ WorkspaceTools 不变。
 
 ### 12.3 评估场景
 
-场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：八个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 16,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
+场景放在仓库里，一个场景一个目录，目录里是 `scenario.json` 和它旁边的起始 `workspace/`：十五个在 [`xtask/scenario-eval/timeline-branches/`](../../../xtask/scenario-eval/timeline-branches/) 下，各自声明 131,072 tokens 的窗口；`identity-after-compaction` 在 [`xtask/scenario-eval/timeline-branches-compact/`](../../../xtask/scenario-eval/timeline-branches-compact/) 下，声明 29,000，以便发生压缩。`budget.window` 是校验而不是设置：Session 声明的窗口与之不同时，这次运行在第一轮之前就失败，所以复跑需要模型声明正好这个窗口；没有声明窗口的模型回退到 128,000，同样失败。这些场景在本地用真实模型运行，结果在实现 PR 里报告。CI 只断言行为。
 
 `main-moved-on` 是父线块（§7.1.1）的场景：`main` 在切点之前有工作，开一条线，然后继续工作；这条线在回答或结束之前必须读取 `main` 在切点之后做的事，并且不能逐页读遍 `main` 的全部活动。它是 [§12.4](#124-文本及其类别) 父线块策略句的场景。
+
+开线与切换角色新增七个场景：`long-work-and-a-flaky-test`、`refactor-and-a-pasted-report`、`same-file-tradeoff`、`background-command-not-branch`、`switch-continue-directly`、`switch-then-open-lines`、`root-opens-after-switch`。
 
 `identity-after-compaction` 沿用 `redone-work` 的消息和 workspace，`flooding` 与 `never-ending` 共用同一个 workspace：这两对保持完全相同，改动其中一份而不同步另一份时，读取两个提交目录的无模型测试会失败。
 
@@ -487,7 +489,6 @@ WorkspaceTools 不变。
 | 线把自己当成默认分支 | — | 不是默认分支的线把 Session 的对话当成自己的、无视自己可以开线，或者已经是默认分支的线不再向开它的那条线汇报 |
 | 线在不能开线的地方开线 | — | 既不是根也不是当前默认分支的线自己开线，而不是告诉其中一条 |
 | 上限与那条路径 | — | Session 已经超过上限时线仍拒绝开线，或者为腾位置关闭一条线 |
-| 线把自己当成默认分支 | — | 不是默认分支的线把 Session 的对话当成自己的，或者已经是默认分支的线不再向开它的那条线汇报 |
 | 重复劳动 | `timeline-branches/redone-work` | `main` 重做一条线正在做的事，或者两条线做同一件事 |
 | 过时的认识 | — | 一条线依据切点之后已经改变的文件或决定行事，却没有重新读取 |
 | 父线动了 | `timeline-branches/main-moved-on` | 一条线在回答或结束前没有读取父线在切点之后提交的活动，或者逐页读遍了父线的全部活动 |
@@ -496,6 +497,9 @@ WorkspaceTools 不变。
 | 不结束 | `timeline-branches/never-ending` | 一条线已经做完，却不调用 `end` |
 | 兄弟中转 | `timeline-branches/sibling-relay` | 用 `main` 在本该合成一条线的几条线之间传话 |
 | 压缩后的身份 | `timeline-branches-compact/identity-after-compaction` | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
+| 切换后继续在线上工作 | — | 成为默认分支的线对自己调用 `end`、把工作交给另一条线、不断用 idle 通知唤醒开它的线，或者根能开线而这条线不能 |
+| 切换后开线 | `timeline-branches/switch-then-open-lines` | 新的默认分支自己做掉两处互不相干的新增，而不是为其中一处开一条线；或者原默认分支接过新工作 |
+| 线持有角色时根开线 | `timeline-branches/root-opens-after-switch` | 另一条线成为默认分支后，用户向根要一条线：根必须开这条线，新线必须从根的历史开始，并向根汇报 |
 | 来回空转 | `timeline-branches/ping-pong` | 不推进工作的 steer 往复 |
 | 问用户 | `timeline-branches/asking-the-user` | 该问用户时，线直接问用户，而不是绕道 `main` |
 
