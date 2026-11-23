@@ -2252,6 +2252,14 @@ impl Owner {
                     if owner.stopped() || skip {
                         return Ok(());
                     }
+                    #[cfg(feature = "testing")]
+                    crate::testing::stage_held(
+                        &owner.session_id,
+                        &owner.branch_id,
+                        crate::testing::Stage::End,
+                        evaluation,
+                    )
+                    .await;
                     match owner
                         .tree
                         .end(

@@ -102,6 +102,9 @@ pub enum Stage {
     /// After a record's `settle_decisions` returned, before its final decision
     /// and write.
     Settle,
+    /// Before a settle task ends the evaluator of `evaluation`, after it
+    /// decided the end is due.
+    End,
     /// After `do_turn_end` took every decision it carries.
     Done,
     /// At the start of the closing pause, before it reads the fold.
