@@ -384,7 +384,7 @@ pub(crate) fn tool_call(name: &str, arguments: &str) -> Value {
 /// credential, constrained by neither the sandbox nor the file-tool
 /// boundary. No run's Session offers it.
 const PLUGIN_TOOL: &str = "plugin";
-/// The tools a run's Sessions declare: the served assembly's whole set —
+/// The tools a run's Sessions mount: the served assembly's whole set —
 /// the workspace host's tools and every part's contributed tools — without
 /// `plugin`. A Session's mount list fixes what it declares, in this order;
 /// without one it declares every host tool and every tool a part registers
@@ -399,8 +399,12 @@ const PLUGIN_TOOL: &str = "plugin";
 /// stored profile, a scheduled launch, a branch). The `tools-product`
 /// preflight check compares the probe Session's declared set with this
 /// list at run time, so an addition or removal surfaces as a failed check,
-/// not a silent drift in what an evaluation offers the model under test;
-/// the fixture pin asserts the mounted order of the set.
+/// not a silent drift in the set the probes serve; the fixture pin asserts
+/// the mounted order of the static set. `web_search` is offered by Web's
+/// dynamic source only while a search service is usable: the probes are
+/// served a keyed stub adapter and declare it, while the service is cleared
+/// before the run's own Sessions, which mount the name but do not declare or
+/// call it, so their judged Timeline carries no source adoption.
 const RUN_TOOLS: &[&str] = &[
     "read",
     "write",
@@ -442,6 +446,51 @@ fn session_tools(scenario: &Scenario) -> Vec<String> {
         }
     }
     tools
+}
+
+/// Writes the `web` Settings source a probe home serves: a keyed search
+/// adapter, so the assembly declares `web_search` while `RUN_TOOLS` names it.
+/// The declaration reads this configuration only; nothing dials the endpoint,
+/// and no scenario calls `web_search`.
+fn configure_search(home: &Path) -> Result<()> {
+    private_directory(home)?;
+    std::fs::write(
+        home.join("web.json"),
+        serde_json::to_vec_pretty(&search_document())?,
+    )?;
+    Ok(())
+}
+
+/// The search service the probes are served. Its endpoint is a stub no run
+/// reaches; only the declaration reads it.
+fn search_document() -> Value {
+    json!({
+        "searchService": {
+            "kind": "brave",
+            "endpoint": "http://127.0.0.1:1/search",
+            "apiKey": "scenario-eval"
+        }
+    })
+}
+
+/// Replaces the running Settings service's user `web` source. The run's
+/// preflight probes are served [`search_document`]; the run's own Sessions are
+/// served an empty one, so a configured dynamic source does not add a
+/// configuration event to the judged Timeline.
+async fn update_web(client: &mut Client, document: Value) -> Result<()> {
+    let revision = client
+        .rpc("settings.read", json!({"source":"web","scope":"user"}))
+        .await
+        .map_err(|error| error.to_string())?["revision"]
+        .clone();
+    client
+        .rpc(
+            "settings.update",
+            json!({"source":"web","scope":"user","expectedRevision":revision,"document":document}),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// The offered tool names of a model request body, in declaration order.
@@ -2938,8 +2987,11 @@ fn plugin_default_names(path: &Path) -> Vec<String> {
 /// the run's preflight provider that checks the run's isolation before the
 /// live model's first turn — the disposable `HOME`, the absence of credential
 /// names, an outside read refused for `exec` and for a file tool, the
-/// operator's home refused for both, and the run's socket unreachable. Any
-/// failure aborts the run and is reported as a harness failure.
+/// operator's home refused for both, and the run's socket unreachable. The
+/// probes are served the search service the run list names; it is cleared
+/// before the run's own Sessions, which do not call `web_search` and whose
+/// judged Timeline must not carry a source adoption. Any failure aborts the
+/// run and is reported as a harness failure.
 async fn preflight_session(
     client: &mut Client,
     params: &ChildParams,
@@ -2947,6 +2999,9 @@ async fn preflight_session(
     expected: &[String],
     database: &Path,
 ) -> std::result::Result<(Vec<PreflightCheck>, Vec<String>), (Vec<PreflightCheck>, String)> {
+    update_web(client, search_document())
+        .await
+        .map_err(|error| (Vec::new(), error.to_string()))?;
     let declared = product_probe(client, params, database)
         .await
         .map_err(|error| (Vec::new(), error))?;
@@ -3047,28 +3102,30 @@ async fn preflight_session(
     // provider received the request before it scripted any step, so its
     // first PREFLIGHT request is this Session's declaration. The product
     // probe's request is the first whose messages carry the probe marker.
-    let held = preflight.requests.lock().unwrap();
-    let offered = held
-        .iter()
-        .find_map(|request| {
-            if !request.contains("PREFLIGHT") {
-                return None;
-            }
-            let tools = offered_tools(request);
-            (!tools.is_empty()).then_some(tools)
-        })
-        .unwrap_or_default();
-    let product = held
-        .iter()
-        .find_map(|request| {
-            if !request.contains("PRODUCT-TOOLS") {
-                return None;
-            }
-            let tools = offered_tools(request);
-            (!tools.is_empty()).then_some(tools)
-        })
-        .unwrap_or_default();
-    drop(held);
+    let (offered, product) = {
+        let held = preflight.requests.lock().unwrap();
+        let offered = held
+            .iter()
+            .find_map(|request| {
+                if !request.contains("PREFLIGHT") {
+                    return None;
+                }
+                let tools = offered_tools(request);
+                (!tools.is_empty()).then_some(tools)
+            })
+            .unwrap_or_default();
+        let product = held
+            .iter()
+            .find_map(|request| {
+                if !request.contains("PRODUCT-TOOLS") {
+                    return None;
+                }
+                let tools = offered_tools(request);
+                (!tools.is_empty()).then_some(tools)
+            })
+            .unwrap_or_default();
+        (offered, product)
+    };
     let checks = preflight_checks(
         &results, params, &offered, &ceiling, expected, &product, &declared,
     );
@@ -3076,6 +3133,9 @@ async fn preflight_session(
         let detail = format!("{}: {}", failed.name, failed.detail);
         return Err((checks, detail));
     }
+    update_web(client, json!({}))
+        .await
+        .map_err(|error| (checks.clone(), error.to_string()))?;
     Ok((checks, ceiling))
 }
 
@@ -3695,6 +3755,7 @@ async fn native_probe(
         private_directory(&root.join("env").join(directory))?;
     }
     private_directory(&home)?;
+    configure_search(&home)?;
     private_directory(socket.parent().expect("a socket has a parent"))?;
     let socket = bindable_socket(&socket)?;
     let params = ChildParams {
@@ -10512,10 +10573,18 @@ mod tests {
             // product tool removal (the registry drops a mounted name it
             // cannot resolve) and any divergence in the mounted order; a
             // product tool addition is the `tools-product` preflight
-            // check's catch, at run time.
+            // check's catch, at run time. `web_search` is dynamic and
+            // declared only while a search service is usable; the run's own
+            // Sessions have none (the probes carry it), so the first request
+            // omits that name while every other mounted name keeps its place.
+            let expected: Vec<&str> = RUN_TOOLS
+                .iter()
+                .copied()
+                .filter(|name| *name != "web_search")
+                .collect();
             assert_eq!(
-                offered, RUN_TOOLS,
-                "{arm}: the run Session offers exactly the run's tool set"
+                offered, expected,
+                "{arm}: the run Session offers the run's static tool set"
             );
             assert!(
                 requests[1].contains(FILE_TEXT),
@@ -13322,12 +13391,16 @@ mod run_tools_tests {
         let directory = app_server::scratch("run-tools").unwrap();
         let workspace = directory.join("workspace");
         private_directory(&workspace).unwrap();
+        let probe_home = directory.join("probe-home");
+        configure_search(&probe_home).unwrap();
+        let product_home = directory.join("product/home");
+        configure_search(&product_home).unwrap();
         let models = fixture_models(&directory);
         let sockets = Sockets::new().unwrap();
         let probe = RegistryProbe::default();
         let serving = probe.clone();
         let server = app_server::serve_home(
-            &directory.join("probe-home"),
+            &probe_home,
             &workspace,
             directory.join("probe-output"),
             native_probe_settings(
