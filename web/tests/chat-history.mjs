@@ -471,6 +471,22 @@ test("a goal refresh reports neither a closed Session nor a lost connection as a
   assert.equal(chat.views.session.status, "closed", "a read after the Session closed keeps it closed")
 })
 
+test("a goal read that reports the Session closed closes the page", async t => {
+  let goal = "ok"
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.goal.get": params => {
+      if (goal === "closed") throw new RpcError(-32000, "the Session is closed", "session_closed")
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  goal = "closed"
+  receive(chat, "main", goalInput(2, "keep going"))
+  await flush()
+  assert.equal(chat.views.session.status, "closed", "a goal read that reports the Session closed closes the page")
+})
+
 test("a retry loads the side lines an earlier sync left waiting", async t => {
   let fail = false
   const chat = session(t, params => {
