@@ -387,6 +387,33 @@ test("a retry after a reconnect that cannot read the directory attaches again", 
   assert.deepEqual(chat.views.session.rows.map(row => row.text), ["stored"])
 })
 
+test("a retry after a reconnect whose pending questions failed attaches again", async t => {
+  let attaches = 0
+  let questions = true
+  const chat = session(t, () => page([input(1, "stored")], 1), {
+    "session.attach": () => {
+      attaches++
+      return { providerId: "test", modelId: "test" }
+    },
+    "session.branches": () => ({ branches: [{ branchId: "worker", parentBranchId: "main", branchPoint: 0, head: 1, state: "open" }], defaultBranchId: "main" }),
+    "session.question.pending": params => {
+      if (!questions) throw new Error("the questions could not be read")
+      return { ...params, asks: [], next: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  questions = false
+  await chat.resync()
+  assert.equal(attaches, 2, "the reconnect attaches again")
+  assert.equal(chat.views.session.status, "failed")
+  questions = true
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(attaches, 3, "a pending-question read that did not finish sends the retry back through the attach")
+  assert.equal(chat.views.session.status, "ready")
+})
+
 test("a reconnect that waits for a retry keeps the events buffered during it", async t => {
   const held = deferred()
   let fail = true
