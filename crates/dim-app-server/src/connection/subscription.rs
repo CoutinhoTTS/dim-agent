@@ -503,11 +503,17 @@ impl Connection {
                     metadata: model.metadata,
                 },
             );
-            provider.scoped_connection_owner(&self.id, model.metadata.as_ref())?;
+            provider.scoped_connection_owner(&self.id, model.metadata.as_ref(), false)?;
             if !self.is_attached(&session_id)
                 && let Some(route) = provider.scoped_model(&self.id, &model)?
             {
                 let admission = self.scoped_route_admission(&usage).await?;
+                if session.sequence(ROOT_BRANCH_ID)? != record.info.sequence {
+                    return Err(RpcError::service(
+                        "provider_route_conflict",
+                        "Session advanced before temporary route adoption",
+                    ));
+                }
                 let outcome = session
                     .configure(
                         dim_agent_runtime::ConfigureUpdate {
@@ -628,7 +634,8 @@ impl Connection {
                 .ok()
                 .flatten()
                 .and_then(|snapshot| snapshot.configuration);
-            let (model, model_preferences, capability_snapshot) = match adopted {
+            let (model, model_preferences, capability_snapshot, catalog_provider_id) = match adopted
+            {
                 Some(configuration) => (
                     dim_agent_types::ModelId {
                         provider_id: configuration.provider_id.clone(),
@@ -639,6 +646,10 @@ impl Connection {
                         configuration.metadata.as_ref(),
                     ),
                     configuration.capability_snapshot,
+                    crate::provider::scoped_routes::logical_provider(
+                        configuration.metadata.as_ref(),
+                    )
+                    .map(str::to_owned),
                 ),
                 None => (
                     record_info.model.clone(),
@@ -647,6 +658,10 @@ impl Connection {
                         session.config().model.metadata.as_ref(),
                     ),
                     session.config().model.capability_snapshot.clone(),
+                    crate::provider::scoped_routes::logical_provider(
+                        session.config().model.metadata.as_ref(),
+                    )
+                    .map(str::to_owned),
                 ),
             };
             let record = SessionInfo {
@@ -659,6 +674,7 @@ impl Connection {
                 default_branch: record_default,
                 model_preferences,
                 capability_snapshot: capability_snapshot.map(Box::new),
+                catalog_provider_id,
             };
             if self
                 .sender

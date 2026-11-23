@@ -3423,7 +3423,7 @@ fn acp_stdio_lody_config_round_trips_with_the_product_daemon() {
         json!({"providerId":provider,"displayName":"ACP effort fixture", "enabled":true,
         "connection":{"driverKind":"openai-compatible","baseUrl":format!("http://{address}/v1"),"auth":{"type":"anonymous"}},
         "models":[{"modelId":"acp-effort","displayName":"ACP effort","status":"active","capabilities":capabilities,
-            "metadata":{"reasoning":{"supported":true,"effortOptions":["low","high"]}}}]}),
+            "metadata":{"reasoning":{"supported":true,"effort":"medium","effortOptions":["low","medium","high"]}}}]}),
     );
     call(
         "provider.preferences.update",
@@ -3568,12 +3568,9 @@ fn acp_stdio_lody_config_round_trips_with_the_product_daemon() {
         json!({"cwd":home.0,"mcpServers":[],"_meta":config("read-only", "provider-default")}),
     );
     let cleared = reopen.response(7);
-    assert_eq!(effort(&cleared)["currentValue"], "provider-default");
+    assert_eq!(effort(&cleared)["currentValue"], "medium");
     reopen.send(10, "session/resume", json!({"sessionId":cleared["result"]["sessionId"],"cwd":home.0,"_meta":config("read-only", "provider-default")}));
-    assert_eq!(
-        effort(&reopen.response(10))["currentValue"],
-        "provider-default"
-    );
+    assert_eq!(effort(&reopen.response(10))["currentValue"], "medium");
     reopen.send(8, "session/new", json!({"cwd":home.0,"mcpServers":[]}));
     assert_eq!(effort(&reopen.response(8))["currentValue"], "low");
     reopen.close();
@@ -3648,47 +3645,60 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
 
     listener.set_nonblocking(true).unwrap();
     let model = thread::spawn(move || {
+        let (completed, observations) = std::sync::mpsc::channel();
         let mut seen = Vec::new();
-        for _ in 0..6 {
-            let deadline = Instant::now() + PATIENCE;
-            let stream = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::WouldBlock
-                            && Instant::now() < deadline =>
-                    {
-                        thread::sleep(Duration::from_millis(5))
-                    }
-                    Err(error) => panic!("missing model call: {error}, captured {seen:?}"),
-                }
-            };
-            stream.set_read_timeout(Some(PATIENCE)).unwrap();
-            let mut request = BufReader::new(stream);
-            let mut line = String::new();
-            request.read_line(&mut line).unwrap();
-            let path = line.split_whitespace().nth(1).unwrap().to_owned();
-            let mut headers = std::collections::HashMap::new();
-            loop {
-                line.clear();
-                assert_ne!(request.read_line(&mut line).unwrap(), 0);
-                if line == "\r\n" {
-                    break;
-                }
-                let (name, value) = line.split_once(':').unwrap();
-                headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+        let mut deadline = Instant::now() + PATIENCE;
+        while seen.len() < 6 {
+            if let Ok(observation) = observations.try_recv() {
+                seen.push(observation);
+                deadline = Instant::now() + PATIENCE;
+                continue;
             }
-            let mut bytes = vec![0; headers["content-length"].parse().unwrap()];
-            request.read_exact(&mut bytes).unwrap();
-            let body: Value = serde_json::from_slice(&bytes).unwrap();
-            assert_eq!(body["model"], "acp-route-fixture");
-            let data = "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"model\":\"acp-route-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ROUTE_OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-            write!(request.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
-            seen.push((
-                path,
-                headers.remove("authorization"),
-                headers.remove("x-route-marker"),
-            ));
+            assert!(
+                Instant::now() < deadline,
+                "missing model call after {seen:?}"
+            );
+            let (stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                Err(error) => panic!("accept model call: {error}"),
+            };
+            let completed = completed.clone();
+            thread::spawn(move || {
+                stream.set_read_timeout(Some(PATIENCE)).unwrap();
+                let mut request = BufReader::new(stream);
+                let mut line = String::new();
+                if !matches!(request.read_line(&mut line), Ok(size) if size != 0) {
+                    return;
+                }
+                let path = line.split_whitespace().nth(1).unwrap().to_owned();
+                let mut headers = std::collections::HashMap::new();
+                loop {
+                    line.clear();
+                    assert_ne!(request.read_line(&mut line).unwrap(), 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                    let (name, value) = line.split_once(':').unwrap();
+                    headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+                }
+                let mut bytes = vec![0; headers["content-length"].parse().unwrap()];
+                request.read_exact(&mut bytes).unwrap();
+                let body: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["model"], "acp-route-fixture");
+                let data = "data: {\"id\":\"fixture\",\"object\":\"chat.completion.chunk\",\"model\":\"acp-route-fixture\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ROUTE_OK\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+                completed
+                    .send((
+                        path,
+                        headers.remove("authorization"),
+                        headers.remove("x-route-marker"),
+                    ))
+                    .unwrap();
+                write!(request.get_mut(), "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{data}", data.len()).unwrap();
+            });
         }
         seen
     });
@@ -3767,6 +3777,14 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
     );
 
     let a_new = call(&mut a, "session/new", create.clone());
+    assert!(
+        a_new["result"]["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["id"] == "model" && option["currentValue"] == "acp-route-fixture"),
+        "{a_new}"
+    );
     let a_id = a_new["result"]["sessionId"]
         .as_str()
         .unwrap_or_else(|| panic!("{a_new}"));
@@ -3819,6 +3837,15 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
         json!({"providerId":provider,"apiType":"openai","baseUrl":second}),
     );
     assert_eq!(replaced["result"], json!({}), "{replaced}");
+    let inherited = call(
+        &mut a,
+        "session/fork",
+        json!({"sessionId":a_id,"cwd":home.0,"mcpServers":[]}),
+    );
+    assert_eq!(
+        inherited["error"]["data"]["nativeAppError"], "provider_route_conflict",
+        "{inherited}"
+    );
     let replaced_session = call(&mut a, "session/new", create.clone());
     let replacement = replaced_session["result"]["sessionId"]
         .as_str()
@@ -3847,6 +3874,28 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
     assert_eq!(
         rejected["error"]["data"]["nativeAppError"], "provider_route_disabled",
         "{rejected}"
+    );
+    let before_forks = native_call("session.summaries", json!({}))
+        .as_array()
+        .unwrap()
+        .len();
+    for session in [a_id, b_id] {
+        let refused = call(
+            &mut a,
+            "session/fork",
+            json!({"sessionId":session,"cwd":home.0,"mcpServers":[]}),
+        );
+        assert_eq!(
+            refused["error"]["data"]["nativeAppError"], "provider_route_disabled",
+            "{refused}"
+        );
+    }
+    assert_eq!(
+        native_call("session.summaries", json!({}))
+            .as_array()
+            .unwrap()
+            .len(),
+        before_forks
     );
     let another_b = call(&mut b, "session/new", create);
     for (peer, session_id) in [
@@ -3911,6 +3960,24 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
         );
         thread::sleep(Duration::from_millis(10));
     }
+    let restored = native_call(
+        "session.model.update",
+        json!({"sessionId":a_id,"providerId":provider,"modelId":"acp-route-fixture"}),
+    );
+    assert_eq!(restored["model"]["providerId"], provider);
+    let resumed = call(
+        &mut b,
+        "session/resume",
+        json!({"sessionId":a_id,"cwd":home.0}),
+    );
+    assert!(
+        resumed["result"]["configOptions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|option| option["id"] == "model" && option["currentValue"] == "acp-route-fixture"),
+        "{resumed}"
+    );
     assert_eq!(
         native_call("provider.management", json!({"providerId":provider}))["providers"][0],
         record

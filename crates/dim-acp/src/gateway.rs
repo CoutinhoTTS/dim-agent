@@ -34,6 +34,7 @@ pub(crate) enum Incoming {
 pub(crate) enum Work {
     Providers {
         reply: Responder,
+        mutating: bool,
         result: Result<Value, Error>,
     },
     Initialized {
@@ -304,6 +305,7 @@ pub(crate) struct Gateway {
     initialized: bool,
     initializing: bool,
     provider_routes_used: bool,
+    pending_provider_routes: usize,
     creating: usize,
     sessions: HashMap<String, Slot>,
     interactions: HashMap<String, Interaction>,
@@ -422,6 +424,7 @@ impl Gateway {
             version,
             initialized: false,
             provider_routes_used: false,
+            pending_provider_routes: 0,
             initializing: false,
             creating: 0,
             sessions: HashMap::new(),
@@ -700,7 +703,8 @@ impl Gateway {
             {
                 let method = request.method;
                 let value = request.params;
-                self.provider_routes_used |= method != "providers/list";
+                let mutating = method != "providers/list";
+                self.pending_provider_routes += usize::from(mutating);
                 self.spawn(async move {
                     let result = async {
                         match method.as_str() {
@@ -717,7 +721,11 @@ impl Gateway {
                         }
                     }
                     .await;
-                    Work::Providers { reply, result }
+                    Work::Providers {
+                        reply,
+                        mutating,
+                        result,
+                    }
                 });
             }
             "authenticate" => {
@@ -1374,6 +1382,7 @@ impl Gateway {
                                     .await?;
                                 let model = attached.model.map(|model| Configuration {
                                     provider_id: model.provider_id,
+                                    catalog_provider_id: attached.catalog_provider_id,
                                     model_id: model.model_id,
                                     capability_snapshot: attached.capability_snapshot,
                                     model_preferences: attached.model_preferences,
@@ -1547,7 +1556,15 @@ impl Gateway {
             }
         }
         match work {
-            Work::Providers { reply, result } => reply.respond_with_result(result)?,
+            Work::Providers {
+                reply,
+                mutating,
+                result,
+            } => {
+                self.pending_provider_routes -= usize::from(mutating);
+                self.provider_routes_used |= mutating && result.is_ok();
+                reply.respond_with_result(result)?;
+            }
             Work::Initialized { reply, result } => {
                 self.initializing = false;
                 match result {
@@ -3141,7 +3158,9 @@ impl Gateway {
     async fn handle_native(&mut self, message: Option<Native>) -> Result<bool, Error> {
         match message {
             Some(Native::Notice { method, params }) => self.notice(method, params).await?,
-            Some(Native::Lost) if self.provider_routes_used => {
+            Some(Native::Lost)
+                if self.provider_routes_used || self.pending_provider_routes != 0 =>
+            {
                 self.fail_connection().await?;
                 return Ok(true);
             }
@@ -3243,6 +3262,7 @@ async fn read_history(
         })?;
     let model = attached.model.map(|model| Configuration {
         provider_id: model.provider_id,
+        catalog_provider_id: attached.catalog_provider_id,
         model_id: model.model_id,
         capability_snapshot: attached.capability_snapshot,
         model_preferences: attached.model_preferences,

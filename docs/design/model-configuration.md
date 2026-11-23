@@ -195,7 +195,9 @@ spells the field `model_preferences` and the two replies spell it
 The CLI draws the effort from that field and keeps no preference state of its
 own. The attach reply also carries the adopted declaration as `capabilitySnapshot`,
 so temporary connections support preference commands before their first input
-without requiring a saved Provider catalog. Other internal model settings remain
+without requiring a saved Provider catalog. For scoped routes, the attach reply
+adds `catalogProviderId` and the event adds `catalog_provider_id` for catalog
+selection and display. Both keep the adopted Provider ID as the execution identity. Other internal model settings remain
 private. Advertised choices are display data; Provider validates each update.
 An adoption starts from the model's declared configuration with the model's own
 catalog defaults applied: when no preference names an effort and that

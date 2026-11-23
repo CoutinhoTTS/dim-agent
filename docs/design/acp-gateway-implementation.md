@@ -449,7 +449,7 @@ Core README 在 capability catalog 中提到 sessionConfig，但固定版本的 
 
 **Startup config**：在 native 写入之前解析 `{version:1,modelId?,configOptionValues}`，支持 model、mode、effort。未知选项返回参数错误，data.field 指明路径。modelId 优先于 configOptionValues.model，省略选项保留原生默认或既有采用值。new 用 Gateway 的候选目录解析唯一显式模型，在同一次 create 传入模型、permissionPolicy.preset 和 modelPreferences.reasoningEffort。effort 由模型所有者校验；provider-default 映射到 [原生创建 clear](model-configuration.md#clearing-one-preference)，要求 daemon 声明该输入。create 以及后续 config options 都沿用模型实际采用值。
 
-load/resume 的非空配置走 [checked attach](contracts/session-access.md#3-flows)，按 main 的发布序号核对；fork 走 [checked fork](appserver/session-deletion-and-fork.md#61-method)，按实际继承的 cut 核对。modelId 用已采用的精确 ID 比较，mode 用许可 preset，effort 用已采用的偏好值；provider-default 断言没有已采用的 effort。不同值返回 session_config_mismatch，缺少相应 daemon feature 则返回 unsupported_control。等价配置不触发 setter 或 Provider 写入。相同检查条件的并发 load/resume 可合并；不同条件走 session_busy。回复使用原生实际配置。空 metadata 的建立与断线恢复沿用普通调用。
+load/resume 的非空配置走 [checked attach](contracts/session-access.md#3-flows)，按 main 的发布序号核对；fork 走 [checked fork](appserver/session-deletion-and-fork.md#61-method)，按实际继承的 cut 核对。modelId 用已采用的精确 ID 比较，mode 用许可 preset，effort 用已采用的偏好值；provider-default 对照该位置已采用的模型声明与协议核对声明默认 effort。声明无法提供可用默认值时，核对该位置未采用 effort。不同值返回 session_config_mismatch，缺少相应 daemon feature 则返回 unsupported_control。等价配置不触发 setter 或 Provider 写入。相同检查条件的并发 load/resume 可合并；不同条件走 session_busy。回复使用原生实际配置。空 metadata 的建立与断线恢复沿用普通调用。
 
 **Background exec**：直接消费已提交的 `exec/started` / `exec/ended`，来源是现有 [BackgroundExec](../../crates/dim-agent-capabilities/src/workspace_tools/background.rs)，不另造 task 业务服务。开始时生成与发起工具不同的稳定 ACP toolCallId，并以 parentToolCallId 关联；这样原工具因转后台返回 completed 后，不会被重新改成 in_progress。任务状态开始为 in_progress，原生 completed → completed，failed/cancelled → failed 并保留真实原因，不能造 Core 不存在的 task cancelled 状态。结束通知允许发生在 prompt response 之后；不因此延长或重新打开那个 prompt。固定头回放重建投影并去重，live 后续仅处理新的 sequence。EOF/卸载只丢弃显示关联，不停止原生后台任务。
 
@@ -646,11 +646,11 @@ Lody [Open / Resume / Fork]
 
 ### 13.4 Provider 向导
 
-采用 ACP Gateway 进程内的临时作用域。Gateway 通过唯一的受保护本地 RPC 连接调用 [Provider 临时路由入口](appserver/provider-management.md#connection-scoped-provider-routes)。三个入口都可用时，initialize 声明 `agentCapabilities.providers`。已发起路由变更的 Gateway 在 RPC 断开时结束 ACP 连接，避免重连后把会话绕回共享路由。
+采用 ACP Gateway 进程内的临时作用域。Gateway 通过唯一的受保护本地 RPC 连接调用 [Provider 临时路由入口](appserver/provider-management.md#connection-scoped-provider-routes)。三个入口都可用时，initialize 声明 `agentCapabilities.providers`。路由写入已经成功或仍在途时，RPC 断开会结束 ACP 连接，避免重连后把会话绕回共享路由。已明确失败的写入不改变重连行为。
 
 `list` 发布可配置的启用中静态 Provider，须已具备普通模型选择所需凭据或使用匿名连接。协议为 `openai`（OpenAI-compatible Chat）、`openai-responses` 或 `anthropic`，按现有驱动取其中一个。列表回显协议、安全地址和 `required:false`。本进程禁用后仍可发现，`current` 省略。`set` 整体替换 headers，省略等同空 map。`disable` 对未知 ID 幂等。
 
-新建、首次加载或恢复空闲且未被其他客户端占用的 Session 时采用当前连接的路由。配置相等断言先于路由采用。所选 Provider 被禁用时返回明确错误，客户端可以选择其他模型。已建立的 Session 保留采用时的路由，显式切换模型时重新采用目标的当前路由。试图从其他连接续用临时路由、或连接结束后恢复该路由，均明确失败。协议边界见 [ACP Provider RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx#behavior)。
+新建、首次加载或恢复空闲且未被其他客户端占用的 Session 时采用当前连接的路由。配置相等断言先于路由采用。所选 Provider 被禁用时返回明确错误，客户端可以选择其他模型。已建立的 Session 保留采用时的路由，显式切换模型时重新采用目标的当前路由。模型选项使用会话采用的目录 Provider 身份，临时连接身份仍用于执行。试图从其他连接续用临时路由、或连接结束后恢复该路由，均明确失败。过期后可通过原生 session.model.update 显式选择共享模型，再重新打开 Session。协议边界见 [ACP Provider RFD](https://github.com/agentclientprotocol/agent-client-protocol/blob/66ff8076ec2320d85e84fedc83cb779e9d906a89/docs/rfds/custom-llm-endpoint.mdx#behavior)。
 
 ### 13.5 向所有者提出的要求
 

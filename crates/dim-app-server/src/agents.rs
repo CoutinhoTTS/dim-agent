@@ -1931,11 +1931,11 @@ impl AgentIndex {
                 .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
                 .adopted_configuration(ROOT_BRANCH_ID.into(), Some(at))
                 .await?;
-            let metadata = match &adopted {
-                Some(adopted) => adopted.metadata.as_ref(),
-                None => config.model.metadata.as_ref(),
+            let (provider_id, metadata) = match &adopted {
+                Some(adopted) => (&adopted.provider_id, adopted.metadata.as_ref()),
+                None => (&config.model.provider_id, config.model.metadata.as_ref()),
             };
-            provider.scoped_connection_owner(scope, metadata)?;
+            provider.check_fork_route(scope, provider_id, metadata)?;
         }
         // A fork of an older protocol keeps the live Session's codemode
         // exclusion; the stored record is written without it, as on create.

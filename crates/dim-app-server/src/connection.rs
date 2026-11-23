@@ -1675,10 +1675,20 @@ impl Connection {
                 let current = session
                     .get::<dim_agent_capabilities::prompt_state::PromptSnapshot>(&branch)?
                     .and_then(|state| state.configuration);
-                if let (Some(provider), Some(current)) = (&route_owner, &current) {
-                    provider.scoped_connection_owner(&self.id, current.metadata.as_ref())?;
-                }
                 let scoped_target = p.startup.is_none() && p.provider_id.is_some();
+                let recover_shared = if let Some(provider) = &route_owner {
+                    let metadata = match &current {
+                        Some(current) => current.metadata.as_ref(),
+                        None => session.config().model.metadata.as_ref(),
+                    };
+                    provider.scoped_connection_owner(
+                        &self.id,
+                        metadata,
+                        scoped_target && p.model_id.is_some(),
+                    )?
+                } else {
+                    false
+                };
                 let mut startup_admission = None;
                 let mut model = if let Some(startup) = p.startup {
                     if self.entry != Entry::Local || rpc.config.product_home.is_none() {
@@ -1777,6 +1787,7 @@ impl Connection {
                 };
                 let mut scoped_admission = None;
                 if scoped_target
+                    && !recover_shared
                     && let Some(provider) = route_owner
                     && let Some(admission) = provider.scoped_model(&self.id, &model)?
                 {
@@ -1924,7 +1935,11 @@ impl Connection {
                     .ctx
                     .get::<crate::provider::ProviderService>()
                     .ok_or_else(RpcError::reloading)?;
-                provider.scoped_connection_owner(&self.id, config.model.metadata.as_ref())?;
+                provider.scoped_connection_owner(
+                    &self.id,
+                    config.model.metadata.as_ref(),
+                    false,
+                )?;
                 provider
                     .startup_connection(connection)
                     .map_err(provider_error)?;

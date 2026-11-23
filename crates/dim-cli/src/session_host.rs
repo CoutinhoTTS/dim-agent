@@ -824,6 +824,7 @@ impl Worker {
         })
         .await??;
         let configuration = Configuration {
+            catalog_provider_id: None,
             provider_id: preview.model.provider_id,
             model_id: preview.model.model_id,
             capability_snapshot: None,
@@ -977,6 +978,7 @@ impl Worker {
             None => self.model_of(&session_id).await?,
         };
         let configuration = Configuration {
+            catalog_provider_id: attached.catalog_provider_id,
             provider_id: model.provider_id.clone(),
             model_id: model.model_id.clone(),
             capability_snapshot: attached.capability_snapshot,
@@ -3995,6 +3997,7 @@ impl Worker {
             };
             let features = self.model_features(&model).await;
             let configuration = Configuration {
+                catalog_provider_id: None,
                 provider_id: model.provider_id.clone(),
                 model_id: model.model_id.clone(),
                 capability_snapshot: None,
@@ -4032,6 +4035,7 @@ impl Worker {
                 })
                 .and_then(|shown| shown.model_preferences.clone());
             let configuration = Configuration {
+                catalog_provider_id: None,
                 provider_id: updated.model.provider_id.clone(),
                 model_id: updated.model.model_id.clone(),
                 capability_snapshot: self

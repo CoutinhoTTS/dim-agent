@@ -3,9 +3,7 @@ use super::{
     startup::{self, StartupConnectionInput},
 };
 use dim_agent_capabilities::methods::{Caller, RpcError};
-use dim_agent_types::{
-    ModelConfiguration, ModelProtocol, ModelSelection, RequestMetadata, StartupConnectionSource,
-};
+use dim_agent_types::{ModelProtocol, ModelSelection, RequestMetadata, StartupConnectionSource};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use tokio_util::sync::CancellationToken;
@@ -183,26 +181,64 @@ impl ProviderService {
         &self,
         scope: &str,
         metadata: Option<&RequestMetadata>,
-    ) -> Result<(), RpcError> {
+        recover_shared: bool,
+    ) -> Result<bool, RpcError> {
         let Some(source) = metadata
             .filter(|metadata| metadata.extensions.contains_key(LOGICAL_PROVIDER))
             .and_then(|metadata| metadata.startup.as_ref())
             .and_then(|startup| startup.connection.as_ref())
         else {
-            return Ok(());
+            return Ok(false);
         };
         let bindings = self.startup.lock().unwrap();
         match bindings.connections.get(&source.id) {
-            Some(binding) if binding.scope.as_deref() == Some(scope) => Ok(()),
+            Some(binding) if binding.scope.as_deref() == Some(scope) => Ok(false),
             Some(_) => Err(RpcError::service(
                 "provider_route_conflict",
                 "Session has a temporary route owned by another connection",
             )),
+            None if recover_shared => Ok(true),
             None => Err(RpcError::service(
                 "provider_route_unavailable",
                 "Session's temporary model route has expired",
             )),
         }
+    }
+
+    pub(crate) fn check_fork_route(
+        &self,
+        scope: &str,
+        provider_id: &str,
+        metadata: Option<&RequestMetadata>,
+    ) -> Result<(), RpcError> {
+        self.scoped_connection_owner(scope, metadata, false)?;
+        let logical = logical_provider(metadata);
+        let bindings = self.startup.lock().unwrap();
+        let Some(route) = bindings
+            .routes
+            .get(scope)
+            .and_then(|routes| routes.get(logical.unwrap_or(provider_id)))
+        else {
+            return Ok(());
+        };
+        let route = route.as_ref().ok_or_else(disabled)?;
+        let inherited = logical
+            .and(metadata)
+            .and_then(|metadata| metadata.startup.as_ref())
+            .and_then(|startup| startup.connection.as_ref())
+            .and_then(|source| bindings.connections.get(&source.id));
+        if inherited.is_some_and(|binding| {
+            startup::same_destination(&binding.source, &route.source)
+                && binding.connection.headers == route.connection.headers
+                && binding.connection.bearer == route.connection.bearer
+                && binding.connection.api_key == route.connection.api_key
+        }) {
+            return Ok(());
+        }
+        Err(RpcError::service(
+            "provider_route_conflict",
+            "Select the current route before forking from its adoption",
+        ))
     }
 
     pub(crate) fn scoped_model(
@@ -218,12 +254,7 @@ impl ProviderService {
         else {
             return Ok(None);
         };
-        let route = change.as_ref().ok_or_else(|| {
-            RpcError::service(
-                "provider_route_disabled",
-                "Selected Provider is disabled for this connection",
-            )
-        })?;
+        let route = change.as_ref().ok_or_else(disabled)?;
         if super::provider_protocol(model.metadata.as_ref()) != Some(route.source.api_format) {
             return Err(RpcError::invalid(
                 "Selected model does not use the temporary route's protocol",
@@ -259,11 +290,13 @@ impl ProviderService {
     }
 }
 
-pub(crate) fn logical_provider(model: &ModelConfiguration) -> Option<&str> {
-    model
-        .metadata
-        .as_ref()?
-        .extensions
-        .get(LOGICAL_PROVIDER)?
-        .as_str()
+fn disabled() -> RpcError {
+    RpcError::service(
+        "provider_route_disabled",
+        "Selected Provider is disabled for this connection",
+    )
+}
+
+pub(crate) fn logical_provider(metadata: Option<&RequestMetadata>) -> Option<&str> {
+    metadata?.extensions.get(LOGICAL_PROVIDER)?.as_str()
 }

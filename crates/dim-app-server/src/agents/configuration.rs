@@ -36,12 +36,18 @@ pub(crate) async fn check_configuration(
             .session_service::<TreeCommands>()?
             .adopted_configuration(ROOT_BRANCH_ID.into(), Some(through))
             .await?;
-        let (id, config, metadata) = match &model {
-            Some(model) => (&model.model_id, &model.config, &model.metadata),
+        let (id, config, metadata, snapshot) = match &model {
+            Some(model) => (
+                &model.model_id,
+                &model.config,
+                &model.metadata,
+                &model.capability_snapshot,
+            ),
             None => (
                 &initial.model.model_id,
                 &initial.model.config,
                 &initial.model.metadata,
+                &initial.model.capability_snapshot,
             ),
         };
         if expected
@@ -52,13 +58,21 @@ pub(crate) async fn check_configuration(
             return Err(mismatch("modelId"));
         }
         if let Some(expected) = &expected.reasoning_effort {
-            let preferences =
-                crate::provider::adopted_selection_preferences(config.as_ref(), metadata.as_ref());
-            if preferences
-                .as_ref()
-                .and_then(|preferences| preferences.reasoning_effort.as_ref())
-                != expected.value()
-            {
+            let actual =
+                crate::provider::adopted_selection_preferences(config.as_ref(), metadata.as_ref())
+                    .and_then(|preferences| preferences.reasoning_effort);
+            let declared;
+            let expected = match expected {
+                dim_agent_types::PreferenceUpdate::Value(value) => Some(value),
+                dim_agent_types::PreferenceUpdate::Clear(_) => {
+                    declared = crate::provider::declared_reasoning_effort(
+                        snapshot.as_ref(),
+                        metadata.as_ref(),
+                    );
+                    declared.as_ref()
+                }
+            };
+            if actual.as_ref() != expected {
                 return Err(mismatch("reasoningEffort"));
             }
         }

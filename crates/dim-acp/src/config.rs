@@ -221,10 +221,14 @@ impl Config {
             ));
         }
         if let Some(current) = &self.model
-            && self
-                .models
-                .iter()
-                .any(|model| model.id == current.model_id && model.provider == current.provider_id)
+            && self.models.iter().any(|model| {
+                model.id == current.model_id
+                    && model.provider
+                        == current
+                            .catalog_provider_id
+                            .as_deref()
+                            .unwrap_or(&current.provider_id)
+            })
         {
             options.push(select(
                 "model",
@@ -352,6 +356,8 @@ impl Config {
                     return Err(Error::internal_error());
                 }
                 self.model = Some(Configuration {
+                    catalog_provider_id: (model.provider != result.model.provider_id)
+                        .then(|| model.provider.clone()),
                     provider_id: result.model.provider_id,
                     model_id: result.model.model_id,
                     capability_snapshot: None,

@@ -52,7 +52,7 @@ impl Connection {
                 Some(model) => model.metadata.as_ref(),
                 None => session.config().model.metadata.as_ref(),
             };
-            provider.scoped_connection_owner(&self.id, metadata)?;
+            provider.scoped_connection_owner(&self.id, metadata, false)?;
         }
         let user = params.user.or_else(|| {
             params.text.map(|text| UserInput {
@@ -740,7 +740,7 @@ impl Connection {
                 Some(model) => model.metadata.as_ref(),
                 None => session.config().model.metadata.as_ref(),
             };
-            provider.scoped_connection_owner(&self.id, metadata)?;
+            provider.scoped_connection_owner(&self.id, metadata, false)?;
         }
         // A blocked prompt creates no branch (Hooks A.6.2). A branch's first
         // input is built from the prompt alone, so the checks' contexts are

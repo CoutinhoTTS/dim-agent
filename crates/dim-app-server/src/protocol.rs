@@ -1338,6 +1338,8 @@ pub struct AttachResult {
     /// (design §14, §15).
     #[serde(rename = "defaultBranch")]
     pub default_branch: BranchCursor,
+    #[serde(rename = "catalogProviderId", skip_serializing_if = "Option::is_none")]
+    pub catalog_provider_id: Option<String>,
     #[serde(rename = "capabilitySnapshot", skip_serializing_if = "Option::is_none")]
     pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     #[serde(rename = "modelPreferences", skip_serializing_if = "Option::is_none")]

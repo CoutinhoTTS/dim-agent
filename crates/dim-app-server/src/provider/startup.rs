@@ -53,7 +53,7 @@ pub(super) struct Binding {
     pub(super) scope: Option<String>,
 }
 
-fn same_destination(a: &StartupConnectionSource, b: &StartupConnectionSource) -> bool {
+pub(super) fn same_destination(a: &StartupConnectionSource, b: &StartupConnectionSource) -> bool {
     a.api_format == b.api_format
         && a.base_url == b.base_url
         && a.auth == b.auth
@@ -576,7 +576,10 @@ impl ProviderService {
                     && let Some(previous) = state
                         .configuration
                         .as_ref()
-                        .filter(|model| super::scoped_routes::logical_provider(model).is_none())
+                        .filter(|model| {
+                            super::scoped_routes::logical_provider(model.metadata.as_ref())
+                                .is_none()
+                        })
                         .and_then(|model| model.metadata.as_ref())
                         .and_then(|metadata| metadata.startup.as_ref())
                         .and_then(|startup| startup.connection.as_ref())

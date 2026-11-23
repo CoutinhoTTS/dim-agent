@@ -3541,6 +3541,15 @@ pub(crate) fn adopted_selection_preferences(
     dim_agent_capabilities::host::adopted_preferences(config?, provider_protocol(metadata)?)
 }
 
+pub(crate) fn declared_reasoning_effort(
+    snapshot: Option<&ModelCapabilitySnapshot>,
+    metadata: Option<&dim_agent_types::RequestMetadata>,
+) -> Option<String> {
+    let protocol = provider_protocol(metadata)?;
+    let config = preferences::catalog_defaults(&ModelConfig::default(), snapshot?, protocol);
+    dim_agent_capabilities::host::adopted_preferences(&config, protocol)?.reasoning_effort
+}
+
 #[cfg(feature = "testing")]
 pub mod testing {
     use super::*;
