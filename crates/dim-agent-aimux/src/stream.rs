@@ -329,13 +329,22 @@ pub(crate) fn convert(
                         FinishReasonUnified::ToolCalls => ModelStopReason::ToolUse,
                         FinishReasonUnified::Length => ModelStopReason::MaxTokens,
                         FinishReasonUnified::ContentFilter => {
-                            break Some(Err(HostError::failed("Model output was blocked by a content filter")));
+                            break Some(Err(reply_failure(
+                                ModelFailureKind::ContentFiltered,
+                                "the stream ended on a content-filter finish reason",
+                            )));
                         }
                         FinishReasonUnified::Error => {
-                            break Some(Err(HostError::failed("Model generation failed")));
+                            break Some(Err(reply_failure(
+                                ModelFailureKind::Unknown,
+                                "the provider reported a generation error",
+                            )));
                         }
                         FinishReasonUnified::Other => {
-                            break Some(Err(HostError::failed("Model returned an unsupported finish reason")));
+                            break Some(Err(reply_failure(
+                                ModelFailureKind::Unknown,
+                                "the stream ended on an unsupported finish reason",
+                            )));
                         }
                     };
                     if reason != ModelStopReason::MaxTokens
@@ -435,18 +444,18 @@ fn usage_chunk(usage: NativeUsage) -> Option<Usage> {
     })
 }
 
-/// The one failure the converter builds itself: a reply that completed with
-/// neither text nor a tool call. The provider's structured error, which
-/// carries every other failure, has nothing to say about a reply it called
-/// successful, so the bridge names this defect here.
-fn empty_reply() -> HostError {
-    let reason = "the response had no text and no tool call";
+/// The failures the converter builds itself, from what the reply ended with
+/// rather than from a provider error: a reply that completed with neither text
+/// nor a tool call, and a reply a finish reason failed. The provider's
+/// structured error, which carries every other failure, has nothing to say
+/// about either, so the bridge names the defect here.
+fn reply_failure(kind: ModelFailureKind, reason: &str) -> HostError {
     HostError::Failed {
-        message: ModelFailureKind::MalformedResponse.line(Some(reason)),
+        message: kind.line(Some(reason)),
         budget: None,
         kind: HostErrorKind::Other,
         model: Some(Box::new(ModelFailureFacts {
-            kind: ModelFailureKind::MalformedResponse,
+            kind,
             reason: Some(reason.to_owned()),
             status: None,
             provider_code: None,
@@ -460,6 +469,13 @@ fn empty_reply() -> HostError {
         })),
         presentation: None,
     }
+}
+
+fn empty_reply() -> HostError {
+    reply_failure(
+        ModelFailureKind::MalformedResponse,
+        "the response had no text and no tool call",
+    )
 }
 
 pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostError {
