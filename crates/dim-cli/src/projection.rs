@@ -160,6 +160,7 @@ impl Projection {
                 if let Some(line) = self.lines.iter_mut().find(|line| line.id == data.branch) {
                     // The directory lists a line before its parent's history
                     // arrives; the creation fold supplies the count then.
+                    line.branch_point = Some(sequence);
                     line.cut = line.cut.or(cut);
                 } else {
                     self.lines.push(LineView {
@@ -168,6 +169,7 @@ impl Projection {
                         purpose,
                         state: LineState::Waiting,
                         running: None,
+                        branch_point: Some(sequence),
                         cut,
                     });
                 }
@@ -1446,6 +1448,9 @@ impl Projection {
                 LineState::Waiting
             },
             running: None,
+            branch_point: entry
+                .branch_point
+                .or_else(|| previous.and_then(|index| self.lines[index].branch_point)),
             // The server does not calculate the count; the creation fold owns
             // it, and a row with no count of its own must not drop it.
             cut: match entry.cut_messages {
@@ -3286,6 +3291,7 @@ mod tests {
                 purpose: "parser race hypothesis".into(),
                 state: LineState::Waiting,
                 running: None,
+                branch_point: Some(5),
                 cut: Some(LineCut {
                     sequence: 5,
                     messages: 2,
@@ -3371,6 +3377,7 @@ mod tests {
                 purpose: "review the change".into(),
                 state: LineState::Waiting,
                 running: None,
+                branch_point: Some(12),
                 cut: Some(LineCut {
                     sequence: 12,
                     messages: 3,

@@ -9779,6 +9779,7 @@ mod tests {
                         purpose: String::new(),
                         state: LineState::Main,
                         running: Some(false),
+                        branch_point: None,
                         cut: None,
                     },
                     LineView {
@@ -9787,6 +9788,7 @@ mod tests {
                         purpose: "parser race".into(),
                         state: LineState::Working,
                         running: Some(true),
+                        branch_point: None,
                         cut: None,
                     },
                 ],
@@ -10390,6 +10392,7 @@ mod tests {
             purpose: String::new(),
             state,
             running,
+            branch_point: None,
             cut: None,
         }
     }
@@ -12407,6 +12410,7 @@ mod tests {
                 purpose: String::new(),
                 state: LineState::Main,
                 running: Some(false),
+                branch_point: None,
                 cut: None,
             }],
             ..ViewSnapshot::default()
@@ -15673,6 +15677,7 @@ mod tests {
                         purpose: String::new(),
                         state: LineState::Main,
                         running: Some(false),
+                        branch_point: None,
                         cut: None,
                     },
                     LineView {
@@ -15681,6 +15686,7 @@ mod tests {
                         purpose: "parser race".into(),
                         state: LineState::Waiting,
                         running: Some(false),
+                        branch_point: Some(1),
                         cut: Some(crate::model::view::LineCut {
                             sequence: 1,
                             messages: 1,
@@ -15801,6 +15807,7 @@ mod tests {
                 purpose: String::new(),
                 state: LineState::Main,
                 running: Some(true),
+                branch_point: None,
                 cut: None,
             }],
             ..ViewSnapshot::default()
@@ -15825,6 +15832,7 @@ mod tests {
                     purpose: String::new(),
                     state: LineState::Main,
                     running: Some(false),
+                    branch_point: None,
                     cut: None,
                 },
                 crate::model::view::LineView {
@@ -15833,6 +15841,7 @@ mod tests {
                     purpose: "review".into(),
                     state: LineState::Working,
                     running: Some(true),
+                    branch_point: Some(1),
                     cut: Some(crate::model::view::LineCut {
                         sequence: 1,
                         messages: 0,

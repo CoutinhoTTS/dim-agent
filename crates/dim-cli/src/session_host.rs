@@ -4922,6 +4922,7 @@ impl Worker {
             purpose: String::new(),
             state: LineState::Main,
             running: running(ROOT_BRANCH_ID),
+            branch_point: None,
             cut: None,
         }];
         lines.extend(

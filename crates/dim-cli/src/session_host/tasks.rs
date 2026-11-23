@@ -615,7 +615,8 @@ impl Worker {
             Ok(false) => self.task_history_queue.push_back(request.branch_id.clone()),
             Ok(true) => {
                 let events = history.window.take();
-                let missing_prefix = history.window.before.is_some() && !at_start;
+                let missing_prefix =
+                    history.window.dropped_pages() || history.window.before.is_some() && !at_start;
                 history.window_complete = true;
                 if history.earlier == EarlierRead::Reading {
                     history.earlier = EarlierRead::None;
