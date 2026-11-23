@@ -25,14 +25,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::request::ToolNames;
 
-// How long the bridge reads on for a terminal that a protocol's adapter can
-// deliver after the tool call: the Responses adapter queues the client call on
-// `response.output_item.done` and `Finish` only in its flush, after the
-// `response.incomplete` event that carries the filter.
+// An upper bound for a raw adapter stream that does not pass through strict
+// mode: there the client call and the finish reason arrive in separate events,
+// so the bridge may need to read on after a failed call. Every request streams
+// through strict mode, which holds each client call until `Finish` and
+// releases a held call directly before the terminal, so that path settles on
+// the next read and never waits here.
 const TERMINAL_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
-// Whether the protocol's adapter can learn the finish reason after the event
-// that carries a client tool call.
+// Whether the protocol's raw adapter can learn the finish reason after the
+// event that carries a client tool call. Strict mode reorders that case, so
+// only a stream without strict needs the fallback.
 fn terminal_may_trail(protocol: ModelProtocol) -> bool {
     matches!(
         protocol,
@@ -77,9 +80,11 @@ pub(crate) fn convert(
             // that may explain it in one flush, so a terminal behind a failed
             // call is already delivered; when none is, the parse failure is
             // final rather than holding the request open for a part that may
-            // never arrive. An adapter that learns the finish reason from a
-            // later event can deliver that terminal after a pending read, so
-            // the bridge reads on until a deadline measured from the failure.
+            // never arrive. Strict mode holds every client call until `Finish`
+            // and releases a held call directly before the terminal, so a
+            // failed call normally settles on the next read. Only a raw adapter
+            // stream that does not pass through strict, where the finish reason
+            // comes from a later event, reads on until the fallback deadline.
             let next = if unfinished_call.is_some() {
                 if let Some(deadline) = grace_deadline {
                     tokio::select! {
