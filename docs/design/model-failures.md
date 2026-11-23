@@ -154,7 +154,9 @@ ModelFailure {
   the same defect. A content filter the stream reports after the interrupted
   call is the exception: the known filter terminal is authoritative, so the
   reply writes `content_filtered` and the started call is closed as failed
-  instead of being announced as a tool call.
+  instead of being announced as a tool call. A stream that stops without that
+  terminal keeps `malformed_response`, settled at once rather than held open
+  for a part that may never arrive.
 - A reply that stops with an end-turn finish and carries no non-whitespace text
   and no tool call writes `failure.kind = malformed_response` with the reason
   "the response had no text and no tool call". Thinking alone is not an answer,
