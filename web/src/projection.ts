@@ -308,7 +308,7 @@ export class Projection {
 
   /** Whether a notice opens a new attempt in place of a thought this one replaced. */
   private replacedAttempt(progress: ModelProgress, thought: Stream): boolean {
-    if (progress.thinking === "" && progress.text === "" && progress.thinkingOffset === 0 && progress.textOffset === 0) return true
+    if (progress.thinking === "" && progress.thinkingOffset === 0) return true
     return progress.thinking !== "" && progress.thinkingPartId !== undefined && progress.thinkingPartId !== thought.partId
   }
 
