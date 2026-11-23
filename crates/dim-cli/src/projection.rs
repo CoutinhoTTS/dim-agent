@@ -48,9 +48,9 @@ pub struct Projection {
     /// to count where a line was cut (timeline UI §6); a withdrawn one is
     /// dropped.
     messages: HashMap<String, Vec<(String, u64)>>,
-    /// The earliest event folded for each line: only from sequence 1 is the
-    /// line's history whole, and only then can a cut count it.
-    oldest: HashMap<String, u64>,
+    /// Lines whose loaded history starts after the line's own start: a cut
+    /// that counts one of them has no count until an earlier read reaches it.
+    incomplete: HashSet<String>,
     /// Where each line was cut from its parent, until the parent's history
     /// lets its count be folded.
     cuts: HashMap<String, u64>,
@@ -119,15 +119,10 @@ impl Projection {
             }
     }
 
-    /// Folds one line's creation or end into the Session's lines, whichever
-    /// line recorded it: `parent` is the line whose history holds the fact
-    /// (design §14).
-    fn lines(&mut self, parent: &str, event: &Event) {
-        let oldest = self
-            .oldest
-            .entry(parent.to_owned())
-            .or_insert(event.sequence);
-        *oldest = (*oldest).min(event.sequence);
+    /// Folds one line's creation or end, or a user message a cut counts, into
+    /// the Session's lines, whichever line recorded it: `parent` is the line
+    /// whose history holds the fact (design §14).
+    pub fn line_event(&mut self, parent: &str, event: &Event) {
         match &event.content {
             EventContent::Input(data) if data.user.is_some() => {
                 self.messages
@@ -197,27 +192,63 @@ impl Projection {
     }
 
     /// The user messages a cut inherits: the parent's own up to `sequence`,
-    /// its inherited ones included, and `None` until the parent's history is
-    /// loaded from its start.
+    /// its inherited ones included, and `None` while a line it counts is
+    /// missing the start of its history.
     fn cut_count(&self, branch: &str, sequence: u64) -> Option<usize> {
-        if self.oldest.get(branch) != Some(&1) {
+        if self.incomplete.contains(branch) {
             return None;
         }
         let inherited = match self.lines.iter().find(|line| line.id == branch) {
             Some(line) => self.cut_count(line.parent.as_deref()?, *self.cuts.get(branch)?)?,
-            None => 0,
+            None if branch == ROOT_BRANCH_ID => 0,
+            None => return None,
         };
         let own = self.messages.get(branch).map_or(0, |messages| {
-            messages
-                .iter()
-                .take_while(|(_, at)| *at <= sequence)
-                .count()
+            messages.iter().filter(|(_, at)| *at <= sequence).count()
         });
         Some(inherited + own)
     }
 
+    /// Records that the loaded history of `branch` starts after the branch's
+    /// own start: the cuts that count it show nothing until a later read
+    /// reaches the start, and the counts folded until now stop counting it.
+    pub fn missing_history(&mut self, branch: &str) {
+        if !self.incomplete.insert(branch.to_owned()) {
+            return;
+        }
+        for index in 0..self.lines.len() {
+            if self.counts(index, branch) {
+                self.lines[index].cut = None;
+            }
+        }
+    }
+
+    /// Whether the line at `index` counts `branch` through its parent chain.
+    fn counts(&self, index: usize, branch: &str) -> bool {
+        let mut parent = self.lines[index].parent.as_deref();
+        while let Some(id) = parent {
+            if id == branch {
+                return true;
+            }
+            parent = self
+                .lines
+                .iter()
+                .find(|line| line.id == id)
+                .and_then(|line| line.parent.as_deref());
+        }
+        false
+    }
+
+    /// Records that the loaded history of `branch` reaches its own start, and
+    /// folds the counts of the cuts that were waiting for it.
+    pub fn whole_history(&mut self, branch: &str) {
+        if self.incomplete.remove(branch) {
+            self.resolve_cuts();
+        }
+    }
+
     /// Fills the count of a cut that waited for the parent history an earlier
-    /// page brought.
+    /// read brought.
     fn resolve_cuts(&mut self) {
         for index in 0..self.lines.len() {
             if self.lines[index].cut.is_some() {
@@ -305,7 +336,7 @@ impl Projection {
             }
             _ => {}
         }
-        self.lines(branch_id, event);
+        self.line_event(branch_id, event);
         if !self.owns(branch_id)
             && !matches!(
                 &event.content,
@@ -1227,19 +1258,6 @@ impl Projection {
     pub fn prepend(&mut self, mut older: Self) {
         older.name_agents(self.agent_names.clone(), Vec::new());
         self.name_agents(older.agent_names.clone(), Vec::new());
-        for (branch, at) in older.oldest {
-            self.oldest
-                .entry(branch)
-                .and_modify(|oldest| *oldest = (*oldest).min(at))
-                .or_insert(at);
-        }
-        self.cuts.extend(older.cuts);
-        for (branch, mut messages) in older.messages {
-            let existing = self.messages.entry(branch).or_default();
-            messages.append(existing);
-            *existing = messages;
-        }
-        self.resolve_cuts();
         older.rows.retain(|row| {
             if let Some(existing) = self
                 .rows
@@ -2905,6 +2923,18 @@ mod tests {
     }
 
     #[test]
+    fn a_cut_of_a_line_the_list_does_not_hold_shows_no_count() {
+        let mut main = Projection::default();
+        let create: Event = serde_json::from_value(line_created(12, "b-90", 10)).unwrap();
+        main.apply("b-7c", &create);
+        assert_eq!(
+            main.line_views()[0].cut,
+            None,
+            "b-7c is not listed, so what b-90 inherits is unknown"
+        );
+    }
+
+    #[test]
     fn a_cut_counts_the_history_a_window_holds_without_the_branch_start() {
         let mut main = Projection::default();
         apply(
@@ -2922,8 +2952,9 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_without_the_start_of_the_parent_history_shows_no_count() {
+    fn a_cut_counts_nothing_while_the_parent_history_misses_its_start() {
         let mut main = Projection::default();
+        main.missing_history("main");
         apply(
             &mut main,
             &[user_says(2, "try the parser"), line_created(3, "b-7c", 1)],
@@ -2936,28 +2967,29 @@ mod tests {
     }
 
     #[test]
-    fn earlier_history_completes_the_count_of_a_cut() {
+    fn an_earlier_read_that_reaches_the_start_completes_the_count_of_a_cut() {
         let mut main = Projection::default();
+        main.missing_history("main");
         apply(
             &mut main,
-            &[user_says(2, "try the parser"), line_created(3, "b-7c", 1)],
+            &[user_says(5, "carry on"), line_created(6, "b-7c", 5)],
         );
         assert_eq!(main.line_views()[0].cut, None);
-        let mut older = Projection::default();
-        apply(&mut older, &[user_says(1, "find the leak")]);
-        main.prepend(older);
+        let older: Event = serde_json::from_value(user_says(2, "find the leak")).unwrap();
+        main.line_event("main", &older);
+        main.whole_history("main");
         assert_eq!(
             main.line_views()[0].cut,
             Some(LineCut {
-                sequence: 1,
-                messages: 1,
+                sequence: 5,
+                messages: 2,
             }),
             "the page that reaches the branch start completes the count"
         );
     }
 
     #[test]
-    fn an_older_page_holding_the_creation_fills_a_listed_line() {
+    fn history_read_later_counts_a_line_the_directory_already_listed() {
         let mut main = Projection::default();
         main.directory(&dim_client::wire::BranchEntry {
             purpose: None,
@@ -2965,22 +2997,22 @@ mod tests {
             end: None,
             branch_id: "b-7c".into(),
             parent_branch_id: Some("main".into()),
-            branch_point: Some(1),
+            branch_point: Some(5),
             state: "open".into(),
-            head: 3,
+            head: 6,
         });
-        apply(&mut main, &[user_says(3, "carry on")]);
+        main.missing_history("main");
+        apply(&mut main, &[user_says(6, "carry on")]);
         assert_eq!(main.line_views()[0].cut, None);
-        let mut older = Projection::default();
-        apply(
-            &mut older,
-            &[user_says(1, "find the leak"), line_created(2, "b-7c", 1)],
-        );
-        main.prepend(older);
+        for event in [user_says(2, "find the leak"), line_created(5, "b-7c", 5)] {
+            let event: Event = serde_json::from_value(event).unwrap();
+            main.line_event("main", &event);
+        }
+        main.whole_history("main");
         assert_eq!(
             main.line_views()[0].cut,
             Some(LineCut {
-                sequence: 1,
+                sequence: 5,
                 messages: 1,
             }),
             "history read later counts a line the directory already listed"

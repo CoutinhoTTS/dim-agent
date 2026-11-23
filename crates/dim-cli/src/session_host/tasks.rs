@@ -536,6 +536,7 @@ impl Worker {
                         let history = self.task_history.get_mut(&request.branch_id).unwrap();
                         history.window.through = Some(turn.through);
                         history.window_complete = true;
+                        self.projection.missing_history(&request.branch_id);
                     }
                     ReadStage::Inventory(method) => {
                         let through = self.task_history[&request.branch_id]
@@ -573,20 +574,25 @@ impl Worker {
             .and_then(|error| error.data.as_ref())
             .and_then(|data| data["appError"].as_str())
             .map(str::to_owned);
+        let display = self
+            .client
+            .supports(&["session.history.display", "session.history.detail"]);
+        let transcript = self.client.offers("session.history.display.transcript");
         let history = self
             .task_history
             .get_mut(&request.branch_id)
             .expect("current history");
+        let mut at_start = false;
         let result = result.map_err(|error| error.to_string()).and_then(|value| {
-            let page = if self
-                .client
-                .supports(&["session.history.display", "session.history.detail"])
-            {
-                serde_json::from_value::<dim_client::wire::DisplayPage>(value).map(Into::into)
+            let page = if display {
+                let page: dim_client::wire::DisplayPage = serde_json::from_value(value)
+                    .map_err(|error| format!("Invalid history reply: {error}"))?;
+                at_start = transcript && page.done();
+                page.into()
             } else {
                 serde_json::from_value(value)
-            }
-            .map_err(|error| format!("Invalid history reply: {error}"))?;
+                    .map_err(|error| format!("Invalid history reply: {error}"))?
+            };
             history.window.push(page).map_err(|error| error.to_string())
         });
         let window_ready = matches!(result, Ok(true));
@@ -609,12 +615,13 @@ impl Worker {
             Ok(false) => self.task_history_queue.push_back(request.branch_id.clone()),
             Ok(true) => {
                 let events = history.window.take();
-                let missing_prefix = history.window.before.is_some();
+                let missing_prefix = history.window.before.is_some() && !at_start;
                 history.window_complete = true;
                 if history.earlier == EarlierRead::Reading {
                     history.earlier = EarlierRead::None;
                     let mut older = Projection::for_branch(&request.branch_id);
                     for event in events {
+                        self.projection.line_event(&request.branch_id, &event);
                         older.replay(&request.branch_id, &event);
                     }
                     if let Some(projection) =
@@ -629,9 +636,12 @@ impl Worker {
                     self.task_history_queue.push_back(request.branch_id.clone());
                 }
                 if missing_prefix {
+                    self.projection.missing_history(&request.branch_id);
                     self.send(Update::Notice(
                         "Earlier content not loaded; /earlier to read it".into(),
                     ));
+                } else {
+                    self.projection.whole_history(&request.branch_id);
                 }
             }
         }
@@ -1173,6 +1183,7 @@ mod tests {
             "a press during the retried read queues nothing"
         );
     }
+
     /// A line's own window can start after its start. The lines it opened show
     /// no count then, and the earlier page that reaches the start fills it in.
     #[tokio::test]
