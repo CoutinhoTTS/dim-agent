@@ -4926,6 +4926,107 @@ async fn the_branch_tool_reports_invalid_arguments() {
     soon(agent.close()).await.unwrap();
 }
 
+/// #2000: `title` is no argument of the branch tool, and the refusal says what
+/// names a line; a call that leaves `title` out opens a line named by the
+/// prompt's first line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_title_is_refused_with_what_names_a_line() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let refused = tool_call(
+        &session,
+        "main",
+        r#"{"action":"create","title":"watch the tests","prompt":"watch the tests\nreport once"}"#,
+    )
+    .await;
+    assert_eq!(refused.is_error, Some(true), "{:?}", refused.content);
+    assert!(
+        matches!(
+            &refused.content,
+            ToolContent::Text(shown)
+                if shown
+                    == "Invalid branch arguments: no `title` parameter; a line's name is the \
+                        first line of `prompt`."
+        ),
+        "{:?}",
+        refused.content
+    );
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let tools = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => data.request.tools.clone(),
+            _ => None,
+        })
+        .expect("the request carries the declarations");
+    let branch = tools
+        .iter()
+        .find(|tool| tool.name == "branch")
+        .expect("the branch tool is declared");
+    let schema = serde_json::to_value(&branch.input_schema).unwrap();
+    assert_eq!(
+        schema["properties"]["prompt"]["description"],
+        serde_json::json!(
+            "create: the purpose of the new line; its first line is the line's name."
+        )
+    );
+    let mut properties: Vec<&str> = schema["properties"]
+        .as_object()
+        .expect("the schema declares properties")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    properties.sort_unstable();
+    assert_eq!(
+        properties,
+        [
+            "action",
+            "after",
+            "at",
+            "branch",
+            "content",
+            "idleNotice",
+            "limit",
+            "mode",
+            "prompt",
+            "to"
+        ]
+    );
+    let child = open_line(&session, "watch the tests\nreport once").await;
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let created: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::BranchCreate(data) => Some(data),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        created.len(),
+        1,
+        "the refused call opened no line: {created:?}"
+    );
+    assert_eq!(created[0].branch, child);
+    assert_eq!(created[0].prompt, "watch the tests\nreport once");
+    let events = until_events(&session, "main", |events| {
+        blocks_with(events, "<dim-branch-lines")
+            .last()
+            .is_some_and(|text| text.contains(&child))
+    })
+    .await;
+    let (roster, _) = roster_block(&events).expect("the roster is keyed `branch:roster`");
+    assert!(
+        roster.contains(&format!("\n- {child}: watch the tests\n")),
+        "the line is named by the prompt's first line: {roster}"
+    );
+    assert!(!roster.contains("report once"));
+    soon(agent.close()).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_message_reaches_its_receiver_in_the_mode_it_asked_for() {
     let probe = Arc::new(Probe::default());
