@@ -180,6 +180,24 @@ where
     (stream, cancel, abort, dropped)
 }
 
+/// A bridge over `protocol` fed `parts` that stalls afterwards, with the drop
+/// of the transport observable.
+fn stalled_fixture(
+    protocol: ModelProtocol,
+    parts: Vec<Result<StreamPart, AiMuxError>>,
+) -> (ModelStream, CancellationToken, AbortSignal, Arc<AtomicBool>) {
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = DropFlag(dropped.clone());
+    let stream = async_stream::stream! {
+        let _flag = flag;
+        for part in parts {
+            yield part;
+        }
+        std::future::pending::<()>().await;
+    };
+    protocol_fixture(protocol, stream, dropped)
+}
+
 #[tokio::test]
 async fn native_content_and_tools_convert_in_order_to_agent_chunks() {
     let (mut stream, _, _, dropped) = fixture(vec![
@@ -1033,6 +1051,69 @@ async fn a_late_content_filter_after_a_pending_read_keeps_its_kind() {
         assert!(abort.is_aborted(), "{protocol:?}");
         assert!(dropped.load(Ordering::SeqCst), "{protocol:?}");
     }
+}
+
+/// A Responses-shaped stream that stops after a cut tool call without ever
+/// delivering the terminal keeps the original parse failure, settled at the
+/// fixed grace rather than held open forever.
+#[tokio::test(start_paused = true)]
+async fn a_stalled_responses_stream_after_a_cut_tool_call_ends_at_the_grace() {
+    let started = tokio::time::Instant::now();
+    let (stream, _, abort, dropped) = stalled_fixture(
+        ModelProtocol::OpenaiResponses,
+        vec![Ok(start()), Ok(tool_start()), Ok(tool("{\"query\":"))],
+    );
+    let chunks = stream.collect::<Vec<_>>().await;
+    assert!(
+        tokio::time::Instant::now() >= started + TERMINAL_GRACE,
+        "the bridge settled the failure before the grace expired: {chunks:?}"
+    );
+    let Some(Err(failure)) = chunks.last() else {
+        panic!("missing failure: {chunks:?}")
+    };
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("invalid arguments for tool 'lookup'")
+    );
+    assert!(abort.is_aborted());
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
+/// Cancelling while the bridge waits for a late terminal settles the cut call
+/// at once, without waiting for the grace to expire.
+#[tokio::test(start_paused = true)]
+async fn cancelling_the_grace_returns_at_once() {
+    let (mut stream, cancel, abort, dropped) = stalled_fixture(
+        ModelProtocol::OpenaiResponses,
+        vec![Ok(start()), Ok(tool_start()), Ok(tool("{\"query\":"))],
+    );
+    while let Some(next) = stream.next().now_or_never() {
+        if next.is_none() {
+            break;
+        }
+    }
+    let started = tokio::time::Instant::now();
+    cancel.cancel();
+    let next = stream
+        .next()
+        .now_or_never()
+        .expect("the cancelled bridge did not settle")
+        .expect("the cancelled bridge yielded no chunk");
+    assert!(matches!(next, Err(HostError::Cancelled(_))), "{next:?}");
+    assert_eq!(
+        tokio::time::Instant::now(),
+        started,
+        "the bridge waited for the grace after cancellation"
+    );
+    assert!(abort.is_aborted());
+    assert!(dropped.load(Ordering::SeqCst));
 }
 
 #[tokio::test]

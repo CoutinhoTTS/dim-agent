@@ -25,6 +25,25 @@ use tokio_util::sync::CancellationToken;
 
 use crate::request::ToolNames;
 
+// How long the bridge reads on for a terminal that a protocol's adapter can
+// deliver after the tool call: the Responses adapter queues the client call on
+// `response.output_item.done` and `Finish` only in its flush, after the
+// `response.incomplete` event that carries the filter.
+const TERMINAL_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
+// Whether the protocol's adapter can learn the finish reason after the event
+// that carries a client tool call.
+fn terminal_may_trail(protocol: ModelProtocol) -> bool {
+    matches!(
+        protocol,
+        ModelProtocol::OpenaiResponses
+            | ModelProtocol::XaiResponses
+            | ModelProtocol::Anthropic
+            | ModelProtocol::Gemini
+            | ModelProtocol::Bedrock
+    )
+}
+
 pub(crate) fn convert(
     result: StreamResult,
     tool_names: ToolNames,
@@ -52,16 +71,38 @@ pub(crate) fn convert(
         let mut thinking = HashMap::<String, String>::new();
         let mut answered = false;
         let mut unfinished_call = None;
+        let mut grace_deadline = None;
         let terminal = loop {
-            // A stream queues a client tool call and the terminal that may
-            // explain it in one flush, so a terminal behind a failed call is
-            // already delivered; when none is, the parse failure is final
-            // rather than holding the request open for a part that may never
-            // arrive.
+            // A chat-shaped stream queues a client tool call and the terminal
+            // that may explain it in one flush, so a terminal behind a failed
+            // call is already delivered; when none is, the parse failure is
+            // final rather than holding the request open for a part that may
+            // never arrive. An adapter that learns the finish reason from a
+            // later event can deliver that terminal after a pending read, so
+            // the bridge reads on until a deadline measured from the failure.
             let next = if unfinished_call.is_some() {
-                match poll_immediate(stream.next()).await {
-                    Some(next) => next,
-                    None => break unfinished_call.take().map(Err),
+                if let Some(deadline) = grace_deadline {
+                    tokio::select! {
+                        biased;
+                        _ = generation.cancelled() => {
+                            break Some(Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")));
+                        }
+                        _ = cancel.cancelled() => {
+                            break Some(Err(HostError::Cancelled("Model request cancelled".into())));
+                        }
+                        next = stream.next() => next,
+                        _ = tokio::time::sleep_until(deadline) => {
+                            break unfinished_call.take().map(Err);
+                        }
+                    }
+                } else if terminal_may_trail(protocol) {
+                    grace_deadline = Some(tokio::time::Instant::now() + TERMINAL_GRACE);
+                    continue;
+                } else {
+                    match poll_immediate(stream.next()).await {
+                        Some(next) => next,
+                        None => break unfinished_call.take().map(Err),
+                    }
                 }
             } else {
                 tokio::select! {
