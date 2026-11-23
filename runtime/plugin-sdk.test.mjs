@@ -243,7 +243,7 @@ void methods.register('session.example', [{ name: 'session.example.echo', mutati
 void sessionHandler({ callId: 'call', method: 'session.example.echo', params: { sessionId: 'session' } },
   Promise.resolve(), async () => {});
 // @ts-expect-error a Session method call names its Session.
-void sessionHandler({ callId: 'call', method: 'session.example.echo', params: {} }, Promise.resolve(), () => {});
+void sessionHandler({ callId: 'call', method: 'session.example.echo', params: {} }, Promise.resolve(), async () => {});
 void handler({ callId: 'call', method: 'example.status', params: [1, true],
   origin: { connectionId: 'connection' } }, Promise.resolve(), async () => {});
 const notificationOrigin: MethodDeclaration = { name: 'example.status', mutating: false,
