@@ -110,9 +110,8 @@ type Channel = {
   historyRunning: boolean
   /** The goal refresh running now; a caller that arrives meanwhile waits for its result. */
   goalTask: Promise<boolean> | undefined
-  goalDirty: boolean
-  /** The centre whose goal a pending refresh reads; a read in flight belongs to an earlier line. */
-  goalLine: string
+  /** The lines a pending or running refresh still has to read, oldest first. */
+  goalLines: string[]
   publishTimer: ReturnType<typeof setTimeout> | undefined
 }
 
@@ -187,7 +186,7 @@ export const useChatStore = defineStore("chat", () => {
       queued: [],
       historyQueue: [],
       historyRunning: false,
-      goalTask: undefined, goalDirty: false, goalLine: ROOT_BRANCH_ID,
+      goalTask: undefined, goalLines: [],
       publishTimer: undefined,
     }
     channel.main.opened = true
@@ -277,10 +276,16 @@ export const useChatStore = defineStore("chat", () => {
       if (view.status === "failed") return
       channel.syncing = false
       drainQueued(channel)
-      if (view.status !== "closed") showPermission(view, centreId, await sessionPermission(view.sessionId, centreId))
-      if (view.status !== "closed") {
-        view.status = "ready"
-        view.error = ""
+      // The policy read is out while the page is the loading one this sync
+      // installed. A goal event that arrives meanwhile and fails owns the page:
+      // neither this read's result nor a ready page may take it back.
+      if (view.status === "loading") {
+        const policy = await sessionPermission(view.sessionId, centreId)
+        if (view.status === "loading") {
+          showPermission(view, centreId, policy)
+          view.status = "ready"
+          view.error = ""
+        }
       }
       publish(channel)
       if (view.status !== "closed") void pumpHistory(channel)
@@ -583,18 +588,17 @@ export const useChatStore = defineStore("chat", () => {
    * belongs to the line it names, and a failure belongs to it too: a line that
    * left the centre publishes nothing, and the centre that replaced it keeps
    * the refresh it already asked for. A caller that arrives while a refresh
-   * runs waits for that refresh's result instead of assuming one.
+   * runs queues its own line in that refresh and waits for its result, so no
+   * caller is answered for a line it did not ask about.
    */
   async function refreshGoal(channel: Channel, branchId = channel.view.defaultBranchId): Promise<boolean> {
     if (!channel.view.methods.includes("session.goal.get")) return true
-    channel.goalDirty = true
-    channel.goalLine = branchId
+    if (!channel.goalLines.includes(branchId)) channel.goalLines.push(branchId)
     if (channel.goalTask !== undefined) return channel.goalTask
     channel.goalTask = (async () => {
       try {
-        while (channel.goalDirty) {
-          channel.goalDirty = false
-          const line = channel.goalLine
+        while (channel.goalLines.length > 0) {
+          const line = channel.goalLines.shift()!
           try {
             const goal = await client().call("session.goal.get", { sessionId: channel.view.sessionId, branchId: line }, readGoal)
             if (channel.view.defaultBranchId !== line) continue
@@ -1051,11 +1055,13 @@ export const useChatStore = defineStore("chat", () => {
     // when a read that describes it fails.
     centre(channel, moved, branch)
     if (loaded !== "ok") {
-      // The move stands, but the centre has no transcript to show: report it
-      // as `sync` reports the same failure rather than an empty conversation.
-      if (loaded === "failed" && view.status !== "closed") {
-        view.status = "failed"
-        view.error = channel.main.error
+      // The move stands, but the centre has no transcript to show: report a
+      // failure as `sync` does, and leave a lost connection in the pending
+      // state its reconnect reads again rather than a ready page with no
+      // messages.
+      if (view.status !== "closed") {
+        view.status = loaded === "lost" ? "loading" : "failed"
+        view.error = view.status === "failed" ? channel.main.error : ""
       }
       publish(channel)
       return
@@ -1063,7 +1069,14 @@ export const useChatStore = defineStore("chat", () => {
     await adoptModel(channel, moved, branch).catch(() => undefined)
     if (channel.moves !== move) return
     publish(channel)
-    if (!(await refreshGoal(channel))) return
+    if (!(await refreshGoal(channel))) {
+      // A failed read owns the page already. A read that lost the connection
+      // leaves the centre's goal unread: the page goes back to the pending
+      // state its reconnect reads again instead of a ready page with a stale
+      // goal and the policy the move cleared.
+      if (view.status === "ready") view.status = "loading"
+      return
+    }
     if (view.status === "failed") return
     if (view.status === "closed") return
     const policy = await sessionPermission(sessionId, moved)
