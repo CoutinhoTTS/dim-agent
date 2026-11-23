@@ -94,6 +94,17 @@ test("a coalesced clear rebuilds the replaced attempt's thought row", () => {
   assert.equal(thought.elapsedMs, 3, "the span starts at the new attempt")
 })
 
+test("a coalesced clear before text leaves no empty thought row", () => {
+  const projection = new Projection()
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1_000 })
+  // The clear frame was coalesced away; the next notice starts the new attempt's text.
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: "partial answer", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  projection.apply(event(5, { kind: "text", requestId: "r1", delta: "partial answer" }))
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 0, JSON.stringify(projection.rows))
+  assert.equal(projection.rows.find((row) => row.kind === "assistant").text, "partial answer")
+})
+
 test("a tool start settles a thought before its arguments arrive", () => {
   const projection = new Projection()
   projection.apply(event(2, { kind: "thinking", requestId: "r1", delta: "weigh" }))
