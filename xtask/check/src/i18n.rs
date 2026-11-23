@@ -14,11 +14,13 @@
 //! by being skipped. A `#[cfg(test)]` item is a fixture rather than text the
 //! interface draws, so the scan skips it.
 //!
-//! A constant is read only where its name still means it: a parameter, a local
-//! or a constant an inner scope declares hides an outer one, and a name no
-//! scope settles is counted instead. A key argument that reduces to no literal
-//! is counted for the same reason: it names a parameter, a field, the result of
-//! a call or a constant of another file.
+//! A constant is read only where its name still means it: a parameter, a local,
+//! a pattern, a `use` import, a static, a glob import or a constant an inner
+//! scope declares hides an outer one, and a name no lookup settles is counted
+//! instead. An inline module and a macro in statement or item position may hold
+//! a name the scan cannot see, so neither reads an outer constant either. A key
+//! argument that reduces to no literal is counted for the same reason: it names
+//! a parameter, a field, the result of a call or a constant of another file.
 use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
@@ -276,52 +278,135 @@ fn constant_value(ty: &syn::Type, value: &Expr) -> Option<String> {
     }
 }
 
-/// The names `pattern` binds.
-fn bindings(pattern: &Pat, names: &mut BTreeSet<String>) {
-    match pattern {
-        Pat::Ident(ident) => {
-            names.insert(ident.ident.to_string());
+/// The names one scope declares, with the text of each constant, and whether a
+/// lookup may read a name outside it.
+#[derive(Default)]
+struct Scope {
+    names: BTreeMap<String, Option<String>>,
+    /// A glob import, an inline module or a macro may bring in a name the scan
+    /// cannot see, so no lookup leaves the scope.
+    barrier: bool,
+}
+
+impl Scope {
+    /// Declares `pattern`'s names as ones no scan can read. A pattern macro
+    /// may bind a name the scan cannot see, including one declared here.
+    fn bind(&mut self, pattern: &Pat) {
+        let (names, macro_pattern) = bindings(pattern);
+        if macro_pattern {
+            self.names.clear();
+            self.barrier = true;
+            return;
         }
-        Pat::Or(or) => or.cases.iter().for_each(|case| bindings(case, names)),
-        Pat::Paren(paren) => bindings(&paren.pat, names),
-        Pat::Reference(reference) => bindings(&reference.pat, names),
-        Pat::Slice(slice) => slice.elems.iter().for_each(|elem| bindings(elem, names)),
-        Pat::Struct(structure) => structure
-            .fields
-            .iter()
-            .for_each(|field| bindings(&field.pat, names)),
-        Pat::Tuple(tuple) => tuple.elems.iter().for_each(|elem| bindings(elem, names)),
-        Pat::TupleStruct(tuple) => tuple.elems.iter().for_each(|elem| bindings(elem, names)),
-        Pat::Type(typed) => bindings(&typed.pat, names),
-        _ => {}
+        for name in names {
+            self.names.insert(name, None);
+        }
     }
 }
 
-/// The constants `items` declare, for the scope they open: an item is in scope
+/// The tokens of every macro `pattern` holds.
+#[derive(Default)]
+struct PatternMacros(Vec<TokenStream>);
+
+impl<'ast> Visit<'ast> for PatternMacros {
+    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
+        self.0.push(node.mac.tokens.clone());
+    }
+}
+
+/// The names `pattern` binds, and whether it holds a pattern macro that may
+/// bind more.
+fn bindings(pattern: &Pat) -> (BTreeSet<String>, bool) {
+    struct Bindings {
+        names: BTreeSet<String>,
+        macro_pattern: bool,
+    }
+    impl<'ast> Visit<'ast> for Bindings {
+        fn visit_pat_ident(&mut self, node: &'ast syn::PatIdent) {
+            self.names.insert(node.ident.to_string());
+            visit::visit_pat_ident(self, node);
+        }
+        fn visit_expr_macro(&mut self, _node: &'ast syn::ExprMacro) {
+            self.macro_pattern = true;
+        }
+    }
+    let mut bindings = Bindings {
+        names: BTreeSet::new(),
+        macro_pattern: false,
+    };
+    bindings.visit_pat(pattern);
+    (bindings.names, bindings.macro_pattern)
+}
+
+/// The names `items` declare, for the scope they open: an item is in scope
 /// whole, so a call before the declaration reads it too.
-fn constants<'a>(items: impl IntoIterator<Item = &'a Item>) -> BTreeMap<String, Option<String>> {
-    let mut constants = BTreeMap::new();
+fn scope<'a>(items: impl IntoIterator<Item = &'a Item>) -> Scope {
+    let mut scope = Scope::default();
     for item in items {
         if test_item(item) {
             continue;
         }
-        if let Item::Const(item) = item {
-            constants.insert(item.ident.to_string(), constant_value(&item.ty, &item.expr));
+        match item {
+            Item::Const(item) => {
+                scope
+                    .names
+                    .insert(item.ident.to_string(), constant_value(&item.ty, &item.expr));
+            }
+            Item::Static(item) => {
+                scope.names.insert(item.ident.to_string(), None);
+            }
+            Item::Use(item) => use_tree(&item.tree, None, &mut scope),
+            Item::ForeignMod(item) => {
+                for item in &item.items {
+                    if let syn::ForeignItem::Static(item) = item {
+                        scope.names.insert(item.ident.to_string(), None);
+                    }
+                }
+            }
+            Item::Macro(item) if !item.mac.path.is_ident("macro_rules") => scope.barrier = true,
+            _ => {}
         }
     }
-    constants
+    scope
+}
+
+/// Declares the names `tree` binds: a `use` import hides an outer constant of
+/// the same name, and a glob import hides every outer name.
+fn use_tree(tree: &syn::UseTree, parent: Option<&syn::Ident>, scope: &mut Scope) {
+    match tree {
+        syn::UseTree::Path(path) => use_tree(&path.tree, Some(&path.ident), scope),
+        syn::UseTree::Name(name) => {
+            let bound = if name.ident == "self" {
+                parent
+            } else {
+                Some(&name.ident)
+            };
+            if let Some(name) = bound {
+                scope.names.insert(name.to_string(), None);
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            scope.names.insert(rename.rename.to_string(), None);
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                use_tree(tree, parent, scope);
+            }
+        }
+        syn::UseTree::Glob(_) => scope.barrier = true,
+    }
 }
 
 /// The scope a signature opens: its parameters hide a constant of the same
 /// name.
-fn parameters(signature: &syn::Signature) -> BTreeMap<String, Option<String>> {
-    let mut names = BTreeSet::new();
+fn parameters(signature: &syn::Signature) -> Scope {
+    let mut scope = Scope::default();
     for input in &signature.inputs {
         if let syn::FnArg::Typed(typed) = input {
-            bindings(&typed.pat, &mut names);
+            scope.bind(&typed.pat);
         }
     }
-    names.into_iter().map(|name| (name, None)).collect()
+    scope
 }
 
 /// Whether `tokens` holds a call to a translation function that is named
@@ -349,10 +434,9 @@ fn mentions_translation_call(tokens: &TokenStream) -> bool {
 
 struct Calls {
     site: String,
-    /// The names each enclosing scope declares, innermost last: the text of a
-    /// constant, or `None` for a parameter, a local or a constant the scan
-    /// cannot read.
-    scopes: Vec<BTreeMap<String, Option<String>>>,
+    /// The scopes the call sits in, innermost last, each with the names it
+    /// declares and whether a lookup stops there.
+    scopes: Vec<Scope>,
     /// The arguments already counted, so one reached twice counts once.
     counted: BTreeSet<(usize, usize)>,
     found: CallKeys,
@@ -372,14 +456,25 @@ impl Calls {
                 None => self.unreadable(expr.span()),
             },
             Expr::If(node) => {
+                self.scopes.push(Scope::default());
+                self.visit_expr(&node.cond);
                 self.block(&node.then_branch);
+                self.scopes.pop();
                 if let Some((_, otherwise)) = &node.else_branch {
                     self.literals(otherwise);
                 }
             }
             Expr::Match(node) => {
                 for arm in &node.arms {
+                    self.scopes.push(Scope::default());
+                    self.bind(&arm.pat);
+                    if let Some((_, guard)) = &arm.guard {
+                        self.scopes.push(Scope::default());
+                        self.visit_expr(guard);
+                        self.scopes.pop();
+                    }
                     self.literals(&arm.body);
+                    self.scopes.pop();
                 }
             }
             Expr::Block(node) => self.block(&node.block),
@@ -433,8 +528,11 @@ impl Calls {
     fn constant(&self, path: &syn::Path) -> Option<String> {
         let name = path.get_ident()?.to_string();
         for scope in self.scopes.iter().rev() {
-            if let Some(value) = scope.get(&name) {
+            if let Some(value) = scope.names.get(&name) {
                 return value.clone();
+            }
+            if scope.barrier {
+                return None;
             }
         }
         None
@@ -451,19 +549,30 @@ impl Calls {
             .push(format!("{}:{}", self.site, start.line));
     }
 
-    /// Declares the names `pattern` introduces in the innermost scope.
+    /// Declares the names `pattern` introduces in the innermost scope, and
+    /// reads a translation call a pattern macro holds.
     fn bind(&mut self, pattern: &Pat) {
-        let mut names = BTreeSet::new();
-        bindings(pattern, &mut names);
+        let mut macros = PatternMacros::default();
+        macros.visit_pat(pattern);
+        for tokens in macros.0 {
+            self.macro_tokens(&tokens);
+        }
         if let Some(scope) = self.scopes.last_mut() {
-            for name in names {
-                scope.insert(name, None);
-            }
+            scope.bind(pattern);
+        }
+    }
+
+    /// Marks the innermost scope as one that may hold a name no scan can see,
+    /// including one it declares itself.
+    fn pollute(&mut self) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.names.clear();
+            scope.barrier = true;
         }
     }
 
     /// Runs `visit` inside a scope whose declared names hide an outer one's.
-    fn scoped(&mut self, scope: BTreeMap<String, Option<String>>, visit: impl FnOnce(&mut Self)) {
+    fn scoped(&mut self, scope: Scope, visit: impl FnOnce(&mut Self)) {
         self.scopes.push(scope);
         visit(self);
         self.scopes.pop();
@@ -487,9 +596,7 @@ impl Calls {
 
 impl<'ast> Visit<'ast> for Calls {
     fn visit_file(&mut self, node: &'ast syn::File) {
-        self.scoped(constants(&node.items), |calls| {
-            visit::visit_file(calls, node)
-        });
+        self.scoped(scope(&node.items), |calls| visit::visit_file(calls, node));
     }
 
     fn visit_item(&mut self, node: &'ast Item) {
@@ -498,11 +605,15 @@ impl<'ast> Visit<'ast> for Calls {
         }
         match node {
             Item::Mod(item) if item.content.is_some() => {
-                let scope = constants(item.content.iter().flat_map(|(_, items)| items.iter()));
+                let mut scope = scope(item.content.iter().flat_map(|(_, items)| items.iter()));
+                scope.barrier = true;
                 self.scoped(scope, |calls| visit::visit_item(calls, node));
             }
-            Item::Macro(item) if !item.mac.path.is_ident("macro_rules") => {
+            Item::Macro(item) => {
                 self.macro_tokens(&item.mac.tokens);
+                if !item.mac.path.is_ident("macro_rules") {
+                    self.pollute();
+                }
                 visit::visit_item(self, node);
             }
             _ => visit::visit_item(self, node),
@@ -534,7 +645,7 @@ impl<'ast> Visit<'ast> for Calls {
     }
 
     fn visit_block(&mut self, node: &'ast Block) {
-        let scope = constants(node.stmts.iter().filter_map(|statement| match statement {
+        let scope = scope(node.stmts.iter().filter_map(|statement| match statement {
             Stmt::Item(item) => Some(item),
             _ => None,
         }));
@@ -549,7 +660,7 @@ impl<'ast> Visit<'ast> for Calls {
     }
 
     fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
-        self.scopes.push(BTreeMap::new());
+        self.scopes.push(Scope::default());
         for input in &node.inputs {
             self.bind(input);
         }
@@ -558,16 +669,44 @@ impl<'ast> Visit<'ast> for Calls {
     }
 
     fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.scopes.push(BTreeMap::new());
+        self.scopes.push(Scope::default());
+        self.visit_expr(&node.expr);
         self.bind(&node.pat);
-        visit::visit_expr_for_loop(self, node);
+        self.visit_block(&node.body);
         self.scopes.pop();
     }
 
-    fn visit_arm(&mut self, node: &'ast syn::Arm) {
-        self.scopes.push(BTreeMap::new());
+    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
+        self.scopes.push(Scope::default());
+        self.visit_expr(&node.cond);
+        self.visit_block(&node.then_branch);
+        self.scopes.pop();
+        if let Some((_, otherwise)) = &node.else_branch {
+            self.visit_expr(otherwise);
+        }
+    }
+
+    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
+        self.scopes.push(Scope::default());
+        self.visit_expr(&node.cond);
+        self.visit_block(&node.body);
+        self.scopes.pop();
+    }
+
+    fn visit_expr_let(&mut self, node: &'ast syn::ExprLet) {
+        self.visit_expr(&node.expr);
         self.bind(&node.pat);
-        visit::visit_arm(self, node);
+    }
+
+    fn visit_arm(&mut self, node: &'ast syn::Arm) {
+        self.scopes.push(Scope::default());
+        self.bind(&node.pat);
+        if let Some((_, guard)) = &node.guard {
+            self.scopes.push(Scope::default());
+            self.visit_expr(guard);
+            self.scopes.pop();
+        }
+        self.visit_expr(&node.body);
         self.scopes.pop();
     }
 
@@ -598,6 +737,7 @@ impl<'ast> Visit<'ast> for Calls {
 
     fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
         self.macro_tokens(&node.mac.tokens);
+        self.pollute();
         visit::visit_stmt_macro(self, node);
     }
 }
@@ -950,6 +1090,18 @@ mod tests {
             "a module does not see an outer constant"
         );
         assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+
+        let imported = call_keys(
+            "const HINT: &str = \"Outer key\";\n\nmod inner {\n    use crate::other::HINT;\n\n    fn draw() {\n        let a = t(HINT);\n    }\n}\n",
+            "src.rs",
+        )
+        .unwrap();
+        assert_eq!(
+            imported.keys,
+            Vec::new(),
+            "the import is not the outer constant"
+        );
+        assert_eq!(imported.unreadable, vec!["src.rs:7".to_owned()]);
     }
 
     /// A `use` that imports a name hides a constant of that name in the scope
@@ -1032,9 +1184,15 @@ mod tests {
     /// A `while let` binding hides a constant in the body only.
     #[test]
     fn a_while_let_binding_hides_a_constant() {
-        let text = "const HINT: &str = \"Kept\";\n\nfn draw(mut it: It) {\n    while let Some(HINT) = it.next() {\n        t(HINT);\n    }\n    t(HINT);\n}\n";
+        let text = "const HINT: &str = \"Kept\";\n\nfn draw(mut it: It) {\n    while let Some(HINT) = next(t(HINT)) {\n        t(HINT);\n    }\n    t(HINT);\n}\n";
         let keys = call_keys(text, "src.rs").unwrap();
-        assert_eq!(keys.keys, vec![("Kept".to_owned(), "src.rs:7".to_owned())]);
+        assert_eq!(
+            keys.keys,
+            vec![
+                ("Kept".to_owned(), "src.rs:4".to_owned()),
+                ("Kept".to_owned(), "src.rs:7".to_owned()),
+            ]
+        );
         assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
     }
 
@@ -1057,13 +1215,13 @@ mod tests {
         assert_eq!(
             keys.keys,
             vec![
-                ("Kept".to_owned(), "src.rs:9".to_owned()),
-                ("Kept".to_owned(), "src.rs:11".to_owned()),
+                ("Kept".to_owned(), "src.rs:8".to_owned()),
+                ("Kept".to_owned(), "src.rs:10".to_owned()),
             ]
         );
         assert_eq!(
             keys.unreadable,
-            vec!["src.rs:5".to_owned(), "src.rs:10".to_owned()]
+            vec!["src.rs:5".to_owned(), "src.rs:9".to_owned()]
         );
     }
 
@@ -1088,6 +1246,16 @@ mod tests {
         let keys = call_keys(text, "src.rs").unwrap();
         assert_eq!(keys.keys, Vec::new(), "a pattern macro may bind the name");
         assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+
+        let tokens = call_keys(
+            "fn draw(value: Value) {\n    let bound!(t(\"Pattern key\")) = value;\n}\n",
+            "src.rs",
+        )
+        .unwrap();
+        assert_eq!(
+            tokens.keys,
+            vec![("Pattern key".to_owned(), "src.rs:2".to_owned())]
+        );
     }
 
     /// A macro in statement position may declare a name the scan cannot see,
@@ -1098,6 +1266,18 @@ mod tests {
         let keys = call_keys(text, "src.rs").unwrap();
         assert_eq!(keys.keys, Vec::new(), "a statement macro may bind the name");
         assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+
+        let local = call_keys(
+            "fn draw() {\n    const HINT: &str = \"Block key\";\n    bind_hint!();\n    let a = t(HINT);\n}\n",
+            "src.rs",
+        )
+        .unwrap();
+        assert_eq!(
+            local.keys,
+            Vec::new(),
+            "the macro may bind the block's name"
+        );
+        assert_eq!(local.unreadable, vec!["src.rs:4".to_owned()]);
     }
 
     /// A translation call inside a `macro_rules!` definition is one argument
@@ -1107,6 +1287,6 @@ mod tests {
         let text = "fn draw() {\n    macro_rules! warn_row {\n        () => {\n            t(\"Macro rules key\")\n        };\n    }\n}\n";
         let keys = call_keys(text, "src.rs").unwrap();
         assert_eq!(keys.keys, Vec::new(), "no key is read from a definition");
-        assert_eq!(keys.unreadable, vec!["src.rs:2".to_owned()]);
+        assert_eq!(keys.unreadable, vec!["src.rs:3".to_owned()]);
     }
 }
