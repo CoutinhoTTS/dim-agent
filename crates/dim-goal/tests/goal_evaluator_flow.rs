@@ -125,6 +125,16 @@ async fn wait_evaluated(env: &Env, branch: &str, evaluation: u64) -> Block {
     .expect("an evaluated continuation")
 }
 
+/// Waits until `main` records the end of `evaluator`.
+async fn wait_ended(env: &Env, evaluator: &str) {
+    support::wait_event(
+        &env.session,
+        "main",
+        |kind| matches!(kind, EventKind::BranchEnded(data) if data.branch == evaluator),
+    )
+    .await;
+}
+
 /// The pending inputs of `branch`, as string slices for a turn.
 async fn pending_refs(env: &Env, branch: &str) -> Vec<String> {
     env.pending_inputs(branch).await
@@ -1524,40 +1534,13 @@ async fn pursuit_2_a_committed_pause_ends_the_live_evaluator_once() {
         .await
         .expect("the pause reaches the fold in time");
     assert_eq!(held, pause.sequence, "the held input is the pause record");
-    let ended = tokio::time::timeout(NEGATIVE, async {
-        loop {
-            if env
-                .ended("main")
-                .await
-                .iter()
-                .any(|ended| ended.branch == evaluator)
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
+    let ended = tokio::time::timeout(NEGATIVE, wait_ended(&env, &evaluator)).await;
     assert!(
         ended.is_err(),
         "the writer ends the evaluator only after the fold consumed its pause"
     );
     fold_gate.release();
-    tokio::time::timeout(support::WAIT, async {
-        loop {
-            if env
-                .ended("main")
-                .await
-                .iter()
-                .any(|ended| ended.branch == evaluator)
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the committed pause ends the evaluator");
+    wait_ended(&env, &evaluator).await;
     let ended = env.ended("main").await;
     assert_eq!(
         ended
@@ -1616,47 +1599,62 @@ async fn pursuit_2_a_pause_at_creation_leaves_no_live_evaluator() {
     env.wait_for("main", r#"reason="interrupted""#).await;
     // The pause's commit ends the evaluator it replaces; the writer reaches it
     // only after the decisions it stops were stopped and awaited.
-    tokio::time::timeout(support::WAIT, async {
-        loop {
-            if env
-                .ended("main")
-                .await
-                .iter()
-                .any(|ended| ended.branch == evaluator)
-            {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("the pause ends the evaluator it replaced");
+    wait_ended(&env, &evaluator).await;
     create_gate.release();
     let expected = BranchSource::Host {
         operation_id: format!("goal:evaluate:{}", end.sequence),
     };
-    let created = tokio::time::timeout(NEGATIVE, async {
-        loop {
-            if let Some(create) = env
-                .creates("main")
-                .await
-                .into_iter()
-                .find(|create| create.source == expected)
-            {
-                return create;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
+    let created = tokio::time::timeout(
+        NEGATIVE,
+        support::wait_event(
+            &env.session,
+            "main",
+            |kind| matches!(kind, EventKind::BranchCreate(data) if data.source == expected),
+        ),
+    )
     .await;
-    if let Ok(create) = created {
-        assert!(
-            env.ended("main")
-                .await
-                .iter()
-                .any(|ended| ended.branch == create.branch),
-            "a pause written while the evaluation is claimed leaves no live evaluator"
-        );
-    }
+    assert!(
+        created.is_err(),
+        "a pause written while the evaluation is claimed leaves no live evaluator"
+    );
+    env.close().await;
+}
+
+/// A pause committed before an evaluation's `branch/create` folds still ends
+/// that evaluator: the settle treats the evaluation as due once the goal it
+/// belongs to is not running (Pursuit §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_2_a_settle_ends_an_evaluator_created_behind_the_pause() {
+    let env = Env::start().await;
+    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
+        .await
+        .expect("set writes");
+    env.wait_for("main", r#"op="set""#).await;
+    env.interrupt("main");
+    let pause = env.wait_for("main", r#"reason="interrupted""#).await;
+    let evaluation = pause.sequence;
+    let mut end_gate = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::End,
+        evaluation,
+        None,
+    );
+    let evaluator = env
+        .open_branch(
+            "main",
+            "evaluate",
+            BranchSource::Host {
+                operation_id: format!("goal:evaluate:{evaluation}"),
+            },
+        )
+        .await;
+    let held = tokio::time::timeout(support::WAIT, end_gate.arrived()).await;
+    assert!(
+        held.is_ok(),
+        "a pause behind the evaluation's creation still ends that evaluator"
+    );
+    end_gate.release();
+    wait_ended(&env, &evaluator).await;
     env.close().await;
 }
