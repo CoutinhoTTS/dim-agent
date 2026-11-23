@@ -2366,17 +2366,20 @@ async fn stored_two_line_session(database: &Database) -> (String, String) {
     (id, child)
 }
 
-/// The host that restores a stored Session, its opening bounded by `bound`.
+/// The host that restores a stored Session, its opening bounded by `bound`, or
+/// by the Session's default bound when `None`.
 async fn restoring_host(
     database: &Database,
-    bound: Duration,
+    bound: Option<Duration>,
 ) -> (MinimalHost, Arc<SqliteTimelineStore>, Arc<SqliteStorage>) {
     let db = SqliteStorage::open(database.0.clone()).unwrap();
     let store = SqliteTimelineStore::new(db.clone());
     let mut builder = AgentBuilder::new(AgentConfig::default());
     dim_agent_capabilities::defaults::mock_hosts(&mut builder);
     dim_agent_capabilities::defaults::install(&mut builder);
-    builder.startup_timeout(bound);
+    if let Some(bound) = bound {
+        builder.startup_timeout(bound);
+    }
     builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store.clone()));
     let agent = MinimalHost::start(&builder).await.unwrap();
     (agent, store, db)
@@ -2391,7 +2394,7 @@ async fn a_silent_restore_times_out_naming_the_restore_phase() {
     let database = Database::new();
     let (id, _) = stored_two_line_session(&database).await;
     let _slow = slow_restore_steps(&id, Duration::from_millis(1500));
-    let (agent, store, db) = restoring_host(&database, Duration::from_secs(1)).await;
+    let (agent, store, db) = restoring_host(&database, Some(Duration::from_secs(1))).await;
     let error = match settled("the silent restore times out", agent.restore_session(id)).await {
         Ok(_) => panic!("a restore silent past the bound must fail the opening"),
         Err(error) => error,
@@ -2417,7 +2420,7 @@ async fn a_slow_restore_reports_progress_and_keeps_the_opening_alive() {
     let (id, child) = stored_two_line_session(&database).await;
     let bound = Duration::from_secs(1);
     let _slow = slow_restore_steps(&id, Duration::from_millis(250));
-    let (agent, store, db) = restoring_host(&database, bound).await;
+    let (agent, store, db) = restoring_host(&database, Some(bound)).await;
     let started = Instant::now();
     let session = settled("the slow restore completes", agent.restore_session(id))
         .await
@@ -2448,7 +2451,7 @@ async fn a_restore_resolves_its_reporting_identity_once() {
     let database = Database::new();
     let (id, _) = stored_two_line_session(&database).await;
     let resolutions = count_identity_resolutions(&id);
-    let (agent, store, db) = restoring_host(&database, Duration::from_secs(1)).await;
+    let (agent, store, db) = restoring_host(&database, None).await;
     settled("the restore completes", agent.restore_session(id))
         .await
         .expect("a restore within its opening bound completes");
@@ -2471,7 +2474,7 @@ async fn each_tree_generation_resolves_its_own_reporting_identity() {
     let database = Database::new();
     let (id, _) = stored_two_line_session(&database).await;
     let resolutions = count_identity_resolutions(&id);
-    let (agent, store, db) = restoring_host(&database, Duration::from_secs(1)).await;
+    let (agent, store, db) = restoring_host(&database, None).await;
     let session = settled(
         "the first restore completes",
         agent.restore_session(id.clone()),
