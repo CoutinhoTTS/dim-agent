@@ -368,6 +368,14 @@ pub struct DisplayPage {
     done: bool,
 }
 
+impl DisplayPage {
+    /// Whether the page reached the branch's start. A transcript leaves the
+    /// branch's own first events out, so `next_before` alone cannot say.
+    pub fn done(&self) -> bool {
+        self.done
+    }
+}
+
 impl From<DisplayPage> for HistoryWindow {
     fn from(page: DisplayPage) -> Self {
         Self {

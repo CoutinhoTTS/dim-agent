@@ -539,6 +539,7 @@ impl Worker {
                         let history = self.task_history.get_mut(&request.branch_id).unwrap();
                         history.window.through = Some(turn.through);
                         history.window_complete = true;
+                        self.projection.missing_history(&request.branch_id);
                     }
                     ReadStage::Inventory(method) => {
                         let through = self.task_history[&request.branch_id]
@@ -576,20 +577,25 @@ impl Worker {
             .and_then(|error| error.data.as_ref())
             .and_then(|data| data["appError"].as_str())
             .map(str::to_owned);
+        let display = self
+            .client
+            .supports(&["session.history.display", "session.history.detail"]);
+        let transcript = self.client.offers("session.history.display.transcript");
         let history = self
             .task_history
             .get_mut(&request.branch_id)
             .expect("current history");
+        let mut at_start = false;
         let result = result.map_err(|error| error.to_string()).and_then(|value| {
-            let page = if self
-                .client
-                .supports(&["session.history.display", "session.history.detail"])
-            {
-                serde_json::from_value::<dim_client::wire::DisplayPage>(value).map(Into::into)
+            let page = if display {
+                let page: dim_client::wire::DisplayPage = serde_json::from_value(value)
+                    .map_err(|error| format!("Invalid history reply: {error}"))?;
+                at_start = transcript && page.done();
+                page.into()
             } else {
                 serde_json::from_value(value)
-            }
-            .map_err(|error| format!("Invalid history reply: {error}"))?;
+                    .map_err(|error| format!("Invalid history reply: {error}"))?
+            };
             history.window.push(page).map_err(|error| error.to_string())
         });
         let window_ready = matches!(result, Ok(true));
@@ -612,12 +618,14 @@ impl Worker {
             Ok(false) => self.task_history_queue.push_back(request.branch_id.clone()),
             Ok(true) => {
                 let events = history.window.take();
-                let missing_prefix = history.window.before.is_some();
+                let missing_prefix =
+                    history.window.dropped_pages() || history.window.before.is_some() && !at_start;
                 history.window_complete = true;
                 if history.earlier == EarlierRead::Reading {
                     history.earlier = EarlierRead::None;
                     let mut older = Projection::for_branch(&request.branch_id);
                     for event in events {
+                        self.projection.line_event(&request.branch_id, &event);
                         older.replay(&request.branch_id, &event);
                     }
                     if let Some(projection) =
@@ -632,9 +640,12 @@ impl Worker {
                     self.task_history_queue.push_back(request.branch_id.clone());
                 }
                 if missing_prefix {
+                    self.projection.missing_history(&request.branch_id);
                     self.send(Update::Notice(
                         "Earlier content not loaded; /earlier to read it".into(),
                     ));
+                } else {
+                    self.projection.whole_history(&request.branch_id);
                 }
             }
         }
@@ -890,6 +901,52 @@ mod tests {
     /// The same event, decoded as the live stream decodes it.
     fn event(sequence: u64, request: &str, delta: &str) -> Event {
         serde_json::from_value(text(sequence, request, delta)).expect("a text event")
+    }
+
+    /// One user message, as the daemon sends it on the wire and in a page.
+    fn said(sequence: u64, message: &str) -> serde_json::Value {
+        json!({
+            "id": format!("in-{sequence}"), "sequence": sequence, "create_at": 2000,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [{"type": "text", "text": message}]}}
+        })
+    }
+
+    /// The withdrawal of `input`, as the daemon sends it on the wire and in a page.
+    fn input_deleted(sequence: u64, input: &str) -> serde_json::Value {
+        json!({
+            "id": format!("deleted-{sequence}"), "sequence": sequence, "create_at": 2000,
+            "type": "input", "name": "deleted", "data": {"input_id": input}
+        })
+    }
+
+    /// The creation of `branch` in `parent`'s history, cut after `at`.
+    fn line_created(sequence: u64, branch: &str, at: u64) -> serde_json::Value {
+        json!({
+            "id": format!("create-{branch}"), "sequence": sequence, "create_at": 2000,
+            "type": "branch", "name": "create",
+            "data": {
+                "branch": branch, "at": {"kind": "sequence", "sequence": at},
+                "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                "prompt": branch,
+            }
+        })
+    }
+
+    /// The same `input` or `branch` event, decoded as the live stream decodes it.
+    fn tell(event: serde_json::Value) -> Event {
+        serde_json::from_value(event).expect("a Session event")
+    }
+
+    /// The line `id` of the Session's line list.
+    fn listed(worker: &Worker, id: &str) -> crate::model::view::LineView {
+        worker
+            .projection
+            .line_views()
+            .iter()
+            .find(|line| line.id == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("line {id} is listed"))
     }
 
     /// Answers the outstanding history read with the daemon's failure.
@@ -1173,6 +1230,520 @@ mod tests {
         assert!(
             worker.task_history_queue.is_empty(),
             "a press during the retried read queues nothing"
+        );
+    }
+
+    /// A line's own window can start after its start. The lines it opened show
+    /// no count then, and the earlier page that reaches the start fills it in.
+    #[tokio::test]
+    async fn an_earlier_page_of_a_line_counts_the_lines_it_opened() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+        assert_eq!(
+            listed(&worker, "b-7c").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 2,
+                messages: 1,
+            }),
+            "the line b-7c is cut after main's first message"
+        );
+
+        worker.task_history_queue.clear();
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(10, "carry on"), line_created(12, "b-90", 10)],
+                "through": 12, "nextBefore": 10, "nextAfter": 12,
+            }),
+        )
+        .await;
+        worker.task_history_queue.clear();
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the line's window starts after its start, so the cut counts nothing"
+        );
+
+        worker.earlier("b-7c");
+        assert_eq!(worker.earlier_view(), Earlier::Reading);
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(5, "the first ask")],
+                "through": 12, "nextBefore": 1, "nextAfter": 5,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "the earlier page reaches the line's start and the cut counts every message"
+        );
+    }
+
+    /// The directory's row for `branch`, a line of `parent` cut at `at`.
+    fn listed_line(branch: &str, parent: &str, at: u64) -> dim_client::wire::BranchEntry {
+        dim_client::wire::BranchEntry {
+            purpose: Some(branch.into()),
+            cut_messages: None,
+            end: None,
+            branch_id: branch.into(),
+            parent_branch_id: Some(parent.into()),
+            branch_point: Some(at),
+            state: "open".into(),
+            head: 0,
+        }
+    }
+
+    /// A Session whose main history is whole and cut `b-7c` after its first
+    /// message, and a `session.turn.get` read that moved the Session cursor to
+    /// the head of `b-7c` without replaying an event of its history. `b-90` was
+    /// created before this attachment read `b-7c`, so only the directory lists it.
+    async fn a_line_discovered_through_its_cut(worker: &mut Worker) {
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+        worker.projection.directory(&listed_line("b-7c", "main", 2));
+        worker
+            .projection
+            .directory(&listed_line("b-90", "b-7c", 10));
+
+        worker.task_history_queue.clear();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        answer(
+            worker,
+            json!({"branchId":"b-7c","through":12,"turn":null,"output":null}),
+        )
+        .await;
+        worker.task_history_queue.clear();
+        worker.finish_window("b-7c");
+        assert_eq!(
+            worker.cursors.get("b-7c"),
+            Some(&12),
+            "the finished cut read left the Session cursor at the line's head"
+        );
+    }
+
+    /// Opens `branch` and answers the first page its history read asks for.
+    async fn open_line(worker: &mut Worker, branch: &str, page: serde_json::Value) {
+        worker.task_history_queue.clear();
+        worker
+            .command(crate::model::session::Command::FocusLine(branch.into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        answer(worker, page).await;
+        worker.task_history_queue.clear();
+    }
+
+    /// A cut read moves the Session cursor to a line's head without replaying
+    /// its events. Opening the line replays its history below that cursor, and
+    /// the line list must still count it: the child the line created before this
+    /// attachment, and the child it opens afterwards, show the count of the
+    /// whole prefix, and the same page again counts nothing twice.
+    #[tokio::test]
+    async fn opening_a_line_counts_the_history_the_cursor_passed() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut worker).await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the cut read leaves the line's child without a count"
+        );
+
+        open_line(
+            &mut worker,
+            "b-7c",
+            json!({
+                "events": [
+                    said(5, "the first ask"),
+                    said(10, "carry on"),
+                    line_created(12, "b-90", 10),
+                ],
+                "through": 12, "nextBefore": 1, "nextAfter": 12,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "opening the line counts the child it created before the window"
+        );
+
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        worker.apply("b-7c", tell(said(13, "next ask")));
+        worker.apply("b-7c", tell(line_created(15, "b-91", 14)));
+        assert_eq!(
+            listed(&worker, "b-91").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 14,
+                messages: 4,
+            }),
+            "the line counts every message it holds when it opens a child"
+        );
+
+        for event in [
+            said(5, "the first ask"),
+            said(10, "carry on"),
+            line_created(12, "b-90", 10),
+        ] {
+            worker.replay("b-7c", tell(event));
+        }
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "the same page again counts nothing twice"
+        );
+    }
+
+    /// A line opened before its history reaches its start shows no count for the
+    /// lines it opened, not a smaller one; the earlier page that reaches the
+    /// start completes the count.
+    #[tokio::test]
+    async fn a_line_opened_before_its_start_counts_after_the_earlier_page() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut worker).await;
+        open_line(
+            &mut worker,
+            "b-7c",
+            json!({
+                "events": [said(10, "carry on"), line_created(12, "b-90", 10)],
+                "through": 12, "nextBefore": 10, "nextAfter": 12,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the window starts after the line's own start, so its cut counts nothing"
+        );
+
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        worker.earlier("b-7c");
+        assert_eq!(worker.earlier_view(), Earlier::Reading);
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(4, "the first ask")],
+                "through": 12, "nextBefore": 1, "nextAfter": 4,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "the earlier page reaches the start and counts what the cut inherits"
+        );
+    }
+
+    /// The line list counts the same whichever of a line's open page and an
+    /// earlier page arrives first, and counts nothing twice.
+    #[tokio::test]
+    async fn a_line_counts_the_same_whichever_page_arrives_first() {
+        let page = || {
+            json!({
+                "events": [
+                    said(4, "the first ask"),
+                    said(10, "carry on"),
+                    line_created(12, "b-90", 10),
+                ],
+                "through": 12, "nextBefore": 1, "nextAfter": 12,
+            })
+        };
+
+        let (mut earlier_first, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut earlier_first).await;
+        earlier_first
+            .projection
+            .line_event("b-7c", &tell(said(4, "the first ask")));
+        open_line(&mut earlier_first, "b-7c", page()).await;
+        assert_eq!(
+            listed(&earlier_first, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "a page read earlier counts once when the open page repeats it"
+        );
+
+        let (mut open_first, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut open_first).await;
+        open_line(&mut open_first, "b-7c", page()).await;
+        open_first
+            .projection
+            .line_event("b-7c", &tell(said(4, "the first ask")));
+        assert_eq!(
+            listed(&open_first, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "an earlier page that repeats the open page counts nothing twice"
+        );
+    }
+
+    /// The open page carries the withdrawal and a cut after it while the
+    /// withdrawn input sits on an earlier page: the cut after the withdrawal
+    /// leaves the input out, and a cut before it keeps counting the input.
+    #[tokio::test]
+    async fn a_withdrawal_below_the_cursor_keeps_each_cut_at_its_own_sequence() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut worker).await;
+        worker.projection.directory(&listed_line("b-91", "b-7c", 7));
+        assert_eq!(listed(&worker, "b-90").cut, None);
+        assert_eq!(listed(&worker, "b-91").cut, None);
+
+        open_line(
+            &mut worker,
+            "b-7c",
+            json!({
+                "events": [
+                    input_deleted(9, "in-5"),
+                    text(10, "r1", "carry on"),
+                    line_created(12, "b-90", 10),
+                ],
+                "through": 12, "nextBefore": 9, "nextAfter": 12,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the window starts after the line's own start, so its cut counts nothing"
+        );
+
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        worker.earlier("b-7c");
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(5, "withdrawn ask"), line_created(8, "b-91", 7)],
+                "through": 12, "nextBefore": 1, "nextAfter": 8,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-91").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 7,
+                messages: 2,
+            }),
+            "a withdrawal after the cut leaves its message in the count"
+        );
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 1,
+            }),
+            "a withdrawal before the cut leaves its message out of the count"
+        );
+    }
+
+    /// A line read only through `session.turn.get` never loaded its history:
+    /// the cuts that count it show nothing, even when live events already
+    /// counted them.
+    #[tokio::test]
+    async fn a_line_read_only_through_its_cut_counts_nothing() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+
+        worker.task_history_queue.clear();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        worker.apply("b-7c", tell(said(10, "carry on")));
+        worker.apply("b-7c", tell(line_created(12, "b-90", 10)));
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 2,
+            }),
+            "the live events counted the cut before the read settled"
+        );
+
+        answer(
+            &mut worker,
+            json!({"branchId":"b-7c","through":12,"turn":null,"output":null}),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the line was never read from its start, so its cut counts nothing"
+        );
+    }
+
+    /// The methods a test worker offers when its history reads use display
+    /// transcript pages, whose `done` flag says the page reached the start.
+    const TRANSCRIPT_FEATURES: [&str; 7] = [
+        "session.create",
+        "session.history",
+        "session.history.latestTurn",
+        "session.input.pending.blockPresence",
+        "session.history.display",
+        "session.history.detail",
+        "session.history.display.transcript",
+    ];
+
+    /// A display transcript page carrying `items` and the cursor below them.
+    fn transcript_page(
+        items: Vec<serde_json::Value>,
+        next_before: u64,
+        done: bool,
+    ) -> serde_json::Value {
+        json!({
+            "items": items, "through": 1000, "nextBefore": next_before,
+            "nextAfter": 1000, "done": done,
+        })
+    }
+
+    /// `count` display-only text events from `first`; each request id is its
+    /// own transcript row.
+    fn draft_page(first: u64, count: u64) -> Vec<serde_json::Value> {
+        (first..first + count)
+            .map(|sequence| text(sequence, &format!("r{sequence}"), "draft "))
+            .collect()
+    }
+
+    /// `count` user messages from `first`, each its own transcript row and each
+    /// one a message a cut counts.
+    fn asked_page(first: u64, count: u64) -> Vec<serde_json::Value> {
+        (first..first + count)
+            .map(|sequence| said(sequence, &format!("ask {sequence}")))
+            .collect()
+    }
+
+    /// Opens `b-7c` in a transcript window that starts after its own start,
+    /// then answers an `/earlier` read whose pages carry 10, 20, 30 and 250
+    /// rows. The retention budget keeps the newest 300 rows, so the oldest
+    /// page is dropped even though its `done` flag reached the line's start;
+    /// that page carries every user message `b-90` inherits.
+    async fn a_transcript_read_that_drops_its_oldest_page() -> Worker {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&TRANSCRIPT_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+
+        let mut head = draft_page(331, 10);
+        head.push(line_created(341, "b-90", 240));
+        worker.task_history_queue.clear();
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(head, 331, false)).await;
+        worker.task_history_queue.clear();
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+
+        worker.earlier("b-7c");
+        for (first, count) in [(321, 10), (301, 20), (271, 30)] {
+            worker.poll_task_history().await.unwrap();
+            answer(
+                &mut worker,
+                transcript_page(draft_page(first, count), first, false),
+            )
+            .await;
+        }
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(asked_page(11, 250), 11, true)).await;
+        worker
+    }
+
+    /// The page that reached the line's start is dropped under the retention
+    /// budget, so the retained history does not cover the start: the cut stays
+    /// unknown instead of counting the messages that happened to survive.
+    #[tokio::test]
+    async fn a_history_read_that_drops_its_oldest_page_leaves_the_cut_unknown() {
+        let worker = a_transcript_read_that_drops_its_oldest_page().await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the retained history misses the dropped page, so the count is unknown"
+        );
+    }
+
+    /// The dropped page loaded on a later `/earlier` fills the gap: the cut is
+    /// recalculated from the whole history, equal to a complete read.
+    #[tokio::test]
+    async fn loading_the_page_a_retention_drop_omitted_recounts_the_cut() {
+        let mut worker = a_transcript_read_that_drops_its_oldest_page().await;
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::Unread,
+            "the dropped page is the earlier history left to read"
+        );
+        worker.earlier("b-7c");
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(asked_page(11, 250), 11, true)).await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 240,
+                messages: 231,
+            }),
+            "the page that fills the gap counts what a complete read counts"
         );
     }
 }
