@@ -3907,6 +3907,71 @@ async fn connection_updates_list_the_new_endpoint_and_keep_bundled_models() {
         "no listing request reaches a builtin's endpoint"
     );
 
+    let magpie = provider
+        .management("magpie".into(), None, &cancel)
+        .await
+        .unwrap()
+        .providers
+        .remove(0);
+    let saved = provider
+        .update(
+            "magpie".into(),
+            magpie.info.version.unwrap(),
+            serde_json::from_value(json!({
+                "baseUrl":format!("{base}/magpie/v1"),
+                "credential":{"action":"set","value":"magpie-key"}
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved.info.enabled, Some(false));
+    assert!(requests.try_recv().is_err());
+    let version = saved.info.version.unwrap();
+    for status in [StatusCode::INTERNAL_SERVER_ERROR, StatusCode::OK] {
+        let enabling = {
+            let provider = provider.clone();
+            let cancel = cancel.clone();
+            let patch = serde_json::from_value(json!({"enabled":true})).unwrap();
+            tokio::spawn(async move {
+                provider
+                    .update("magpie".into(), version, patch, &cancel)
+                    .await
+            })
+        };
+        let (uri, reply) = tokio::time::timeout(std::time::Duration::from_secs(5), requests.recv())
+            .await
+            .expect("enabling a provider with an empty bundled catalog requests its models")
+            .unwrap();
+        assert_eq!(uri.path(), "/magpie/v1/models");
+        reply
+            .send((
+                status,
+                Json(json!({"data":[{"id":"magpie-model",
+                "context_window":64000,"max_output_tokens":512}]})),
+            ))
+            .unwrap();
+        let result = enabling.await.unwrap();
+        if status == StatusCode::OK {
+            let connected = result.unwrap();
+            assert_eq!(connected.info.enabled, Some(true));
+            assert_eq!(connected.info.version, Some(version + 1));
+            assert_eq!(connected.models.unwrap()[0].model.model_id, "magpie-model");
+        } else {
+            assert!(result.is_err());
+            let unchanged = provider
+                .management("magpie".into(), None, &cancel)
+                .await
+                .unwrap()
+                .providers
+                .remove(0);
+            assert_eq!(unchanged.info.enabled, Some(false));
+            assert_eq!(unchanged.info.version, Some(version));
+            assert!(unchanged.models.unwrap().is_empty());
+        }
+    }
+
     let azure = {
         let mut azure = input(
             INVALID_AZURE,

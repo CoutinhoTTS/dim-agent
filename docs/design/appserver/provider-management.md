@@ -500,11 +500,15 @@ the record is enabled. A `network`-only change — a proxy or a timeout
 — saves alone and lists nothing: it changes how the endpoint is reached, not
 what it serves, and requiring a listing would make those settings unsavable
 whenever listing fails. A driver that cannot list saves the connection alone. A
-record whose models are the bundled catalog's keeps them through any connection
-change, and later bundled updates still reach it;
-`dimcode models PROVIDER --refresh` stays the explicit way to replace them. A
-stored listing sets `remoteModels` as `refresh` does. The reply's `modelsListed`
-says which of these happened.
+record that inherits a nonempty bundled catalog keeps it through connection
+changes, and later bundled updates still reach it. If the inherited catalog is
+empty (as with Magpie) and remote listing is supported, an update that enables
+the Provider or changes its connection while it is enabled lists and stores
+the endpoint's models in the same transaction as the connection update. A
+listing failure leaves the record unchanged. The Models area's `Ctrl+R` and
+`dimcode models PROVIDER --refresh` remain the explicit ways to refresh the
+listing. A stored listing sets `remoteModels` as `refresh` does. The reply's
+`modelsListed` says which of these happened.
 
 | `patch` field | Operation | Writable records |
 | --- | --- | --- |
