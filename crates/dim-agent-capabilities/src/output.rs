@@ -656,6 +656,7 @@ async fn parse_output(
     let mut partial = HashMap::<String, String>::new();
     let mut visible = false;
     let mut content_seen = false;
+    let mut stop_seen = false;
     let mut published = output.timeline.watch();
     loop {
         let show_at = output.thinking_show_at;
@@ -676,8 +677,14 @@ async fn parse_output(
                 }
                 continue;
             }
-            _ = cancel.cancelled() => {
-                return Err(HostError::Cancelled("Model invocation cancelled".into()));
+            _ = cancel.cancelled(), if !stop_seen => {
+                if output.gate.replaced() {
+                    return Err(HostError::Cancelled("Model invocation cancelled".into()));
+                }
+                // A stop lets the host end its stream: output it already
+                // sent still closes the calls it started.
+                stop_seen = true;
+                continue;
             }
         };
         let Some(chunk) = next else { break };
