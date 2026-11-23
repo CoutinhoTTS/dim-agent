@@ -198,6 +198,8 @@ struct Loop {
     state: String,
     round: u64,
     next_at: Option<String>,
+    #[serde(default)]
+    prompt: String,
 }
 #[derive(Deserialize)]
 struct LoopList {
@@ -210,8 +212,14 @@ fn loop_report(loops: &[Loop]) -> String {
     loops
         .iter()
         .map(|record| {
+            let prompt: String = record.prompt.chars().take(120).collect();
+            let prompt = if prompt.is_empty() {
+                String::new()
+            } else {
+                format!(" · {}", prompt.replace('\n', " "))
+            };
             format!(
-                "{} · {} · round {}{}",
+                "{} · {} · round {}{}{}",
                 record.loop_id,
                 record.state,
                 record.round,
@@ -219,7 +227,8 @@ fn loop_report(loops: &[Loop]) -> String {
                     .next_at
                     .as_ref()
                     .map(|at| format!(" · next {at}"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                prompt
             )
         })
         .collect::<Vec<_>>()

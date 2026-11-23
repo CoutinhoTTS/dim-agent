@@ -496,10 +496,7 @@ async fn run(
         worker.poll_workflow().await;
         worker.poll_context().await;
         worker.poll_compaction().await;
-        let workflow_poll = worker
-            .workflow
-            .next_at
-            .filter(|_| worker.workflow.request.is_none());
+        let workflow_poll = worker.workflow.next_at.filter(|_| worker.workflow_ready());
         let login_poll = worker.login.as_ref().and_then(|login| login.poll_at);
         let output_poll = worker
             .output
