@@ -2425,6 +2425,120 @@ async fn a_generation_error_finish_reason_continues_the_turn_once() {
     server.close().await;
 }
 
+/// A content filter that cuts a tool call's arguments short is still the
+/// reply's terminal: the started call closes as failed, the persisted output
+/// records `content_filtered`, and no continuation follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cut_tool_arguments_content_filter_keeps_its_kind() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit(
+            "cut-tool-arguments-content-filter".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (line, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::ContentFiltered);
+    assert!(
+        line.starts_with("The provider's content filter blocked the response"),
+        "{line}"
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(&event.kind, EventKind::ToolUseStart(data) if data.call_id == "call-1")
+        ),
+        "the reply announced the call before the filter: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::ToolUse(_))),
+        "the interrupted call is not announced as a completed call: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::ToolResult(data)
+                if data.call_event_id.is_none()
+                    && data.results.iter().any(|result| result.call_id == "call-1"
+                        && result.result.content == ToolContent::Text(
+                            "Tool was not executed: the model output ended before its arguments were complete".to_owned(),
+                        ))
+        )),
+        "the started call closes as failed: {events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        1,
+        "the content filter ends the turn instead of continuing it"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// The same cut tool call with no content-filter terminal stays a malformed
+/// response and keeps the continuation its announced call earns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cut_tool_arguments_without_a_filter_stay_malformed() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit(
+            "cut-tool-arguments-without-filter".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (_, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("invalid arguments for tool 'echo'"),
+        "{failure:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::ToolUse(_))),
+        "the cut call is not announced as a completed call: {events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        2,
+        "the cut request and its continuation"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
 async fn respond_native(
     State(endpoint): State<NativeEndpoint>,
     uri: Uri,
@@ -2622,6 +2736,20 @@ async fn respond_native(
                 }
             } else if continuation {
                 frame(json!({"content":"finished"}), json!("stop")) + "data: [DONE]\n\n"
+            } else if request_text.contains("cut-tool-arguments-content-filter") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(
+                        json!({"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"cut"}}]}),
+                        json!("content_filter"),
+                    )
+                    + "data: [DONE]\n\n"
+            } else if request_text.contains("cut-tool-arguments-without-filter") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(
+                        json!({"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"cut"}}]}),
+                        json!("tool_calls"),
+                    )
+                    + "data: [DONE]\n\n"
             } else if request_text.contains("finish-filter") {
                 frame(json!({"content":"before"}), Value::Null)
                     + &frame(
