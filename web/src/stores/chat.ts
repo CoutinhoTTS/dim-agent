@@ -236,11 +236,14 @@ export const useChatStore = defineStore("chat", () => {
       for (const required of ["session.input.pending", "session.question.pending", "session.turn.get"]) {
         if (!view.methods.includes(required)) throw new ProtocolError(`This Session does not provide ${required}`)
       }
+      const move = channel.moves
       const directory = await client().call("session.branches", { sessionId: view.sessionId }, readBranches)
       channel.lines.directory(directory.branches)
       // The centre is the default branch the directory reports: a resync that
-      // discovers a move hands the stream over once, as a local move does.
-      if (directory.defaultBranchId !== view.defaultBranchId) centre(channel, directory.defaultBranchId)
+      // discovers a move hands the stream over once, as a local move does. An
+      // answer read before a move was accepted describes the centre that move
+      // replaced, so that move's own handover stands.
+      if (channel.moves === move && directory.defaultBranchId !== view.defaultBranchId) centre(channel, directory.defaultBranchId)
       for (const entry of directory.branches) {
         if (entry.branchId === ROOT_BRANCH_ID || entry.branchId === view.defaultBranchId) continue
         const branch = ensureBranch(channel, entry.branchId)
@@ -255,7 +258,12 @@ export const useChatStore = defineStore("chat", () => {
       // that failed before this point gets its attachment back.
       channel.directoryRead = true
       const centreId = view.defaultBranchId
+      const target = channel.main
       const main = await loadHistory(channel, centreId)
+      // The page this result would describe is the transcript the read installed
+      // when it started: a move accepted meanwhile replaced it with the line it
+      // names, and that line's own reads report it.
+      if (channel.main !== target) return
       if (main !== "ok") {
         if (main === "failed" && view.status !== "closed") {
           view.status = "failed"
@@ -279,9 +287,9 @@ export const useChatStore = defineStore("chat", () => {
       // The policy read is out while the page is the loading one this sync
       // installed. A goal event that arrives meanwhile and fails owns the page:
       // neither this read's result nor a ready page may take it back.
-      if (view.status === "loading") {
+      if (view.status === "loading" && channel.main === target) {
         const policy = await sessionPermission(view.sessionId, centreId)
-        if (view.status === "loading") {
+        if (view.status === "loading" && channel.main === target) {
           showPermission(view, centreId, policy)
           view.status = "ready"
           view.error = ""
@@ -588,8 +596,9 @@ export const useChatStore = defineStore("chat", () => {
    * belongs to the line it names, and a failure belongs to it too: a line that
    * left the centre publishes nothing, and the centre that replaced it keeps
    * the refresh it already asked for. A caller that arrives while a refresh
-   * runs queues its own line in that refresh and waits for its result, so no
-   * caller is answered for a line it did not ask about.
+   * runs queues its own line in that refresh and waits for its result. A failed
+   * read answers every caller waiting on that refresh with `false` and leaves
+   * the lines still queued behind it for the next call.
    */
   async function refreshGoal(channel: Channel, branchId = channel.view.defaultBranchId): Promise<boolean> {
     if (!channel.view.methods.includes("session.goal.get")) return true
@@ -1085,6 +1094,12 @@ export const useChatStore = defineStore("chat", () => {
     // the version it read: a later move's read and a newer policy both win.
     if (channel.moves !== move || view.defaultBranchId !== moved) return
     showPermission(view, moved, policy)
+    // This line's history, goal and policy are in: a page a resync put in its
+    // loading state leaves it here, through the reads of the centre it shows.
+    if (view.status === "loading") {
+      view.status = "ready"
+      view.error = ""
+    }
     publish(channel)
   }
 
