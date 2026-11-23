@@ -1253,3 +1253,29 @@ test("a Session that closes while the retry reads the policy stays closed", asyn
   await flush()
   assert.equal(chat.views.session.status, "closed", "a Session closed during the policy read stays closed")
 })
+
+test("a side line keeps the events it received while the centre page was failed", async t => {
+  let failGoal = false
+  const chat = session(t, params => page([input(1, `on ${params.branchId}`)], 1), {
+    "session.goal.get": params => {
+      if (failGoal && params.branchId === "main") throw new Error("the goal read failed")
+      return { branchId: params.branchId, through: 1, goal: null }
+    },
+  })
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  chat.ensureLine("session", "worker")
+  await flush()
+  assert.deepEqual(chat.views.session.branches.worker.rows.map(row => row.text), ["on worker"])
+  failGoal = true
+  receive(chat, "main", goalInput(2, "goal: carry on"))
+  await flush()
+  assert.equal(chat.views.session.status, "failed", "a goal event whose read fails reports the page failed")
+  receive(chat, "worker", input(2, "arrived while the page was failed"))
+  await flush()
+  failGoal = false
+  chat.retryCentre("session")
+  await flush()
+  assert.equal(chat.views.session.status, "ready", "the retry recovered the centre")
+  assert.deepEqual(chat.views.session.branches.worker.rows.map(row => row.text), ["on worker", "arrived while the page was failed"], "the side line shows the event it received while the page was failed, once")
+})
