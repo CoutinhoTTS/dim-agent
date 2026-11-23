@@ -581,7 +581,7 @@ export const sessionExample = definePlugin({
       'session.example',
       [{ name: 'session.example.echo', mutating: false, interruption: 'report', progress: true }],
       async (call, _cancelled, progress) => {
-        progress({ phase: 'started' });
+        await progress({ phase: 'started' });
         return { kind: 'value', value: call.params };
       },
     );
@@ -646,7 +646,11 @@ under the `hello`, `daemon`, `agent` or `approval` roots; an `apply` that awaits
 fails its part. The registration lasts until the part unloads, and `session.methods`
 lists the methods registered at that call. `call` is asynchronous and receives an
 opaque runtime `callId`, the method and original params containing `sessionId` and
-optional `branchId`; it also receives cancellation and a per-call progress callback.
+optional `branchId`; it also receives cancellation and a per-call progress callback. The callback
+returns a promise, and awaiting it is what keeps your notices in order: each call is a frame the host
+runs on its own task, so two calls without a wait between them can arrive in either order. Await it
+as well when a notice has to be queued before the method returns, because the reply closes the
+progress channel and drops a send that has not run yet.
 Return `{kind: 'value', value}`, return a failure as data, `{code, message}`, or
 rethrow the service error you received. An omitted value becomes JSON null. Rpc maps a failure to
 the wire error: `code` becomes `appError`, with JSON-RPC code -32602 for `invalid_params` and
