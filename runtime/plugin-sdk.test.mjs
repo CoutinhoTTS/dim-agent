@@ -93,7 +93,8 @@ void management.register('fixture', [], typedHandler);
 void methods.register('fixture', [], async () => initialReply);
 void management.register('fixture', [], async () => configuredReply);
 void methods.register('fixture', [], async (call, cancelled, progress) => {
-  progress(configured);
+  const sent: Promise<void> = progress(configured);
+  await sent;
   progress(entry);
   progress({});
   // @ts-expect-error progress carries data, not callbacks.
