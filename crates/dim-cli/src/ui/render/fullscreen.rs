@@ -2517,7 +2517,7 @@ fn plain_row_patch<'a>(old: &str, new: &'a str) -> Option<(u16, &'a str, usize)>
     let mut first_border = None;
     let mut start = None;
     let mut end = 0;
-    let mut blanks = 0;
+    let mut stop = 0;
     for col in 0.. {
         let before = old_chars.next();
         let after = new_chars.next();
@@ -2534,13 +2534,12 @@ fn plain_row_patch<'a>(old: &str, new: &'a str) -> Option<(u16, &'a str, usize)>
         if before != after {
             start.get_or_insert(first_border.unwrap_or((col, offset)));
             end = (offset + after.len_utf8()).min(new.len());
-        }
-        if offset == new.len() && start.is_some() {
-            blanks += 1;
+            stop = col + 1;
         }
     }
     let (col, offset) = start?;
     let text = &new[offset..end];
+    let blanks = stop - col - text.chars().count();
     (text.len() + blanks <= new.len()).then_some((col as u16, text, blanks))
 }
 
@@ -2791,6 +2790,8 @@ mod tests {
             ("│ draft     │", "│ draftx    │", "\x1b[8;1H│ draftx"),
             ("│ draftx    │", "│ draft     │", "\x1b[8;1H│ draft "),
             ("draft stale", "draft", "\x1b[8;7H     "),
+            ("    │ abc   x", "    │ abc", "\x1b[8;5H│ abc    "),
+            ("draft  ", "Draft", "\x1b[8;1HD"),
         ] {
             draw(&mut screen, &mut emu, &frame(&[], &[old]), &doc);
             let bytes = draw(&mut screen, &mut emu, &frame(&[], &[new]), &doc);
