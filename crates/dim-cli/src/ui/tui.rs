@@ -13431,6 +13431,7 @@ mod tests {
             "/private/tmp/dima-probe".into(),
         );
         app.apply(Update::Ready(Configuration {
+            catalog_provider_id: None,
             provider_id: provider.into(),
             model_id: model.into(),
             model_preferences: effort.map(|effort| dim_agent_types::ModelPreferences {
@@ -14034,6 +14035,7 @@ mod tests {
                 let app = &mut drawn.app;
                 app.fullscreen = fullscreen;
                 app.apply(Update::Ready(Configuration {
+                    catalog_provider_id: None,
                     provider_id: "test".into(),
                     model_id: "model".into(),
                     model_preferences: Some(dim_agent_types::ModelPreferences {
@@ -19102,6 +19104,7 @@ mod tests {
             let (mut app, sent, _home) = asked();
             app.fullscreen = fullscreen;
             app.apply(Update::Ready(Configuration {
+                catalog_provider_id: None,
                 provider_id: "relay".into(),
                 model_id: "reasoner".into(),
                 model_preferences: None,
@@ -19157,6 +19160,7 @@ mod tests {
                 assert!(frame.live.iter().all(|row| width_of(row) <= 36));
                 if stale {
                     app.apply(Update::Ready(Configuration {
+                        catalog_provider_id: None,
                         provider_id: "relay".into(),
                         model_id: "other".into(),
                         model_preferences: None,

@@ -2664,6 +2664,149 @@ async fn node_crash_resubmission_gets_the_original_receipt() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn temporary_route_adoption_requires_inputs_to_finish_dispatching() {
+    let store = Store::new();
+    let gate = Arc::new(PendingDispatchGate::default());
+    let Served {
+        server,
+        agent,
+        sessions,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        database: Some(store.database()),
+        home: Some(store.0.clone()),
+        dispatch_gate: Some(gate.clone()),
+        ..Default::default()
+    })
+    .await;
+    super::process_typescript::select_model(&mut client).await;
+    let session = client_session(&mut client, &agent, host_policy()).await;
+    session.idle("main").await.unwrap();
+
+    let mut routed = Client::new_version(&server, false, 4).await;
+    assert_ok(
+        &routed
+            .rpc(
+                "provider.routes.set",
+                json!({"providerId":session.config().model.provider_id,
+                    "connection":{"apiFormat":"openai-compatible","baseUrl":"http://localhost/routed/v1"}}),
+            )
+            .await,
+    );
+    let mut queued = input(
+        &session,
+        "pending:dispatch-gate",
+        json!([{"type":"text","text":"Wait for dispatch"}]),
+    );
+    queued["mode"] = json!("append");
+    sessions.ok("input", queued).await;
+    tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+        .await
+        .unwrap();
+    assert!(!session.state("main").unwrap().running);
+
+    let attach = json!({"sessionId":session.id()});
+    let refused = routed.rpc("session.attach", attach.clone()).await;
+    assert_eq!(
+        refused["error"]["data"]["appError"], "provider_route_conflict",
+        "{refused}"
+    );
+
+    gate.release.notify_one();
+    session.idle("main").await.unwrap();
+    assert_ok(&routed.rpc("session.attach", attach).await);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn routed_model_update_restores_the_previous_model_on_disconnect() {
+    let store = Store::new();
+    let Served {
+        server,
+        agent,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        database: Some(store.database()),
+        home: Some(store.0.clone()),
+        ..Default::default()
+    })
+    .await;
+    super::process_typescript::select_model(&mut client).await;
+    let session = client_session(&mut client, &agent, host_policy()).await;
+    let before = session.idle("main").await.unwrap();
+    let provider = &session.config().model.provider_id;
+    let mut routed = Client::new_version(&server, false, 4).await;
+    assert_eq!(
+        routed
+            .rpc("provider.routes.disable", json!({"providerId":"missing"}))
+            .await["result"],
+        false
+    );
+    assert_ok(
+        &routed
+            .rpc(
+                "provider.routes.set",
+                json!({"providerId":provider,
+                    "connection":{"apiFormat":"openai-compatible","baseUrl":"http://localhost/routed/v1"}}),
+            )
+            .await,
+    );
+    let publication = session.publication("main").unwrap();
+    let lock = rusqlite::Connection::open(store.database()).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    routed
+        .send(
+            "session.model.update",
+            json!({"sessionId":session.id(),"branchId":"main","providerId":provider,"modelId":"fixture"}),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !publication.has_pending() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let Transport::Unix(stream) = &mut routed.transport else {
+        unreachable!();
+    };
+    stream.get_mut().shutdown().await.unwrap();
+    let mut eof = String::new();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), stream.read_line(&mut eof))
+            .await
+            .unwrap()
+            .unwrap(),
+        0,
+        "{eof}"
+    );
+    lock.execute_batch("COMMIT").unwrap();
+
+    let attached = client
+        .rpc("session.attach", json!({"sessionId":session.id()}))
+        .await;
+    assert_ok(&attached);
+    assert_eq!(attached["result"]["model"]["providerId"], *provider);
+    let models: Vec<_> = branch_events(&session, "main", (before + 1)..)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ContextConfigured(config) => Some(config.settings.provider_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(models.len(), 2, "{models:?}");
+    assert_ne!(&models[0], provider);
+    assert_eq!(&models[1], provider);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_waits_for_published_input_dispatch_and_abandonment_is_local() {
     let gate = Arc::new(PendingDispatchGate::default());
     let Served {

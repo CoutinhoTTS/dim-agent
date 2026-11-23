@@ -15,6 +15,7 @@ mod query;
 pub mod read_work;
 mod remote;
 pub use query::{ModelPage, ModelQuery};
+pub(crate) mod scoped_routes;
 mod secrets;
 mod startup;
 mod view;
@@ -1743,9 +1744,19 @@ fn selection_scope(cwd: Option<&Path>) -> Result<String, HostError> {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Saved {
     /// Apply the saved value for each field the caller left unstated.
-    Apply,
+    Apply {
+        clear_reasoning: bool,
+        clear_service_tier: bool,
+    },
     /// Resolve at the model's declared defaults alone.
     Withhold,
+}
+
+impl Saved {
+    const ALL: Self = Self::Apply {
+        clear_reasoning: false,
+        clear_service_tier: false,
+    };
 }
 
 impl ProviderService {
@@ -2410,11 +2421,25 @@ impl ProviderService {
         preferences: ModelPreferences,
         cancel: &CancellationToken,
     ) -> Result<ModelSelection, HostError> {
+        self.configuration_with_preference_update(explicit, cwd, preferences.into(), cancel)
+            .await
+    }
+
+    pub(super) async fn configuration_with_preference_update(
+        self: &Arc<Self>,
+        explicit: Option<ModelId>,
+        cwd: Option<&Path>,
+        preferences: crate::protocol::ModelPreferenceUpdate,
+        cancel: &CancellationToken,
+    ) -> Result<ModelSelection, HostError> {
         self.configuration_with_limits(
             explicit,
             cwd,
-            preferences,
-            Saved::Apply,
+            preferences.values(),
+            Saved::Apply {
+                clear_reasoning: preferences.clears_reasoning(),
+                clear_service_tier: preferences.clears_service_tier(),
+            },
             (None, None),
             cancel,
         )
@@ -2638,8 +2663,17 @@ impl ProviderService {
             .map_err(|error| failure(error.to_string()))?;
             let base = preferences::catalog_defaults(&model.config, &snapshot, protocol);
             let config = match saved {
-                Saved::Apply => {
-                    let saved = self.saved_preferences(&id, &model.id, cancel).await?;
+                Saved::Apply {
+                    clear_reasoning,
+                    clear_service_tier,
+                } => {
+                    let mut saved = self.saved_preferences(&id, &model.id, cancel).await?;
+                    if clear_reasoning {
+                        saved.reasoning_effort = None;
+                    }
+                    if clear_service_tier {
+                        saved.service_tier = None;
+                    }
                     preferences::effective(
                         &preferences,
                         &saved,
@@ -3586,6 +3620,15 @@ pub(crate) fn adopted_selection_preferences(
     metadata: Option<&dim_agent_types::RequestMetadata>,
 ) -> Option<ModelPreferences> {
     dim_agent_capabilities::host::adopted_preferences(config?, provider_protocol(metadata)?)
+}
+
+pub(crate) fn declared_reasoning_effort(
+    snapshot: Option<&ModelCapabilitySnapshot>,
+    metadata: Option<&dim_agent_types::RequestMetadata>,
+) -> Option<String> {
+    let protocol = provider_protocol(metadata)?;
+    let config = preferences::catalog_defaults(&ModelConfig::default(), snapshot?, protocol);
+    dim_agent_capabilities::host::adopted_preferences(&config, protocol)?.reasoning_effort
 }
 
 #[cfg(feature = "testing")]

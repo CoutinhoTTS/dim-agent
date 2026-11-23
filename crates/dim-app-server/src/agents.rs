@@ -35,6 +35,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 mod configuration;
+pub(crate) use configuration::check_configuration;
 mod fork;
 pub(crate) const SESSION_NAMESPACE: &str = "session.agent";
 
@@ -197,6 +198,15 @@ pub(crate) struct SessionUse {
     pub session: Session,
     slot: Arc<SessionSlot>,
     activity: Arc<ProcessHold>,
+}
+impl SessionUse {
+    pub(crate) async fn admission(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.slot.gate.clone().lock_owned().await
+    }
+
+    pub(crate) fn is_exclusive(&self, attached: bool) -> bool {
+        self.slot.uses.load(Ordering::Acquire) == 1 + usize::from(attached)
+    }
 }
 impl Clone for SessionUse {
     fn clone(&self) -> Self {
@@ -1928,7 +1938,13 @@ impl AgentIndex {
     /// fork is a prepared creation whose prepare step is SessionStore's fork
     /// transaction; it belongs to the source's Agent and protocol version,
     /// and its `main` opens with `branch/resume`.
-    pub(crate) async fn fork(&self, source: &str, at: u64) -> dim_agent_runtime::Result<Session> {
+    pub(crate) async fn fork(
+        &self,
+        source: &str,
+        at: u64,
+        expected: Option<&dim_agent_types::SessionConfigExpectation>,
+        scope: Option<(&crate::provider::ProviderService, &str)>,
+    ) -> Result<Session, RpcError> {
         let store = self
             .session_store
             .clone()
@@ -1936,9 +1952,9 @@ impl AgentIndex {
         let usage = self.acquire(source).await?;
         let session = &usage.session;
         if session.config().collaboration_role == CollaborationRole::Member {
-            return Err(AgentError::InvalidInput(
-                "a member conversation cannot be forked".into(),
-            ));
+            return Err(
+                AgentError::InvalidInput("a member conversation cannot be forked".into()).into(),
+            );
         }
         let checked = async {
             dim_agent_capabilities::history::validate_context_boundary_in(
@@ -1952,7 +1968,7 @@ impl AgentIndex {
         }
         .await;
         if session.is_closing() {
-            return Err(AgentError::Closed(source.into()));
+            return Err(AgentError::Closed(source.into()).into());
         }
         checked?;
         let version = self
@@ -1969,6 +1985,20 @@ impl AgentIndex {
             .ok_or_else(|| AgentError::Closed(source.to_owned()))?;
         let mut config = serde_json::from_str::<SessionConfig>(&stored)
             .map_err(|error| AgentError::Storage(format!("the source configuration: {error}")))?;
+        if let Some(expected) = expected {
+            check_configuration(session, &config, at, expected).await?;
+        }
+        if let Some((provider, scope)) = scope {
+            let (adopted, _) = session
+                .session_service::<dim_agent_capabilities::timeline_tree::TreeCommands>()?
+                .adopted_configuration(ROOT_BRANCH_ID.into(), Some(at))
+                .await?;
+            let (provider_id, metadata) = match &adopted {
+                Some(adopted) => (&adopted.provider_id, adopted.metadata.as_ref()),
+                None => (&config.model.provider_id, config.model.metadata.as_ref()),
+            };
+            provider.check_fork_route(scope, provider_id, metadata)?;
+        }
         // A fork of an older protocol keeps the live Session's codemode
         // exclusion; the stored record is written without it, as on create.
         config.exclude_codemode_below(version);
@@ -1986,7 +2016,8 @@ impl AgentIndex {
             let Some(members) = value.as_object_mut() else {
                 return Err(AgentError::Storage(
                     "the source configuration is not an object".into(),
-                ));
+                )
+                .into());
             };
             members.remove(INITIAL_TITLE);
             record = serde_json::to_string(&value)
@@ -2010,7 +2041,8 @@ impl AgentIndex {
                 agent_id: usage.host.agent_id.clone(),
                 session_id: id,
             })
-            .await?;
+            .await
+            .map_err(AgentError::from)?;
         Ok(fork)
     }
     /// `agent.create`: one more Agent, a peer of every other. A requested
