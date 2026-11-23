@@ -599,6 +599,7 @@ impl Worker {
             history.window.push(page).map_err(|error| error.to_string())
         });
         let window_ready = matches!(result, Ok(true));
+        let mut missing_prefix = false;
         match result {
             Err(error) => {
                 history.error = Some(error.clone());
@@ -618,7 +619,7 @@ impl Worker {
             Ok(false) => self.task_history_queue.push_back(request.branch_id.clone()),
             Ok(true) => {
                 let events = history.window.take();
-                let missing_prefix =
+                missing_prefix =
                     history.window.dropped_pages() || history.window.before.is_some() && !at_start;
                 history.window_complete = true;
                 if history.earlier == EarlierRead::Reading {
@@ -641,9 +642,6 @@ impl Worker {
                 }
                 if missing_prefix {
                     self.projection.missing_history(&request.branch_id);
-                    self.send(Update::Notice(
-                        "Earlier content not loaded; /earlier to read it".into(),
-                    ));
                 } else {
                     self.projection.whole_history(&request.branch_id);
                 }
@@ -689,6 +687,11 @@ impl Worker {
         }
         if window_ready {
             self.publish();
+        }
+        if missing_prefix {
+            self.send(Update::Notice(
+                "Earlier content not loaded; /earlier to read it".into(),
+            ));
         }
         Ok(())
     }
@@ -1744,6 +1747,49 @@ mod tests {
                 messages: 231,
             }),
             "the page that fills the gap counts what a complete read counts"
+        );
+    }
+
+    /// A window whose page left out earlier content says so in a notice. The
+    /// notice is sent after the snapshot that carries the page, so the
+    /// interface's next frame draws the page's rows before the notice that
+    /// reports them missing. Both updates share one channel, and the interface
+    /// applies whatever it drains in that order.
+    #[tokio::test]
+    async fn a_missing_prefix_notice_follows_the_page_it_reports() {
+        let (mut worker, receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = DEFAULT_BRANCH_ID.into();
+        worker.discover_branch(DEFAULT_BRANCH_ID);
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [text(2, "r-loaded", "the loaded page")],
+                "through": 2, "nextAfter": 2, "nextBefore": 2
+            }),
+        )
+        .await;
+
+        let updates: Vec<Update> = receiver.try_iter().collect();
+        let page = updates
+            .iter()
+            .position(|update| {
+                matches!(update, Update::Snapshot(view)
+                    if view.rows.iter().any(|row| row.text.contains("the loaded page")))
+            })
+            .expect("the page published its rows");
+        let notice = updates
+            .iter()
+            .position(|update| {
+                matches!(update, Update::Notice(text)
+                    if text == "Earlier content not loaded; /earlier to read it")
+            })
+            .expect("the page reports the earlier content it left out");
+        assert!(
+            page < notice,
+            "the page's snapshot is sent before the notice that reports the missing earlier content"
         );
     }
 }
