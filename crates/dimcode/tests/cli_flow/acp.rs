@@ -3588,7 +3588,7 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
         "{}",
         String::from_utf8_lossy(&ready.stderr)
     );
-    let mut native = BufReader::new(UnixStream::connect(socket).unwrap());
+    let mut native = BufReader::new(UnixStream::connect(&socket).unwrap());
     native.get_ref().set_read_timeout(Some(PATIENCE)).unwrap();
     let mut id = 0;
     let mut native_call = |method: &str, params: Value| {
@@ -3942,6 +3942,99 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
         ]
     );
 
+    let proxy_home = Home::new();
+    let (persisted, fork_committed) = std::sync::mpsc::sync_channel(1);
+    let proxy = proxy_home.daemon(move |wire| {
+        let mut native = UnixStream::connect(socket).unwrap();
+        native.set_read_timeout(Some(HANG_GUARD)).unwrap();
+        let mut gateway = wire.0.get_ref().try_clone().unwrap();
+        let responses = BufReader::new(native.try_clone().unwrap());
+        let order = Mutex::new((None, None, false));
+        thread::scope(|scope| {
+            scope.spawn(|| {
+                let mut held = None;
+                for line in responses.lines() {
+                    let line = line.unwrap();
+                    let response: Value = serde_json::from_str(&line).unwrap();
+                    let (fork, list, _) = order.lock().unwrap().clone();
+                    if response
+                        .get("id")
+                        .is_some_and(|id| Some(id) == fork.as_ref())
+                    {
+                        assert!(response.get("result").is_some(), "{response}");
+                        held = Some(line);
+                        persisted.send(()).unwrap();
+                        continue;
+                    }
+                    writeln!(gateway, "{line}").unwrap();
+                    if response
+                        .get("id")
+                        .is_some_and(|id| Some(id) == list.as_ref())
+                    {
+                        writeln!(gateway, "{}", held.take().unwrap()).unwrap();
+                    }
+                }
+            });
+            for line in (&mut wire.0).lines() {
+                let line = line.unwrap();
+                let request: Value = serde_json::from_str(&line).unwrap();
+                let mut order = order.lock().unwrap();
+                match request["method"].as_str() {
+                    Some("session.fork") => order.0 = request.get("id").cloned(),
+                    Some("provider.routes.list") => order.1 = request.get("id").cloned(),
+                    Some("session.attach") => order.2 = true,
+                    Some("provider.routes.disable") => assert!(order.2, "{request}"),
+                    _ => {}
+                }
+                drop(order);
+                writeln!(native, "{line}").unwrap();
+            }
+            native.shutdown(std::net::Shutdown::Both).unwrap();
+        });
+    });
+    let mut concurrent = Peer::start(&proxy_home);
+    concurrent.initialize();
+    let database = rusqlite::Connection::open_with_flags(
+        home.0.join("rust/dimcode.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let child_count = || {
+        database
+            .query_row("SELECT count(*) FROM agent_sessions", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let before = child_count();
+    concurrent.send(
+        2,
+        "session/fork",
+        json!({"sessionId":b_id,"cwd":home.0,"mcpServers":[]}),
+    );
+    fork_committed.recv_timeout(PATIENCE).unwrap();
+    assert_eq!(child_count(), before + 1);
+    concurrent.send(3, "providers/disable", json!({"providerId":provider}));
+    concurrent.send(4, "providers/list", json!({}));
+    let mut replies = std::collections::HashMap::new();
+    while replies.len() < 3 {
+        let frame = concurrent.frame();
+        if let Some(id) = frame["id"].as_i64() {
+            assert!(matches!(id, 2..=4), "{frame}");
+            assert!(replies.insert(id, frame).is_none());
+        }
+    }
+    let fork = &replies[&2];
+    assert!(fork["result"]["sessionId"].is_string(), "{fork}");
+    assert_eq!(replies[&3]["result"], json!({}));
+    assert_eq!(
+        provider_row(replies.remove(&4).unwrap())["current"]["baseUrl"],
+        shared
+    );
+    assert_eq!(child_count(), before + 1);
+    concurrent.close();
+    proxy.join().unwrap();
+
     a.close();
     let deadline = Instant::now() + PATIENCE;
     loop {
@@ -3982,11 +4075,6 @@ fn acp_provider_routes_are_isolated_between_processes_sharing_a_daemon() {
         native_call("provider.management", json!({"providerId":provider}))["providers"][0],
         record
     );
-    let database = rusqlite::Connection::open_with_flags(
-        home.0.join("rust/dimcode.sqlite"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
     let stored_config: String = database
         .query_row(
             "SELECT config FROM agent_sessions WHERE session_id = ?1",

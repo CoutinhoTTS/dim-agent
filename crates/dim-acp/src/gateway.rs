@@ -21,8 +21,9 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     path::Path,
+    sync::Arc,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{OwnedRwLockReadGuard, RwLock, mpsc};
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 pub(crate) enum Incoming {
@@ -50,7 +51,7 @@ pub(crate) enum Work {
         reply: Responder,
         cwd: String,
         servers: crate::mcp::Servers,
-        result: Result<Created, Error>,
+        result: Result<(Created, OwnedRwLockReadGuard<()>), Error>,
     },
     History {
         id: String,
@@ -306,6 +307,7 @@ pub(crate) struct Gateway {
     initializing: bool,
     provider_routes_used: bool,
     pending_provider_routes: usize,
+    provider_route_admission: Arc<RwLock<()>>,
     creating: usize,
     sessions: HashMap<String, Slot>,
     interactions: HashMap<String, Interaction>,
@@ -425,6 +427,7 @@ impl Gateway {
             initialized: false,
             provider_routes_used: false,
             pending_provider_routes: 0,
+            provider_route_admission: Arc::new(RwLock::new(())),
             initializing: false,
             creating: 0,
             sessions: HashMap::new(),
@@ -585,6 +588,7 @@ impl Gateway {
         waiter: Waiter,
         mcp_added: bool,
         expected_config: Option<SessionConfigExpectation>,
+        route_admission: Option<OwnedRwLockReadGuard<()>>,
     ) {
         self.next_preparation += 1;
         let preparation = self.next_preparation;
@@ -610,8 +614,14 @@ impl Gateway {
         );
         self.spawn(async move {
             let result = async {
-                let prepared =
-                    read_history(&rpc, &id, expected_cwd, expected_config.as_ref()).await?;
+                let prepared = read_history(
+                    &rpc,
+                    &id,
+                    expected_cwd,
+                    expected_config.as_ref(),
+                    route_admission,
+                )
+                .await?;
                 mcp.ensure(&id).await?;
                 Ok(prepared)
             }
@@ -705,7 +715,13 @@ impl Gateway {
                 let value = request.params;
                 let mutating = method != "providers/list";
                 self.pending_provider_routes += usize::from(mutating);
+                let admission = self.provider_route_admission.clone();
                 self.spawn(async move {
+                    let _mutation = if mutating {
+                        Some(admission.write().await)
+                    } else {
+                        None
+                    };
                     let result = async {
                         match method.as_str() {
                             "providers/list" => {
@@ -796,6 +812,7 @@ impl Gateway {
                 }
                 self.creating += 1;
                 let agent = self.agent_id.clone();
+                let admission = self.provider_route_admission.clone();
                 let managed: Vec<_> = self
                     .auth_methods
                     .iter()
@@ -870,23 +887,26 @@ impl Gateway {
                             #[serde(skip_serializing_if = "Option::is_none")]
                             agent_id: Option<String>,
                         }
-                        rpc.typed(
-                            "session.create",
-                            encode_native(Create {
-                                cwd: &cwd,
-                                model,
-                                permission_policy: config
-                                    .permission_preset
-                                    .map(|preset| Policy { preset }),
-                                model_preferences: ModelPreferenceUpdate {
-                                    reasoning_effort: config.reasoning_effort,
-                                    service_tier: None,
-                                },
-                                origin: rpc.supports("session.create.origin").then_some("acp"),
-                                agent_id: agent,
-                            })?,
-                        )
-                        .await
+                        let route_admission = admission.read_owned().await;
+                        let created = rpc
+                            .typed(
+                                "session.create",
+                                encode_native(Create {
+                                    cwd: &cwd,
+                                    model,
+                                    permission_policy: config
+                                        .permission_preset
+                                        .map(|preset| Policy { preset }),
+                                    model_preferences: ModelPreferenceUpdate {
+                                        reasoning_effort: config.reasoning_effort,
+                                        service_tier: None,
+                                    },
+                                    origin: rpc.supports("session.create.origin").then_some("acp"),
+                                    agent_id: agent,
+                                })?,
+                            )
+                            .await?;
+                        Ok((created, route_admission))
                     }
                     .await;
                     Work::Created {
@@ -977,7 +997,14 @@ impl Gateway {
                             Ok(added) => added,
                             Err(error) => return reply.respond_with_error(error),
                         };
-                        self.prepare(id, cwd, Waiter { reply, kind }, added, expected_config);
+                        self.prepare(
+                            id,
+                            cwd,
+                            Waiter { reply, kind },
+                            added,
+                            expected_config,
+                            None,
+                        );
                     }
                     None => {
                         if self.sessions.len() >= 128 {
@@ -987,7 +1014,14 @@ impl Gateway {
                             Ok(added) => added,
                             Err(error) => return reply.respond_with_error(error),
                         };
-                        self.prepare(id, cwd, Waiter { reply, kind }, added, expected_config);
+                        self.prepare(
+                            id,
+                            cwd,
+                            Waiter { reply, kind },
+                            added,
+                            expected_config,
+                            None,
+                        );
                     }
                 }
             }
@@ -1090,6 +1124,7 @@ impl Gateway {
                     return reply.respond_with_error(busy());
                 }
                 self.creating += 1;
+                let admission = self.provider_route_admission.clone();
                 self.spawn(async move {
                     let mut cwd = args.cwd.to_string_lossy().into_owned();
                     let result = async {
@@ -1141,15 +1176,18 @@ impl Gateway {
                             #[serde(skip_serializing_if = "Option::is_none")]
                             expected_config: Option<SessionConfigExpectation>,
                         }
-                        rpc.typed(
-                            "session.fork",
-                            encode_native(Fork {
-                                session_id: source,
-                                at,
-                                expected_config,
-                            })?,
-                        )
-                        .await
+                        let route_admission = admission.read_owned().await;
+                        let created = rpc
+                            .typed(
+                                "session.fork",
+                                encode_native(Fork {
+                                    session_id: source,
+                                    at,
+                                    expected_config,
+                                })?,
+                            )
+                            .await?;
+                        Ok((created, route_admission))
                     }
                     .await;
                     Work::Created {
@@ -1528,7 +1566,7 @@ impl Gateway {
                 Work::Created { reply, result, .. } => {
                     self.creating -= 1;
                     let mut error = rpc::unavailable();
-                    if let Ok(created) = result {
+                    if let Ok((created, _)) = result {
                         error = error.data(
                             json!({"code":"daemon_unavailable","sessionId":created.session_id}),
                         );
@@ -1604,7 +1642,7 @@ impl Gateway {
             } => {
                 self.creating -= 1;
                 match result {
-                    Ok(created) => {
+                    Ok((created, route_admission)) => {
                         let added = match self.mcp.plan(&created.session_id, servers) {
                             Ok(added) => added,
                             Err(error) => return reply.respond_with_error(error),
@@ -1618,6 +1656,7 @@ impl Gateway {
                             },
                             added,
                             None,
+                            Some(route_admission),
                         )
                     }
                     Err(error) => reply.respond_with_error(error)?,
@@ -2827,7 +2866,7 @@ impl Gateway {
                             }
                         }
                     }
-                    let prepared = read_history(&rpc, &id, Some(cwd), None).await?;
+                    let prepared = read_history(&rpc, &id, Some(cwd), None, None).await?;
                     let input_id = input
                         .as_ref()
                         .map(|event| event.id.clone())
@@ -3213,6 +3252,7 @@ async fn read_history(
     id: &str,
     expected_cwd: Option<String>,
     expected_config: Option<&SessionConfigExpectation>,
+    route_admission: Option<OwnedRwLockReadGuard<()>>,
 ) -> Result<Prepared, Error> {
     if expected_cwd.is_some() && !rpc.supports("session.attach.expectedCwd") {
         return Err(
@@ -3260,6 +3300,7 @@ async fn read_history(
                 error
             }
         })?;
+    drop(route_admission);
     let model = attached.model.map(|model| Configuration {
         provider_id: model.provider_id,
         catalog_provider_id: attached.catalog_provider_id,
