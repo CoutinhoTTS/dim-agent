@@ -10,7 +10,7 @@ use std::{
 
 use aimux_core::result::Source;
 use aimux_core::types::{FinishReason, InputTokenUsage, OutputTokenUsage};
-use futures_util::Stream;
+use futures_util::{FutureExt, Stream};
 use serde_json::json;
 
 use super::*;
@@ -835,6 +835,104 @@ async fn an_interrupted_tool_call_keeps_its_failure_without_a_finish_reason() {
         assert!(abort.is_aborted(), "{case}");
         assert!(dropped.load(Ordering::SeqCst), "{case}");
     }
+}
+
+/// A content-filter finish reason the stream delivers behind a call whose
+/// arguments it cut short is the reply's terminal: the failure is
+/// `content_filtered`, and the interrupted call is never announced as a
+/// completed call.
+#[tokio::test]
+async fn a_cut_tool_call_takes_a_content_filter_queued_behind_it() {
+    let (stream, _, abort, dropped) = fixture_ending(vec![
+        Ok(start()),
+        Ok(StreamPart::ToolInputStart {
+            id: "call-1".into(),
+            tool_name: "lookup".into(),
+            provider_executed: None,
+            dynamic: None,
+            title: None,
+            provider_metadata: None,
+        }),
+        Ok(tool("{\"query\":")),
+        Ok(finish(
+            FinishReasonUnified::ContentFilter,
+            NativeUsage::default(),
+        )),
+    ]);
+    let chunks = stream.collect::<Vec<_>>().await;
+    let Some(Err(failure)) = chunks.last() else {
+        panic!("missing failure: {chunks:?}")
+    };
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::ContentFiltered);
+    assert!(
+        !chunks
+            .iter()
+            .any(|chunk| matches!(chunk, Ok(ModelChunk::ToolUse(_)))),
+        "the interrupted call is not announced as a completed call: {chunks:?}"
+    );
+    assert!(abort.is_aborted());
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
+/// A stream that stops after a call whose arguments cannot be parsed has no
+/// terminal to explain the call, so the parse failure is final at once and the
+/// transport is released instead of the request being held open.
+#[tokio::test]
+async fn a_stalled_stream_after_a_cut_tool_call_keeps_its_parse_failure() {
+    let (mut stream, _, abort, dropped) = fixture(vec![
+        Ok(start()),
+        Ok(StreamPart::ToolInputStart {
+            id: "call-1".into(),
+            tool_name: "lookup".into(),
+            provider_executed: None,
+            dynamic: None,
+            title: None,
+            provider_metadata: None,
+        }),
+        Ok(tool("{\"query\":")),
+    ]);
+    let mut chunks = Vec::new();
+    while let Some(next) = stream.next().now_or_never() {
+        let Some(chunk) = next else { break };
+        let failed = chunk.is_err();
+        chunks.push(chunk);
+        if failed {
+            break;
+        }
+    }
+    assert!(
+        matches!(chunks.last(), Some(Err(_))),
+        "the bridge waited for a terminal the stream never delivered: {chunks:?}"
+    );
+    let Some(Err(failure)) = chunks.last() else {
+        unreachable!()
+    };
+    let HostError::Failed {
+        model: Some(model), ..
+    } = failure
+    else {
+        panic!("{failure:?}");
+    };
+    assert_eq!(model.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("invalid arguments for tool 'lookup'")
+    );
+    assert!(abort.is_aborted());
+    assert!(dropped.load(Ordering::SeqCst));
+    assert!(
+        stream
+            .next()
+            .now_or_never()
+            .is_some_and(|next| next.is_none()),
+        "the stream did not end after the failure"
+    );
 }
 
 #[tokio::test]
