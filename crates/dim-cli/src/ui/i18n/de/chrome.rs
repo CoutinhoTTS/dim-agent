@@ -41,8 +41,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Running" => "Läuft",
         "Lines" => "Zweige",
-        "Enter show the line · x end it · Esc close" => {
-            "Enter Zweig anzeigen · x beenden · Esc schließen"
+        "Enter show · p continue from here · x end it · Esc close" => {
+            "Enter anzeigen · p hier fortsetzen · x beenden · Esc schließen"
+        }
+        "Main line" => "Hauptzweig",
+        "Start" => "Ursprung",
+        "the default branch and the lines it continues from stay open; continue on another line first" => {
+            "Der Standardzweig und die Zweige, aus denen er fortgeführt wird, bleiben offen; fahre zuerst auf einem anderen Zweig fort"
+        }
+        "The old default branch stays open and keeps the lines it opened. The root keeps its own right to open a line in either direction." => {
+            "Der bisherige Standardzweig bleibt offen und behält die Zweige, die er geöffnet hat. Die Wurzel behält ihr eigenes Recht, in beide Richtungen einen Zweig zu öffnen."
+        }
+        "The old default branch stays open and keeps the lines it opened. The two lines swap the right to open a line." => {
+            "Der bisherige Standardzweig bleibt offen und behält die Zweige, die er geöffnet hat. Die beiden Zweige tauschen das Recht, einen zu öffnen."
         }
         "This session has no lines." => "Diese Sitzung hat keine Zweige.",
         "No matching lines." => "Keine passenden Zweige.",
@@ -613,6 +624,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "Sofort senden fehlgeschlagen: {error}; der Entwurf bleibt erhalten"
         }
+        "Send now failed: {error}" => "Sofort senden fehlgeschlagen: {error}",
         "Send now cancelled; the draft was kept" => {
             "Sofort senden abgebrochen; der Entwurf bleibt erhalten"
         }
@@ -635,6 +647,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Bei Auswahl Shift+Tab zum neueren Ziel · Esc zurück zur Eingabe"
         }
         "(shift+tab to cycle)" => "(Shift+Tab zum Wechseln)",
+        "Permission unavailable" => "Berechtigung nicht verfügbar",
         "Fullscreen" => "Vollbild",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown scrollen · Home/End Anfang/Ende (bei leerem Entwurf) · Tab Nachricht wählen, e bearbeiten, q zitieren"
