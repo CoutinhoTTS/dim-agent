@@ -17,6 +17,8 @@ Identify the parts that are Capabilities.
 Affected inputs, outputs, events, state, errors and public dependencies. Link the owners' contracts.
 For changed events, explain their meaning, correlation and compatibility. Describe affected recovery
 and lifecycle behavior under the existing contracts. Distinguish existing promises from proposed changes.
+For each owner, answer the [design rules §7.1](../architecture/rust-agent/principles.md#71-设计三问)
+questions: its resources, their lifecycle and the operations callers need.
 
 ## Verification
 

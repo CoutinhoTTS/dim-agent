@@ -3,8 +3,9 @@
 Use this shape when an existing owner's public surface is redesigned under
 [design rules §7](../architecture/rust-agent/principles.md#7-所有者与操作). It has two parts. The design
 part is durable and goes into the owner's design document, `docs/design/plugins/<Owner>.md`,
-created from the [design template](design.md) when it does not exist. The delivery part is
-temporary and goes into the owner's issue.
+created from the [design template](design.md) when it does not exist. A plugin with several owners
+has one document per owner, each listed in `docs/design/plugins/README.md`. The delivery part is
+temporary and goes into the owner's issue. A new owner uses the [design template](design.md) alone.
 
 Write conclusions first. Name things directly instead of referring back. Do not restate rules or
 describe how the document was produced. Link evidence next to the claim it supports.
@@ -40,7 +41,9 @@ creates, holds, hands over and cleans up the object, and what happens when any s
 
 ### Exceptions with reasons
 
-One line each.
+One line each, only for a deviation §7 allows, such as an object handed out with its shared
+lifecycle design. A current shape that differs from §7 is a gap for the delivery part, not an
+exception.
 
 ### Rule check and requirements raised to mechanism owners
 
@@ -48,7 +51,9 @@ As in the [design template](design.md).
 
 ### Binding appendix
 
-The `#[rutis::service]` block on the owner type, and the request, reply and error types.
+The `#[rutis::service]` block on the owner type for the owner's own face; for what the owner
+registers with a mechanism registration point, the registration call instead. Then the request,
+reply and error types.
 
 ## Delivery part
 
