@@ -159,11 +159,9 @@ ModelFailure {
   which holds each client call until the finish part and releases it directly
   before the terminal, so the bridge reaches the terminal on the read right
   after the failed call even when the adapter queued them in separate events,
-  as the Responses adapter does. A raw adapter stream that does not pass
-  through strict, where the finish reason comes from a later event than the
-  call, is the fallback case: the bridge reads on until a short fixed deadline
-  measured from the failure, so the request is not held open for a part that
-  may never arrive.
+  as the Responses adapter does. The bridge reads only the parts the stream
+  has already delivered there, so a failure never waits for a part that may
+  never arrive.
 - A reply that stops with an end-turn finish and carries no non-whitespace text
   and no tool call writes `failure.kind = malformed_response` with the reason
   "the response had no text and no tool call". Thinking alone is not an answer,
