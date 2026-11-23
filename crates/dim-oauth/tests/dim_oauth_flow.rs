@@ -8,7 +8,7 @@ mod oauth;
 use dim_agent_capabilities::{
     adapters::EchoModel,
     defaults,
-    file_storage::{FileStorage, FileStorageError, FileStoragePlugin},
+    file_storage::{FileLease, FileStorage, FileStorageError, FileStoragePlugin},
     history::HistoryRenderer,
     host::{
         HostError, HostFuture, ModalityConnectionHost, ModalityTarget, ModelConnection,
@@ -64,6 +64,23 @@ impl DynPlugin for Capture {
         Box::pin(async move {
             let owner = ctx.require_at(&owner_key())?;
             let _ = self.0.set(owner);
+            Ok(Effect::Done)
+        })
+    }
+}
+
+struct ProviderCapture(Arc<OnceLock<Arc<dyn ManagedProvider>>>);
+impl DynPlugin for ProviderCapture {
+    fn name(&self) -> &str {
+        "capture-managed-provider"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![TypeKey::of::<dyn ManagedProvider>()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let provider = ctx.require::<dyn ManagedProvider>()?;
+            let _ = self.0.set(provider);
             Ok(Effect::Done)
         })
     }
@@ -694,9 +711,8 @@ async fn a_new_session_sees_an_account_change_another_server_wrote() {
         cn: "cn-client".into(),
     };
 
-    // Start the observing server first and let it write the signed-out record
-    // under the account lease, so its watch holds that observation before the
-    // other server signs in.
+    // Start the observing server first and wait for its startup observation,
+    // so its watch holds that reading before the other server signs in.
     let (model, mut requests) = tokio::sync::mpsc::unbounded_channel();
     let model = Arc::new(RecordingModel(model));
     let mut second_builder = AgentBuilder::new(AgentConfig::default());
@@ -704,6 +720,10 @@ async fn a_new_session_sees_an_account_change_another_server_wrote() {
     defaults::mock_hosts_with_model(&mut second_builder, HistoryRenderer::default(), model);
     let capture = second_capture.clone();
     second_builder.plugin(move |_| Ok(Box::new(Capture(capture.clone())) as Box<dyn DynPlugin>));
+    let second_provider = Arc::new(OnceLock::new());
+    let capture = second_provider.clone();
+    second_builder
+        .plugin(move |_| Ok(Box::new(ProviderCapture(capture.clone())) as Box<dyn DynPlugin>));
     let second = serve(
         second_builder,
         ServerConfig {
@@ -717,13 +737,17 @@ async fn a_new_session_sees_an_account_change_another_server_wrote() {
     )
     .await
     .unwrap();
+    let mut observing = second_provider
+        .get()
+        .expect("the observing server's managed provider was not captured")
+        .subscribe_account();
     tokio::time::timeout(Duration::from_secs(10), async {
-        while !home.join("auth.json").exists() {
-            tokio::task::yield_now().await;
+        while *observing.borrow_and_update() != Some(false) {
+            observing.changed().await.unwrap();
         }
     })
     .await
-    .expect("the signed-out account record was not written");
+    .expect("the observing server did not publish a signed-out account");
 
     let mut first_builder = AgentBuilder::new(AgentConfig::default());
     defaults::install(&mut first_builder);
@@ -1491,6 +1515,143 @@ async fn corrupt_records_reset_once_with_a_backup_and_unknown_schema_is_kept() {
         assert_eq!(error.code, "account_unsupported_schema");
     }
     assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), unknown);
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// Holds the account lease from outside the server, as another process's
+/// account writer does. The root keeps its FileStorage alive while the lease
+/// is held.
+async fn hold_account_lease(home: &Path) -> (Ctx, FileLease) {
+    let root = Ctx::root().unwrap();
+    let view = root.plugin(FileStoragePlugin::new(vec![home.to_path_buf()]));
+    active(&view).await;
+    let files = root.get::<FileStorage>().unwrap();
+    let path = files.path(0, "auth.json").unwrap();
+    let held = files.lock(&path, &cancel()).await.unwrap();
+    (root, held)
+}
+
+/// The startup observation leaves an empty home signed out without creating
+/// `auth.json`: a missing Dim record is published, not persisted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_empty_home_starts_signed_out_without_creating_the_account_file() {
+    let home = home();
+    let Process { root, .. } = process(&home).await;
+    let mut account = root
+        .get::<dyn ManagedProvider>()
+        .unwrap()
+        .subscribe_account();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *account.borrow_and_update() != Some(false) {
+            account.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the store never published its initialized observation");
+    assert!(
+        !home.join("auth.json").exists(),
+        "the startup observation created the account file"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// A shared `auth.json` that an external writer populated while the startup
+/// observation waited for the account lease keeps its bytes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_startup_observation_does_not_overwrite_a_shared_account_file() {
+    let home = home();
+    let (_holding, held) = hold_account_lease(&home).await;
+    let Process { root, .. } = process(&home).await;
+    let shared = serde_json::to_vec(&json!({"otherProvider":{"secret":"kept"}})).unwrap();
+    std::fs::write(home.join("auth.json"), &shared).unwrap();
+    drop(held);
+    let mut account = root
+        .get::<dyn ManagedProvider>()
+        .unwrap()
+        .subscribe_account();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *account.borrow_and_update() != Some(false) {
+            account.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the store never published its initialized observation");
+    assert_eq!(
+        std::fs::read(home.join("auth.json")).unwrap(),
+        shared,
+        "the startup observation replaced the shared account file"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The account observation a new Session or a Settings change triggers
+/// publishes the stored state without creating or rewriting `auth.json`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_account_observation_does_not_create_the_account_file() {
+    let home = home();
+    let Process { root, .. } = process(&home).await;
+    let shared = serde_json::to_vec(&json!({"otherProvider":{"secret":"kept"}})).unwrap();
+    std::fs::write(home.join("auth.json"), &shared).unwrap();
+    let provider = root.get::<dyn ManagedProvider>().unwrap();
+    provider.observe_account(PROVIDER).await.unwrap();
+    let mut account = provider.subscribe_account();
+    assert_eq!(
+        *account.borrow_and_update(),
+        Some(false),
+        "the observation published the shared file's signed-out state"
+    );
+    assert_eq!(
+        std::fs::read(home.join("auth.json")).unwrap(),
+        shared,
+        "the account observation rewrote the shared account file"
+    );
+    root.shutdown().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+/// The background account paths leave a legacy record's bytes alone: neither
+/// the startup observation nor the renewal task normalizes `auth.json`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_legacy_account_record_is_not_rewritten_in_the_background() {
+    let home = home();
+    let (_holding, held) = hold_account_lease(&home).await;
+    let Process { root, .. } = process(&home).await;
+    let legacy = serde_json::to_vec(&json!({
+        "nextApiOauth": {
+            "type": "oauth",
+            "access": "legacy-access",
+            "refresh": "legacy-refresh",
+            "clientId": "legacy-client",
+            "expires": 4102444800000u64,
+            "issuer": "https://dimcode.cn",
+            "tokenEndpoint": "https://dimcode.cn/oauth/token",
+            "authorizationEndpoint": "https://dimcode.cn/oauth/authorize",
+            "relayBaseUrl": "https://dimcode.cn/v1",
+        },
+        "otherProvider": {"secret": "kept"},
+    }))
+    .unwrap();
+    std::fs::write(home.join("auth.json"), &legacy).unwrap();
+    drop(held);
+    let mut account = root
+        .get::<dyn ManagedProvider>()
+        .unwrap()
+        .subscribe_account();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *account.borrow_and_update() != Some(false) {
+            account.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("the store never published its initialized observation");
+    assert_eq!(
+        std::fs::read(home.join("auth.json")).unwrap(),
+        legacy,
+        "the background account paths rewrote the legacy account record"
+    );
     root.shutdown().await.unwrap();
     std::fs::remove_dir_all(home).unwrap();
 }

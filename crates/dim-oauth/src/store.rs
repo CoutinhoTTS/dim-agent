@@ -918,4 +918,18 @@ mod tests {
         root.shutdown().await.unwrap();
         std::fs::remove_dir_all(home).unwrap();
     }
+
+    /// The publication decision validates the record: a `tokenDigest` that
+    /// does not match its grant is not a signed-in account.
+    #[test]
+    fn a_digest_mismatch_is_not_published_as_signed_in() {
+        let mut doc = signed_in_document();
+        assert_eq!(signed_in(doc.as_object().unwrap()), Some(true));
+        doc["dimAccountState"]["tokenDigest"] = json!("0".repeat(64));
+        assert_eq!(
+            signed_in(doc.as_object().unwrap()),
+            None,
+            "a record whose digest does not match its grant was published signed in"
+        );
+    }
 }
