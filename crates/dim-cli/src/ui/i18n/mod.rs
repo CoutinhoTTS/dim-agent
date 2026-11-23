@@ -119,6 +119,7 @@ mod tests {
                 "Message queued",
                 "Ctrl+Enter interrupt and send now: the draft and every held message, as one message",
                 "Send now failed: {error}; the draft was kept",
+                "Send now failed: {error}",
                 "Send now cancelled; the draft was kept",
                 "Send now is still stopping the run; the draft was kept",
                 "Send now is stopping the run; paste again when the draft is sent",

@@ -37,8 +37,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Running" => "En cours",
         "Lines" => "Lignes",
-        "Enter show the line · x end it · Esc close" => {
-            "Enter afficher la ligne · x la terminer · Esc fermer"
+        "Enter show · p continue from here · x end it · Esc close" => {
+            "Enter afficher · p continuer ici · x terminer · Esc fermer"
+        }
+        "Main line" => "ligne principale",
+        "Start" => "origine",
+        "the default branch and the lines it continues from stay open; continue on another line first" => {
+            "La branche par défaut et les lignes dont elle continue restent ouvertes ; continuez d'abord sur une autre ligne"
+        }
+        "The old default branch stays open and keeps the lines it opened. The root keeps its own right to open a line in either direction." => {
+            "L'ancienne branche par défaut reste ouverte et conserve les lignes qu'elle a ouvertes. La racine garde son propre droit d'ouvrir une ligne dans les deux sens."
+        }
+        "The old default branch stays open and keeps the lines it opened. The two lines swap the right to open a line." => {
+            "L'ancienne branche par défaut reste ouverte et conserve les lignes qu'elle a ouvertes. Les deux lignes échangent le droit d'en ouvrir une."
         }
         "This session has no lines." => "Cette session n'a aucune ligne.",
         "No matching lines." => "Aucune ligne correspondante.",
@@ -605,6 +616,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "Échec de l’envoi immédiat : {error} ; le brouillon est conservé"
         }
+        "Send now failed: {error}" => "Échec de l’envoi immédiat : {error}",
         "Send now cancelled; the draft was kept" => {
             "Envoi immédiat annulé ; le brouillon est conservé"
         }
@@ -627,6 +639,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Sélection active : Shift+Tab vers une cible plus récente · Esc retour à la saisie"
         }
         "(shift+tab to cycle)" => "(Shift+Tab pour changer)",
+        "Permission unavailable" => "Autorisation indisponible",
         "Fullscreen" => "Plein écran",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown défiler · Home/End haut ou bas (brouillon vide) · Tab choisir un message, e modifier, q citer"

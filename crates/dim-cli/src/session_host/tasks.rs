@@ -2,7 +2,7 @@
 
 use std::collections::{HashSet, VecDeque};
 
-use dim_agent_types::BranchCreateFailedData;
+use dim_agent_types::{BranchCreateFailedData, ROOT_BRANCH_ID};
 
 use super::*;
 use crate::model::view::{MemberTarget, TaskKind};
@@ -95,6 +95,9 @@ impl Worker {
         self.context_stale = false;
         self.cursors.clear();
         self.tool_origins.clear();
+        self.default_branch = ROOT_BRANCH_ID.into();
+        self.line_configurations.clear();
+        self.unreadable_line = None;
         self.focus = DEFAULT_BRANCH_ID.into();
         self.side = None;
         self.lines.clear();
@@ -208,7 +211,7 @@ impl Worker {
             .expect("discovered branch");
         history.ended |= matches!(event.content, EventContent::BranchEnd(_));
         let mut unread_changed = false;
-        if branch_id != DEFAULT_BRANCH_ID
+        if branch_id != self.default_branch
             && event.sequence > applied.max(history.latest_reply)
             && matches!(&event.content, EventContent::Text(data) if !data.delta.trim().is_empty())
         {
@@ -241,11 +244,11 @@ impl Worker {
         self.changed();
     }
 
-    pub(super) fn earlier(&mut self) {
+    pub(super) fn earlier(&mut self, line: &str) {
         if self.earlier_member() {
             return;
         }
-        let Some(history) = self.task_history.get_mut(&self.focus) else {
+        let Some(history) = self.task_history.get_mut(line) else {
             return;
         };
         if !history.done || history.earlier == EarlierRead::Reading {
@@ -258,7 +261,7 @@ impl Worker {
         history.earlier = EarlierRead::Reading;
         history.window_complete = false;
         history.error = None;
-        self.task_history_queue.push_back(self.focus.clone());
+        self.task_history_queue.push_back(line.to_owned());
     }
 
     /// Whether the view `earlier()` would act on has older history to read.
@@ -365,7 +368,7 @@ impl Worker {
                 "This daemon cannot read a bounded transcript window; update the daemon".into(),
             );
         }
-        let (stage, method, params) = if branch_id != DEFAULT_BRANCH_ID
+        let (stage, method, params) = if branch_id != self.default_branch
             && !self.lines.contains_key(&branch_id)
             && !self.task_history[&branch_id].window_complete
         {
@@ -602,7 +605,7 @@ impl Worker {
                 if history.earlier == EarlierRead::Reading {
                     history.earlier = EarlierRead::Failed;
                 }
-                let fatal = request.branch_id == DEFAULT_BRANCH_ID && !history.done;
+                let fatal = request.branch_id == self.default_branch && !history.done;
                 let report = crate::report::Captured::observed(
                     crate::report::Operation::SessionRead,
                     code.as_deref(),
@@ -647,6 +650,43 @@ impl Worker {
             }
         }
         self.changed();
+        // A display transcript omits `context/configured`, and a bounded window
+        // can start after it: the shown line's configuration is read through
+        // `session.model.get` once its window is ready, unless a later fact
+        // already set it (design §14). A server without the read names no
+        // configuration, and the reply's is the root's, so the line carries
+        // no model until a fact or a move supplies one.
+        if window_ready
+            && self.model.is_none()
+            && request.branch_id == self.default_branch
+            && self.default_branch != ROOT_BRANCH_ID
+        {
+            let through = self
+                .task_history
+                .get(&request.branch_id)
+                .and_then(|history| history.window.through);
+            if let Some((cutoff, configuration)) =
+                self.line_configuration(&request.branch_id, through).await
+                && request.branch_id == self.default_branch
+                && cutoff > self.model_through
+            {
+                self.model_through = cutoff;
+                if let Some(configuration) = configuration {
+                    self.model = Some(configuration.clone());
+                    self.line_configurations.insert(
+                        request.branch_id.clone(),
+                        LineConfiguration {
+                            sequence: cutoff,
+                            configuration: configuration.clone(),
+                        },
+                    );
+                    self.send(Update::Ready(configuration));
+                }
+            }
+            if self.model.is_none() {
+                self.send(Update::NoModel);
+            }
+        }
         if window_ready {
             self.publish();
         }
@@ -803,7 +843,7 @@ impl Worker {
                 format!("member {session_id}"),
                 "session.stop",
                 json!({
-                    "sessionId": session_id, "branchId": DEFAULT_BRANCH_ID, "reason": "stopped by the user",
+                    "sessionId": session_id, "reason": "stopped by the user",
                 }),
             ),
             TaskKind::Member(MemberTarget::Starting | MemberTarget::Provider) => {
@@ -967,7 +1007,7 @@ mod tests {
             "the loaded window has older history"
         );
 
-        worker.earlier();
+        worker.earlier("main");
         assert_eq!(
             worker.earlier_view(),
             Earlier::Reading,
@@ -981,7 +1021,7 @@ mod tests {
             Earlier::Unread,
             "a failed earlier read leaves the older history to read"
         );
-        worker.earlier();
+        worker.earlier("main");
         assert_eq!(
             worker.task_history["main"].earlier,
             EarlierRead::Reading,
@@ -1016,7 +1056,7 @@ mod tests {
         }
         worker.apply("b-7c", event(300, "r-loaded", "the answer loaded first"));
 
-        worker.earlier();
+        worker.earlier("b-7c");
         worker.poll_task_history().await.unwrap();
         fail(&mut worker, "the earlier read").await;
 
@@ -1092,7 +1132,7 @@ mod tests {
             history.window.before = Some(200);
             history.window.through = Some(300);
         }
-        worker.earlier();
+        worker.earlier("b-7c");
         worker.poll_task_history().await.unwrap();
         {
             let history = worker.task_history.get_mut("b-7c").unwrap();
@@ -1170,7 +1210,7 @@ mod tests {
             history.window.before = Some(7);
             history.window.through = Some(9);
         }
-        worker.earlier();
+        worker.earlier("main");
         worker.poll_task_history().await.unwrap();
         fail(&mut worker, "the earlier read").await;
 
@@ -1186,7 +1226,7 @@ mod tests {
             "the retried read is the earlier read the window still holds"
         );
         worker.task_history_queue.clear();
-        worker.earlier();
+        worker.earlier("main");
         assert!(
             worker.task_history_queue.is_empty(),
             "a press during the retried read queues nothing"
@@ -1240,7 +1280,7 @@ mod tests {
             "the line's window starts after its start, so the cut counts nothing"
         );
 
-        worker.earlier();
+        worker.earlier("b-7c");
         assert_eq!(worker.earlier_view(), Earlier::Reading);
         worker.poll_task_history().await.unwrap();
         answer(
@@ -1414,7 +1454,7 @@ mod tests {
         );
 
         worker.task_history.get_mut("b-7c").unwrap().done = true;
-        worker.earlier();
+        worker.earlier("b-7c");
         assert_eq!(worker.earlier_view(), Earlier::Reading);
         worker.poll_task_history().await.unwrap();
         answer(
@@ -1515,7 +1555,7 @@ mod tests {
         );
 
         worker.task_history.get_mut("b-7c").unwrap().done = true;
-        worker.earlier();
+        worker.earlier("b-7c");
         worker.poll_task_history().await.unwrap();
         answer(
             &mut worker,
@@ -1657,7 +1697,7 @@ mod tests {
         worker.task_history_queue.clear();
         worker.task_history.get_mut("b-7c").unwrap().done = true;
 
-        worker.earlier();
+        worker.earlier("b-7c");
         for (first, count) in [(321, 10), (301, 20), (271, 30)] {
             worker.poll_task_history().await.unwrap();
             answer(
@@ -1694,7 +1734,7 @@ mod tests {
             Earlier::Unread,
             "the dropped page is the earlier history left to read"
         );
-        worker.earlier();
+        worker.earlier("b-7c");
         worker.poll_task_history().await.unwrap();
         answer(&mut worker, transcript_page(asked_page(11, 250), 11, true)).await;
         assert_eq!(
