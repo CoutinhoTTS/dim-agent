@@ -1436,37 +1436,54 @@ impl Owner {
         // C5, Pursuit §4.1). Nothing before the append is undone when the
         // writer gives up: a superseded pause only leaves what it never
         // touched.
-        let status = match &record {
-            Record::Stated(status) => status.clone(),
+        let (status, decided) = match &record {
+            Record::Stated(status) => (status.clone(), None),
             Record::TurnEndPause { .. } | Record::ConclusionPause { .. } => {
                 let decided = self
                     .decide_committed(CatchUp::Live, |state, _| {
                         if state.fold.last_change > after || after < state.recorded {
                             return None;
                         }
-                        record.pause(state, after)
+                        let reason = record.pause(state, after)?;
+                        Some((
+                            reason,
+                            state.fold.objective.clone(),
+                            state.fold.judge,
+                            state.fold.live,
+                        ))
                     })
                     .await?;
-                let Some(reason) = decided else {
+                let Some((reason, objective, judge, live)) = decided else {
                     return Ok(());
                 };
-                Some(text::State::Paused(reason.to_owned()))
+                (
+                    Some(text::State::Paused(reason.to_owned())),
+                    Some((objective, judge, live)),
+                )
             }
         };
-        let (objective, status, judge, live) = {
-            let state = self.state.lock().unwrap();
-            if state.fold.last_change > after
-                || after < state.recorded
-                || (!answer && !state.fold.running())
-            {
-                return Ok(());
+        let (objective, status, judge, live) = match decided {
+            Some((objective, judge, live)) => (
+                objective,
+                status.expect("an automatic record states the pause it decided"),
+                judge,
+                live,
+            ),
+            None => {
+                let state = self.state.lock().unwrap();
+                if state.fold.last_change > after
+                    || after < state.recorded
+                    || (!answer && !state.fold.running())
+                {
+                    return Ok(());
+                }
+                (
+                    state.fold.objective.clone(),
+                    status.unwrap_or_else(|| state.fold.state.clone()),
+                    state.fold.judge,
+                    state.fold.live,
+                )
             }
-            (
-                state.fold.objective.clone(),
-                status.unwrap_or_else(|| state.fold.state.clone()),
-                state.fold.judge,
-                state.fold.live,
-            )
         };
         let operation = match &status {
             text::State::Active => "resume",
@@ -1486,7 +1503,7 @@ impl Owner {
         );
         let business = recovery::BusinessState::new(operation, objective, status, judge, None);
         self.append_business(vec![input], business, None)?;
-        {
+        let previous = {
             let mut state = self.state.lock().unwrap();
             state.written.insert(after);
             state.recorded = state.recorded.max(after);
@@ -1495,6 +1512,17 @@ impl Owner {
             // every fact that arrives before it out of a second record, while the
             // fold still has to consume the record that was just written.
             state.terminating = true;
+            if answer {
+                None
+            } else {
+                state.decisions.cancel();
+                state.decisions = CancellationToken::new();
+                Some(std::mem::take(&mut state.decision_tasks))
+            }
+        };
+        if let Some(previous) = previous {
+            previous.close();
+            previous.wait().await;
         }
         let ended = async {
             self.await_fold().await?;
@@ -1502,6 +1530,9 @@ impl Owner {
         }
         .await;
         self.state.lock().unwrap().terminating = false;
+        if !answer {
+            self.settle();
+        }
         ended
     }
 
@@ -2260,7 +2291,8 @@ impl Owner {
                 state.fold.ended.contains(&evaluator)
                     || state.fold.failed.contains(&evaluator)
                     || !(state.fold.conclusions.contains_key(&evaluation)
-                        || !state.fold.is_current(evaluation))
+                        || !state.fold.is_current(evaluation)
+                        || !state.fold.running())
             };
             if settled {
                 continue;
@@ -2275,7 +2307,8 @@ impl Owner {
                         let state = owner.state.lock().unwrap();
                         state.fold.ended.contains(&evaluator)
                             || !(state.fold.conclusions.contains_key(&evaluation)
-                                || !state.fold.is_current(evaluation))
+                                || !state.fold.is_current(evaluation)
+                                || !state.fold.running())
                     };
                     if owner.stopped() || skip {
                         return Ok(());
