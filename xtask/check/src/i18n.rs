@@ -937,4 +937,176 @@ mod tests {
             "{error}"
         );
     }
+
+    /// An inline module does not see a constant outside it, so a name it does
+    /// not declare is not read as one.
+    #[test]
+    fn a_module_does_not_read_a_constant_outside_it() {
+        let text = "const HINT: &str = \"Outer key\";\n\nmod inner {\n    fn draw() {\n        let a = t(HINT);\n    }\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(
+            keys.keys,
+            Vec::new(),
+            "a module does not see an outer constant"
+        );
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// A `use` that imports a name hides a constant of that name in the scope
+    /// it is written in.
+    #[test]
+    fn a_use_import_hides_a_constant_of_the_same_name() {
+        let text = "const HINT: &str = \"Outer key\";\n\nfn draw() {\n    use crate::other::HINT;\n    let a = t(HINT);\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "an imported name is not a constant");
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// `use ... as` binds the new name, and `use ...::{self}` binds the parent
+    /// segment.
+    #[test]
+    fn a_use_rename_and_a_self_import_hide_a_constant() {
+        let renamed = call_keys(
+            "const HINT: &str = \"Outer key\";\n\nfn draw() {\n    use other::B as HINT;\n    let a = t(HINT);\n}\n",
+            "src.rs",
+        )
+        .unwrap();
+        assert_eq!(
+            renamed.keys,
+            Vec::new(),
+            "a renamed import is not a constant"
+        );
+        assert_eq!(renamed.unreadable, vec!["src.rs:5".to_owned()]);
+
+        let parent = call_keys(
+            "const HINT: &str = \"Outer key\";\n\nfn draw() {\n    use other::HINT::{self};\n    let a = t(HINT);\n}\n",
+            "src.rs",
+        )
+        .unwrap();
+        assert_eq!(parent.keys, Vec::new(), "`self` binds the parent segment");
+        assert_eq!(parent.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// A glob import may bring a constant into the scope, so an outer name is
+    /// not read there; a constant the same scope declares still is.
+    #[test]
+    fn a_glob_import_hides_an_outer_constant_but_not_a_local_one() {
+        let text = "const OUTER: &str = \"Outer key\";\n\nfn draw() {\n    use other::*;\n    let a = t(OUTER);\n}\n\nmod kept {\n    const LOCAL: &str = \"Local key\";\n    use other::*;\n\n    fn draw() {\n        let b = t(LOCAL);\n    }\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(
+            keys.keys,
+            vec![("Local key".to_owned(), "src.rs:13".to_owned())]
+        );
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// A static declared outside the function hides a constant of the same
+    /// name in the module.
+    #[test]
+    fn a_foreign_static_hides_a_constant_of_the_same_name() {
+        let text = "const HINT: &str = \"Outer key\";\n\nextern \"C\" {\n    static HINT: i32;\n}\n\nfn draw() {\n    let a = t(HINT);\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "a foreign static is not a constant");
+        assert_eq!(keys.unreadable, vec!["src.rs:8".to_owned()]);
+    }
+
+    /// A static in a block hides a constant of the same name there.
+    #[test]
+    fn a_local_static_hides_a_constant_of_the_same_name() {
+        let text = "const HINT: &str = \"Outer key\";\n\nfn draw() {\n    static HINT: &str = \"A static\";\n    let a = t(HINT);\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "a static is not a constant");
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// An `if let` binding hides a constant in the `then` branch; the `else`
+    /// branch is outside the binding and still reads the constant.
+    #[test]
+    fn an_if_let_binding_hides_a_constant_and_the_else_branch_reads_it() {
+        let text = "const HINT: &str = \"Kept\";\n\nfn draw(x: Option<&str>) {\n    let a = if let Some(HINT) = x {\n        t(HINT)\n    } else {\n        t(HINT)\n    };\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, vec![("Kept".to_owned(), "src.rs:7".to_owned())]);
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// A `while let` binding hides a constant in the body only.
+    #[test]
+    fn a_while_let_binding_hides_a_constant() {
+        let text = "const HINT: &str = \"Kept\";\n\nfn draw(mut it: It) {\n    while let Some(HINT) = it.next() {\n        t(HINT);\n    }\n    t(HINT);\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, vec![("Kept".to_owned(), "src.rs:7".to_owned())]);
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// A `for` binding hides a constant in the body, not in the expression its
+    /// loop iterates.
+    #[test]
+    fn a_for_binding_does_not_hide_a_constant_from_its_iterable() {
+        let text = "const HINT: &str = \"Kept\";\n\nfn draw() {\n    for HINT in [t(HINT)] {\n        t(HINT);\n    }\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, vec![("Kept".to_owned(), "src.rs:4".to_owned())]);
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// A `match` arm binds its pattern for the arm body; a binding an `if let`
+    /// guard introduces stays inside the guard.
+    #[test]
+    fn a_match_arm_binding_hides_a_constant_and_a_guard_binding_stays_inside() {
+        let text = "const HINT: &str = \"Kept\";\n\nfn draw(x: Option<&str>) {\n    if let Some(HINT) = x {\n        t(HINT);\n    }\n    match x {\n        Some(v) if let Some(HINT) = v => t(HINT),\n        Some(HINT) => t(HINT),\n        _ => t(HINT),\n    };\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(
+            keys.keys,
+            vec![
+                ("Kept".to_owned(), "src.rs:9".to_owned()),
+                ("Kept".to_owned(), "src.rs:11".to_owned()),
+            ]
+        );
+        assert_eq!(
+            keys.unreadable,
+            vec!["src.rs:5".to_owned(), "src.rs:10".to_owned()]
+        );
+    }
+
+    /// A binding on both sides of a subpattern hides a constant, including the
+    /// names the subpattern binds.
+    #[test]
+    fn a_binding_at_a_subpattern_hides_a_constant() {
+        let text = "const INNER: &str = \"Kept\";\n\nfn draw(x: Option<Option<&str>>) {\n    if let HINT @ Some(INNER) = x {\n        t(HINT);\n        t(INNER);\n    }\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "both bindings hide the constant");
+        assert_eq!(
+            keys.unreadable,
+            vec!["src.rs:5".to_owned(), "src.rs:6".to_owned()]
+        );
+    }
+
+    /// A pattern macro may bind a name the scan cannot see, so no outer name is
+    /// read after it.
+    #[test]
+    fn a_pattern_macro_hides_a_constant() {
+        let text = "const HINT: &str = \"Outer key\";\n\nfn draw(value: Value) {\n    let bound!(HINT) = value;\n    let a = t(HINT);\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "a pattern macro may bind the name");
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// A macro in statement position may declare a name the scan cannot see,
+    /// so no outer name is read after it.
+    #[test]
+    fn a_statement_macro_hides_a_constant() {
+        let text = "const HINT: &str = \"Outer key\";\n\nfn draw() {\n    bind_hint!(HINT);\n    let a = t(HINT);\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "a statement macro may bind the name");
+        assert_eq!(keys.unreadable, vec!["src.rs:5".to_owned()]);
+    }
+
+    /// A translation call inside a `macro_rules!` definition is one argument
+    /// the scan cannot read, not a silent skip.
+    #[test]
+    fn a_translation_call_inside_a_macro_rules_definition_is_counted() {
+        let text = "fn draw() {\n    macro_rules! warn_row {\n        () => {\n            t(\"Macro rules key\")\n        };\n    }\n}\n";
+        let keys = call_keys(text, "src.rs").unwrap();
+        assert_eq!(keys.keys, Vec::new(), "no key is read from a definition");
+        assert_eq!(keys.unreadable, vec!["src.rs:2".to_owned()]);
+    }
 }
