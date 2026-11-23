@@ -1211,18 +1211,20 @@ async fn a_strict_responses_stream_delivers_a_cut_call_next_to_its_filter() {
         tokio_util::task::TaskTracker::new().token(),
     );
     let chunks = stream.collect::<Vec<_>>().await;
-    let seen = seen.lock().unwrap();
-    assert!(
-        matches!(
-            seen.as_slice(),
-            [
-                ..,
-                Seen::ToolCall,
-                Seen::Finish(FinishReasonUnified::ContentFilter)
-            ]
-        ),
-        "the terminal was not handed over right after the cut call: {seen:?}"
-    );
+    {
+        let seen = seen.lock().unwrap();
+        assert!(
+            matches!(
+                seen.as_slice(),
+                [
+                    ..,
+                    Seen::ToolCall,
+                    Seen::Finish(FinishReasonUnified::ContentFilter)
+                ]
+            ),
+            "the terminal was not handed over right after the cut call: {seen:?}"
+        );
+    }
     assert!(
         !chunks
             .iter()
