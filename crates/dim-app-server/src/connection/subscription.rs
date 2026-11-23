@@ -518,9 +518,19 @@ impl Connection {
                     )
                     .await?;
                 configuration_outcome(outcome)?;
-                provider
-                    .retain_startup(&session, &route.model)
-                    .map_err(provider_error)?;
+                if let Err(error) = provider.retain_startup(&session, &route.model) {
+                    let rollback = session
+                        .configure(
+                            dim_agent_runtime::ConfigureUpdate {
+                                model: Some(model),
+                                ..Default::default()
+                            },
+                            ROOT_BRANCH_ID,
+                        )
+                        .await?;
+                    configuration_outcome(rollback)?;
+                    return Err(provider_error(error));
+                }
                 record.info.sequence = session.sequence(ROOT_BRANCH_ID)?;
                 if record.default_branch.branch_id == ROOT_BRANCH_ID {
                     record.default_branch.sequence = record.info.sequence;
