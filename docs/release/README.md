@@ -108,7 +108,9 @@ argument such as `() => {}`, as a unit-test mock uses, fails with TS2345. Pass
 `async () => {}` instead. Handlers registered through
 `managementMethods.register` or `sessionMethods.register` receive the same
 callback at runtime. Awaiting it orders the host's send attempts and does not
-acknowledge client delivery; the host can drop a notice. The
+acknowledge client delivery; the App Server's progress allowance can drop a
+notice while the call still resolves, whereas a frame over the rutis session's
+transfer limit fails the call and rejects the promise. The
 [authoring guide](../typescript-plugin-authoring.md#session-tools-and-client-methods)
 states the callback's delivery and rejection behaviour. There is no App Server
 protocol, event or persistence-format change.
