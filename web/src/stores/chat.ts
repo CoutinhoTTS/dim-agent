@@ -99,6 +99,10 @@ type Channel = {
   states: Map<string, { running: boolean; stopping: boolean }>
   /** The newest move the server accepted; a completion older than it is stale. */
   moves: number
+  /** The session's directory has been read once: the centre and every line it names are known. */
+  directoryRead: boolean
+  /** The retry reading the centre, so a second click and a resync never read beside it. */
+  retrying: Promise<void> | undefined
   /** While `syncing`, every notification waits here so history applies first. */
   syncing: boolean
   queued: Notification[]
@@ -171,6 +175,8 @@ export const useChatStore = defineStore("chat", () => {
       lines: new Lines(),
       states: new Map(),
       moves: 0,
+      directoryRead: false,
+      retrying: undefined,
       syncing: false,
       queued: [],
       historyQueue: [],
@@ -193,6 +199,9 @@ export const useChatStore = defineStore("chat", () => {
     if (channel.syncing) return
     const { view } = channel
     channel.syncing = true
+    // A retry already reads the centre: this fuller read waits for it and then
+    // supersedes it, so the two never read the same line beside each other.
+    if (channel.retrying !== undefined) await channel.retrying
     channel.view.status = "loading"
     channel.states.clear()
     channel.queued = []
@@ -219,6 +228,7 @@ export const useChatStore = defineStore("chat", () => {
       }
       const directory = await client().call("session.branches", { sessionId: view.sessionId }, readBranches)
       channel.lines.directory(directory.branches)
+      channel.directoryRead = true
       // The centre is the default branch the directory reports: a resync that
       // discovers a move hands the stream over once, as a local move does.
       if (directory.defaultBranchId !== view.defaultBranchId) centre(channel, directory.defaultBranchId)
@@ -244,7 +254,11 @@ export const useChatStore = defineStore("chat", () => {
       // the model its own line adopted.
       const shown = ensureBranch(channel, centreId)
       if (centreId === ROOT_BRANCH_ID) shown.projection.model = model
-      await adoptModel(channel, centreId, shown)
+      try {
+        await adoptModel(channel, centreId, shown)
+      } catch {
+        // The model is the centre line's own read: a failure leaves it unset, not the page failed.
+      }
       await refreshGoal(channel)
       if (view.status === "failed") return
       const queued = channel.queued
@@ -273,6 +287,59 @@ export const useChatStore = defineStore("chat", () => {
       channel.queued = []
       publish(channel)
     }
+  }
+
+  /**
+   * Reads the accepted centre again after a failure, from the page that shows
+   * it: the line is read as `sync` reads it, never moved again, and the live
+   * events buffered on its stream stay buffered for that read. A Session whose
+   * directory has not been read yet has no centre to read: the retry repeats
+   * the whole attach instead.
+   */
+  async function readCentre(channel: Channel): Promise<void> {
+    const { view } = channel
+    if (!channel.directoryRead) {
+      await sync(channel)
+      return
+    }
+    const move = channel.moves
+    const centre = view.defaultBranchId
+    try {
+      const loaded = await loadHistory(channel, centre)
+      // A later move owns the centre, and its own reads decide what it shows.
+      if (channel.moves !== move) return
+      if (loaded !== "ok") {
+        if (loaded === "failed" && view.status !== "closed") {
+          view.status = "failed"
+          view.error = channel.main.error
+        }
+        return
+      }
+      await adoptModel(channel, centre, channel.main).catch(() => undefined)
+      if (channel.moves !== move || view.defaultBranchId !== centre) return
+      publish(channel)
+      const refreshed = await refreshGoal(channel, centre)
+      if (channel.moves !== move || view.defaultBranchId !== centre || !refreshed) return
+      const policy = await sessionPermission(view.sessionId, centre)
+      if (channel.moves !== move || view.defaultBranchId !== centre) return
+      showPermission(view, centre, policy)
+      view.status = "ready"
+      view.error = ""
+      publish(channel)
+    } catch (error) {
+      if (error instanceof RpcError && error.appError === "session_closed") view.status = "closed"
+      else if (!(error instanceof ConnectionLost)) {
+        view.status = "failed"
+        view.error = error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+
+  /** Retries the centre's reads from the failed page; one retry runs at a time. */
+  function retryCentre(sessionId: string): void {
+    const channel = channels.get(sessionId)
+    if (channel === undefined || channel.view.status !== "failed" || channel.retrying !== undefined) return
+    channel.retrying = readCentre(channel).catch(() => undefined).finally(() => { channel.retrying = undefined })
   }
 
   function receive(notification: Notification): void {
@@ -496,11 +563,11 @@ export const useChatStore = defineStore("chat", () => {
    * left the centre publishes nothing, and the centre that replaced it keeps
    * the refresh it already asked for.
    */
-  async function refreshGoal(channel: Channel, branchId = channel.view.defaultBranchId): Promise<void> {
-    if (!channel.view.methods.includes("session.goal.get")) return
+  async function refreshGoal(channel: Channel, branchId = channel.view.defaultBranchId): Promise<boolean> {
+    if (!channel.view.methods.includes("session.goal.get")) return true
     channel.goalDirty = true
     channel.goalLine = branchId
-    if (channel.goalRefreshing) return
+    if (channel.goalRefreshing) return true
     channel.goalRefreshing = true
     try {
       while (channel.goalDirty) {
@@ -515,9 +582,10 @@ export const useChatStore = defineStore("chat", () => {
           if (channel.view.defaultBranchId !== line) continue
           channel.view.status = "failed"
           channel.view.error = error instanceof Error ? error.message : String(error)
-          return
+          return false
         }
       }
+      return true
     } finally {
       channel.goalRefreshing = false
     }
@@ -966,6 +1034,7 @@ export const useChatStore = defineStore("chat", () => {
     if (channel.moves !== move) return
     publish(channel)
     await refreshGoal(channel)
+    if (view.status === "failed") return
     if (view.status === "closed") return
     const policy = await sessionPermission(sessionId, moved)
     // Only the move that still owns the centre applies its policy, and only
@@ -1085,5 +1154,5 @@ export const useChatStore = defineStore("chat", () => {
     publish(channel)
   }
 
-  return { views, open, resync, receive, ensureLine, loadEarlier, retryLine, submit, stop, createLine, endLine, setDefaultBranch, respond, allowAlways, allowForSession, answerQuestion, compact, usage, fork, writeGoal, startLoop, readLoops, stopLoop, setEffort, setPermission, withdrawInput, searchFiles, sessionSkills, memberApproval, setModel }
+  return { views, open, resync, receive, ensureLine, loadEarlier, retryLine, retryCentre, submit, stop, createLine, endLine, setDefaultBranch, respond, allowAlways, allowForSession, answerQuestion, compact, usage, fork, writeGoal, startLoop, readLoops, stopLoop, setEffort, setPermission, withdrawInput, searchFiles, sessionSkills, memberApproval, setModel }
 })

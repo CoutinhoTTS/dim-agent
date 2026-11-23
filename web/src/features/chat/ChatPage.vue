@@ -306,6 +306,9 @@ async function fork(): Promise<void> {
   <section v-else-if="view?.status === 'failed'" class="removed-state route-page">
     <h1 data-route-heading tabindex="-1">{{ title }}</h1>
     <p role="alert">{{ view.error }}</p>
+    <UButton color="neutral" variant="soft" size="sm" icon="i-lucide-rotate-ccw" @click="chat.retryCentre(sessionId)">
+      {{ t("lines.retry") }}
+    </UButton>
   </section>
 
   <section v-else-if="!view || view.status === 'loading'" class="chat-loading" aria-busy="true">
