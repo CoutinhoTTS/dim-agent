@@ -11,8 +11,6 @@ gone.
 
 D4's location of structural configuration is corrected by [ADR 007](007-plugin-configuration.md).
 
-D2's "Reach other Sessions" row is superseded by [ADR 027](027-cross-scope-access-by-id.md).
-
 ## Context
 
 Dim assembles plugins at three scopes: the process, a Session, and a branch
