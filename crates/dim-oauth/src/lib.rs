@@ -275,11 +275,12 @@ impl Inner {
     }
     /// Renews the grant as it enters the freshness window, so an idle process
     /// keeps its refresh token alive. Request-time resolution stays the
-    /// correctness boundary; this only renews ahead of it. A signed-out or
-    /// unusable account waits for a login in this process.
+    /// correctness boundary; this only renews ahead of it, and a record that
+    /// needs normalization keeps it until an explicit account operation. A
+    /// signed-out or unusable account waits for a login in this process.
     async fn keep_fresh(self: Arc<Self>) {
         loop {
-            let wait = match self.store.resolve(None).await {
+            let wait = match self.store.renew().await {
                 Ok(grant) => Some(grant.renews_in().max(RENEW_MIN)),
                 Err(ManagedError::ServiceReloading) => return,
                 Err(ManagedError::Transient) => Some(RENEW_RETRY),
@@ -300,10 +301,11 @@ impl Inner {
     }
     /// Publishes the account file's current state as the watch's initialized
     /// observation, so a binding installed over an existing account starts from
-    /// it instead of waiting for the next write. A failed read leaves the watch
-    /// uninitialized; the next write still moves it.
+    /// it instead of waiting for the next write. The read is read-only and
+    /// validated; a failed read leaves the watch uninitialized, and the next
+    /// write still moves it.
     async fn initialize_account(self: Arc<Self>) {
-        let _ = self.store.initialize_account().await;
+        let _ = self.store.observe_account().await;
     }
     fn update(&self, id: &str, change: impl FnOnce(&mut Attempt)) {
         if let Some(attempt) = self.attempts.lock().unwrap().get_mut(id) {
@@ -1102,8 +1104,7 @@ impl ManagedProvider for DimOAuth {
         let provider = provider.to_owned();
         self.owned(|inner| async move {
             input(&provider)?;
-            inner.store.status().await?;
-            Ok(())
+            inner.store.observe_account().await
         })
     }
     fn recover(&self, provider: &str) -> ManagedFuture<AccountSnapshot> {

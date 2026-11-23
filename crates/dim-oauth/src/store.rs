@@ -248,10 +248,11 @@ fn authenticated(
     }))
 }
 
-/// Whether `doc` stores a signed-in account. `None` for a document this build
-/// cannot read, which leaves the published value alone.
+/// Whether `doc` stores a signed-in account, from a validated read: a
+/// `tokenDigest` that does not match its grant is not signed in. `None` for a
+/// document this build cannot read, which leaves the published value alone.
 fn signed_in(doc: &Doc) -> Option<bool> {
-    parse(doc, false)
+    parse(doc, true)
         .ok()
         .map(|parsed| parsed.state.is_some_and(|state| state.identity.is_some()))
 }
@@ -334,8 +335,8 @@ fn document(bytes: &[u8]) -> Result<Doc> {
 struct AuthFile {
     lease: FileLease,
     /// The owner's read of whether the file stores a signed-in account, moved
-    /// by every observation made under this lease: a write, or a status read
-    /// of the file. `None` until an observation initializes it.
+    /// by every observation made under this lease: a write, or a read of the
+    /// file. `None` until an observation initializes it.
     account: watch::Sender<Option<bool>>,
 }
 impl AuthFile {
@@ -469,17 +470,16 @@ impl Store {
     pub fn account(&self) -> watch::Receiver<Option<bool>> {
         self.account.subscribe()
     }
-    /// Reads the account file under its lease and publishes the initialized
-    /// observation. The lease keeps a concurrent write from overtaking the
-    /// read; a later write moves the watch again.
-    pub async fn initialize_account(&self) -> Result<()> {
+    /// Reads the account file under its lease and publishes the signed-in
+    /// state it stores. The observation is read-only: it never creates,
+    /// normalizes or rewrites `auth.json`, so a shared file another writer
+    /// populated stays as it is. A missing Dim record publishes signed out; a
+    /// record this build cannot validate leaves the watch as it was. The lease
+    /// keeps a concurrent write from overtaking the read; a later write moves
+    /// the watch again.
+    pub async fn observe_account(&self) -> Result<()> {
         let mut file = self.open(None).await?;
-        let (mut doc, _) = file.read().await?;
-        file.normalize(&mut doc).await?;
-        if !doc.contains_key(STATE) && !doc.contains_key(TOKENS) {
-            doc.insert(STATE.into(), signed_out(None, false)?);
-            file.write(&doc).await?;
-        }
+        let (doc, _) = file.read().await?;
         file.publish(&doc);
         Ok(())
     }
@@ -701,15 +701,28 @@ impl Store {
     }
 
     /// The current grant, refreshed within the freshness window, or after a
-    /// rejection of `rejected` when no newer grant replaced it. A rotated grant
-    /// is persisted before the account lock is released.
+    /// rejection of `rejected` when no newer grant replaced it. A record that
+    /// needs normalization is rewritten first. A rotated grant is persisted
+    /// before the account lock is released.
     pub async fn resolve(&self, rejected: Option<&Grant>) -> Result<Grant> {
+        self.resolve_in(rejected, true).await
+    }
+
+    /// Renewal for the background task: it persists a rotated grant and signs
+    /// out a rejected one, but never normalizes the record it reads.
+    pub(super) async fn renew(&self) -> Result<Grant> {
+        self.resolve_in(None, false).await
+    }
+
+    async fn resolve_in(&self, rejected: Option<&Grant>, normalize: bool) -> Result<Grant> {
         if let Some(grant) = self.current(rejected).await? {
             return Ok(grant);
         }
         let mut file = self.open(None).await?;
         let (mut doc, _) = file.read().await?;
-        file.normalize(&mut doc).await?;
+        if normalize {
+            file.normalize(&mut doc).await?;
+        }
         let Parsed { tokens, state } = parse(&doc, true)?;
         // A home that never signed in needs login, not recovery.
         if tokens.is_none() && state.is_none() {
