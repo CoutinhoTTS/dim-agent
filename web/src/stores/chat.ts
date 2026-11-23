@@ -217,6 +217,7 @@ export const useChatStore = defineStore("chat", () => {
     // `session.closed` that ends the Session is not reset away here.
     if (channel.retrying !== undefined) await channel.retrying
     if (channel.syncing || closed(view)) return
+    const move = channel.moves
     channel.syncing = true
     setStatus(channel, "loading")
     channel.states.clear()
@@ -244,7 +245,6 @@ export const useChatStore = defineStore("chat", () => {
       for (const required of ["session.input.pending", "session.question.pending", "session.turn.get"]) {
         if (!view.methods.includes(required)) throw new ProtocolError(`This Session does not provide ${required}`)
       }
-      const move = channel.moves
       const directory = await client().call("session.branches", { sessionId: view.sessionId }, readBranches)
       channel.lines.directory(directory.branches)
       // The centre is the default branch the directory reports: a resync that
@@ -307,7 +307,7 @@ export const useChatStore = defineStore("chat", () => {
       if (view.status !== "closed") void pumpHistory(channel)
     } catch (error) {
       if (error instanceof RpcError && error.appError === "session_closed") setStatus(channel, "closed")
-      else if (!(error instanceof ConnectionLost)) {
+      else if (channel.moves === move && !closed(view) && !(error instanceof ConnectionLost)) {
         setStatus(channel, "failed")
         view.error = error instanceof Error ? error.message : String(error)
       }
