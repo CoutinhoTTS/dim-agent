@@ -1516,7 +1516,7 @@ async fn pursuit_2_a_committed_pause_ends_the_live_evaluator_once() {
     env.set_limit(1);
     let (_, create) = completion_requested_with(&env, Some(1)).await;
     let evaluator = create.branch.clone();
-    let fold_gate = dim_goal::testing::hold_input(env.session_id(), "main", 0);
+    let mut fold_gate = dim_goal::testing::hold_input(env.session_id(), "main", 0);
     env.turn_start("main", "next");
     env.end_turn("main", "next", "completed");
     let pause = env.wait_for("main", r#"reason="limit""#).await;
