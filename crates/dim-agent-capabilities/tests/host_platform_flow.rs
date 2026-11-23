@@ -97,6 +97,10 @@ async fn shell_resolution_follows_the_preference_and_never_fails_the_service() {
     ));
 }
 
+fn path_string(path: impl AsRef<std::path::Path>) -> String {
+    path.as_ref().to_string_lossy().into_owned()
+}
+
 #[tokio::test]
 async fn spawn_isolates_the_environment_and_terminate_releases_the_tree() {
     let platform = HostPlatform::current(ShellStatus::Unavailable {
@@ -1393,7 +1397,7 @@ async fn the_host_platform_service_serves_a_shell() {
     assert_eq!(terminal.status, WaitStatus::Exited);
     assert_eq!(terminal.exit_code, Some(7));
     assert!(terminal.preview.contains("hi"));
-    assert!(terminal.output_path.exists());
+    assert!(std::path::Path::new(&terminal.output_path).exists());
     assert!(
         std::fs::read_to_string(&terminal.output_path)
             .unwrap()
@@ -1429,7 +1433,7 @@ async fn the_host_platform_service_serves_a_shell() {
     invoke("settle", serde_json::json!({"taskId": "service-shell"}))
         .await
         .unwrap();
-    assert!(!terminal.output_path.exists());
+    assert!(!std::path::Path::new(&terminal.output_path).exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1471,7 +1475,7 @@ async fn the_host_platform_service_runs_a_command_with_stdin() {
         .spawn_with_stdin(
             SpawnWithStdinRequest {
                 command: "cat".into(),
-                cwd: dir.clone(),
+                cwd: path_string(&dir),
                 env: Default::default(),
                 stdin: Some("aGk=".into()),
                 timeout_ms: 10000,
@@ -1530,7 +1534,7 @@ async fn the_host_platform_service_runs_a_confined_helper() {
                 program: "/bin/sh".into(),
                 args: vec!["-c".into(), "printf hi; printf err >&2".into()],
                 read: vec![],
-                write: vec![dir.clone()],
+                write: vec![path_string(&dir)],
                 env: Default::default(),
                 timeout_ms: 10000,
                 output_limit: OutputLimits {
@@ -1580,7 +1584,7 @@ async fn the_host_platform_service_removes_output_and_composes_a_path() {
     std::fs::write(output.join("command.log"), b"output").unwrap();
     platform
         .remove_output_directory(RemoveOutputDirectoryRequest {
-            path: output.clone(),
+            path: path_string(&output),
         })
         .await
         .unwrap();
@@ -1604,7 +1608,7 @@ async fn the_host_platform_service_removes_output_and_composes_a_path() {
     assert!(path.contains("/bin"));
     let refused = platform
         .remove_output_directory(RemoveOutputDirectoryRequest {
-            path: dir.join(".dim/exec"),
+            path: path_string(dir.join(".dim/exec")),
         })
         .await
         .unwrap_err();
@@ -1644,10 +1648,10 @@ async fn a_wait_timeout_leaves_the_command_running() {
             .spawn(SpawnRequest {
                 task_id: "wait-timeout".into(),
                 command: "sleep 0.3".into(),
-                cwd: dir.clone(),
-                workspace: dir.clone(),
+                cwd: path_string(&dir),
+                workspace: path_string(&dir),
                 roots: Vec::new(),
-                output_dir: dir.clone(),
+                output_dir: path_string(&dir),
                 timeout_ms: None,
             })
             .await
@@ -1720,14 +1724,16 @@ async fn output_removal_refuses_traversal_and_links() {
     std::fs::write(outside.join("keep"), b"keep").unwrap();
     let traversal = exec_root.join("session/branch/../../outside");
     let error = platform
-        .remove_output_directory(RemoveOutputDirectoryRequest { path: traversal })
+        .remove_output_directory(RemoveOutputDirectoryRequest {
+            path: path_string(traversal),
+        })
         .await
         .unwrap_err();
     assert!(matches!(error, HostPlatformError::Invalid(_)));
     assert!(outside.join("keep").exists());
     let root_error = platform
         .remove_output_directory(RemoveOutputDirectoryRequest {
-            path: exec_root.clone(),
+            path: path_string(&exec_root),
         })
         .await
         .unwrap_err();
@@ -1737,7 +1743,9 @@ async fn output_removal_refuses_traversal_and_links() {
         let link = exec_root.join("session/link");
         std::os::unix::fs::symlink(&outside, &link).unwrap();
         let link_error = platform
-            .remove_output_directory(RemoveOutputDirectoryRequest { path: link })
+            .remove_output_directory(RemoveOutputDirectoryRequest {
+                path: path_string(link),
+            })
             .await
             .unwrap_err();
         assert!(matches!(link_error, HostPlatformError::Invalid(_)));
@@ -1745,7 +1753,7 @@ async fn output_removal_refuses_traversal_and_links() {
     }
     platform
         .remove_output_directory(RemoveOutputDirectoryRequest {
-            path: exec_root.join("session/absent"),
+            path: path_string(exec_root.join("session/absent")),
         })
         .await
         .unwrap();
@@ -1781,10 +1789,10 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
     platform
         .shell(ShellRequest {
             task_id: "burst-shell".into(),
-            cwd: dir.clone(),
-            workspace: dir.clone(),
+            cwd: path_string(&dir),
+            workspace: path_string(&dir),
             roots: Vec::new(),
-            output_dir: dir.clone(),
+            output_dir: path_string(&dir),
             cols: 80,
             rows: 24,
         })
@@ -1877,10 +1885,10 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
     platform
         .shell(ShellRequest {
             task_id: "capture-shell".into(),
-            cwd: dir.clone(),
-            workspace: dir.clone(),
+            cwd: path_string(&dir),
+            workspace: path_string(&dir),
             roots: Vec::new(),
-            output_dir: dir.clone(),
+            output_dir: path_string(&dir),
             cols: 80,
             rows: 24,
         })

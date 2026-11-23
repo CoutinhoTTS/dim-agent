@@ -367,7 +367,7 @@ impl SessionFiles {
             if let Some(host) = host.as_ref() {
                 match host
                     .remove_output_directory(RemoveOutputDirectoryRequest {
-                        path: candidate.clone(),
+                        path: candidate.to_string_lossy().into_owned(),
                     })
                     .await
                 {

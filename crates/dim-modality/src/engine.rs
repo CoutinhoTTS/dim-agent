@@ -2293,8 +2293,14 @@ impl Shared {
                 .iter()
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect(),
-            read,
-            write,
+            read: read
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+            write: write
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             env: env
                 .into_iter()
                 .map(|(key, value)| {

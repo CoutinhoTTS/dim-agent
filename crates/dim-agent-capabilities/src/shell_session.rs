@@ -50,7 +50,6 @@ const MAX_TIMEOUT_MS: u64 = 3_600_000;
 const DESCRIPTION_CHARS: usize = 200;
 const INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_WAIT: Duration = Duration::from_secs(2);
-const PID_WAIT: Duration = Duration::from_secs(2);
 const PWSH_FILE_POLL: Duration = Duration::from_millis(200);
 
 /// Hex digits in each half of a marker; `marker_pair` splits a uuid into
@@ -450,10 +449,13 @@ impl ShellSession {
             .host
             .shell(ShellRequest {
                 task_id: id.clone(),
-                cwd: self.config.cwd.clone(),
-                workspace: self.config.cwd.clone(),
-                roots,
-                output_dir: self.config.output_dir.clone(),
+                cwd: self.config.cwd.to_string_lossy().into_owned(),
+                workspace: self.config.cwd.to_string_lossy().into_owned(),
+                roots: roots
+                    .iter()
+                    .map(|root| root.to_string_lossy().into_owned())
+                    .collect(),
+                output_dir: self.config.output_dir.to_string_lossy().into_owned(),
                 cols: 500,
                 rows: 50,
             })
@@ -473,7 +475,7 @@ impl ShellSession {
                 return Err(HostError::Cancelled("shell session closed".into()));
             }
             inner.generation += 1;
-            inner.shell_exe = Some(exe);
+            inner.shell_exe = Some(PathBuf::from(exe));
             inner.dialect = dialect;
             inner.shell_exit = None;
             inner.had_reset = false;
@@ -1332,18 +1334,6 @@ impl ShellSession {
                 });
             }
             return Err(error.to_string());
-        }
-        let pid_marker_full = pid_marker.full();
-        let deadline = tokio::time::Instant::now() + PID_WAIT;
-        while tokio::time::Instant::now() < deadline {
-            let found = {
-                let inner = self.inner.lock().await;
-                marker_code(&inner.retained, &pid_marker_full).is_some()
-            };
-            if found {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         if let Some((result_path, error_path)) = pwsh_paths {
             let this = self.clone();

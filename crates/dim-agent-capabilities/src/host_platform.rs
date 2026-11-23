@@ -150,7 +150,7 @@ pub enum OutputEncoding {
 #[serde(rename_all = "camelCase")]
 pub struct ExecShellRuntime {
     #[serde(rename = "executable")]
-    pub executable_path: PathBuf,
+    pub executable_path: String,
     pub edition: ShellEdition,
     pub source: ShellSource,
     pub output_encoding: OutputEncoding,
@@ -383,7 +383,7 @@ pub struct WaitReply {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
     pub duration_ms: u64,
-    pub output_path: PathBuf,
+    pub output_path: String,
     pub output_bytes: u64,
     pub output_truncated: bool,
     pub preview: String,
@@ -443,10 +443,10 @@ pub struct ShellState {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ShellRequest {
     pub task_id: String,
-    pub cwd: PathBuf,
-    pub workspace: PathBuf,
-    pub roots: Vec<PathBuf>,
-    pub output_dir: PathBuf,
+    pub cwd: String,
+    pub workspace: String,
+    pub roots: Vec<String>,
+    pub output_dir: String,
     pub cols: u16,
     pub rows: u16,
 }
@@ -499,8 +499,8 @@ pub struct OutputLimits {
 pub struct ConfinedRequest {
     pub program: String,
     pub args: Vec<String>,
-    pub read: Vec<PathBuf>,
-    pub write: Vec<PathBuf>,
+    pub read: Vec<String>,
+    pub write: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     pub timeout_ms: u64,
@@ -532,7 +532,7 @@ pub struct ChildPathRequest {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveOutputDirectoryRequest {
-    pub path: PathBuf,
+    pub path: String,
 }
 
 /// A request to run one configured command with stdin. `env` is UTF-8; a
@@ -541,7 +541,7 @@ pub struct RemoveOutputDirectoryRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SpawnWithStdinRequest {
     pub command: String,
-    pub cwd: PathBuf,
+    pub cwd: String,
     pub env: BTreeMap<String, Option<String>>,
     pub stdin: Option<String>,
     pub timeout_ms: u64,
@@ -578,10 +578,10 @@ pub struct SpawnWithStdinReply {
 pub struct SpawnRequest {
     pub task_id: String,
     pub command: String,
-    pub cwd: PathBuf,
-    pub workspace: PathBuf,
-    pub roots: Vec<PathBuf>,
-    pub output_dir: PathBuf,
+    pub cwd: String,
+    pub workspace: String,
+    pub roots: Vec<String>,
+    pub output_dir: String,
     pub timeout_ms: Option<u64>,
 }
 
@@ -589,7 +589,7 @@ pub struct SpawnRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SpawnReply {
     pub task_id: String,
-    pub output_path: PathBuf,
+    pub output_path: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -669,11 +669,11 @@ impl From<crate::workspace_tools::exec::CaptureError> for HostPlatformError {
 pub struct HostInfo {
     pub os: Os,
     pub arch: String,
-    pub home: PathBuf,
+    pub home: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
-    pub exec_root: PathBuf,
-    pub platform_roots: Vec<PathBuf>,
+    pub exec_root: String,
+    pub platform_roots: Vec<String>,
     pub backend: SandboxBackend,
     pub exec_shell: ShellStatus,
 }
@@ -768,8 +768,8 @@ impl HostPlatform {
                 .collect(),
         };
         let confinement = confined::Confinement {
-            read: request.read,
-            write: request.write,
+            read: request.read.into_iter().map(PathBuf::from).collect(),
+            write: request.write.into_iter().map(PathBuf::from).collect(),
             timeout: Duration::from_millis(request.timeout_ms),
             stdout_limit: request.output_limit.stdout,
             stderr_limit: request.output_limit.stderr,
@@ -807,7 +807,8 @@ impl HostPlatform {
         request: RemoveOutputDirectoryRequest,
     ) -> Result<(), HostPlatformError> {
         let platform = self.clone();
-        tokio::task::spawn_blocking(move || platform.remove_exec_directory(&request.path))
+        let path = PathBuf::from(request.path);
+        tokio::task::spawn_blocking(move || platform.remove_exec_directory(&path))
             .await
             .map_err(|error| HostPlatformError::Failed(error.to_string()))?
             .map_err(|error| {
@@ -839,7 +840,7 @@ impl HostPlatform {
             .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
         let command = ConfiguredCommand {
             command: request.command,
-            cwd: request.cwd,
+            cwd: PathBuf::from(request.cwd),
             env: request
                 .env
                 .into_iter()
@@ -1031,10 +1032,14 @@ impl HostPlatform {
         HostInfo {
             os: self.os,
             arch: self.arch.clone(),
-            home: self.home.clone(),
+            home: self.home.to_string_lossy().into_owned(),
             timezone: self.timezone.clone(),
-            exec_root: self.exec_root(),
-            platform_roots: self.platform_roots.clone(),
+            exec_root: self.exec_root().to_string_lossy().into_owned(),
+            platform_roots: self
+                .platform_roots
+                .iter()
+                .map(|root| root.to_string_lossy().into_owned())
+                .collect(),
             backend: self.sandbox_backend(),
             exec_shell: self.exec_shell().await,
         }
@@ -1066,16 +1071,20 @@ impl HostPlatform {
                 "taskId must be a single filename component".into(),
             ));
         }
-        if !request.cwd.is_absolute()
-            || !request.workspace.is_absolute()
-            || !request.output_dir.is_absolute()
-            || request.roots.iter().any(|root| !root.is_absolute())
+        let cwd = PathBuf::from(&request.cwd);
+        let workspace = PathBuf::from(&request.workspace);
+        let output_dir = PathBuf::from(&request.output_dir);
+        let mut roots: Vec<PathBuf> = request.roots.iter().map(PathBuf::from).collect();
+        if !cwd.is_absolute()
+            || !workspace.is_absolute()
+            || !output_dir.is_absolute()
+            || roots.iter().any(|root| !root.is_absolute())
         {
             return Err(HostPlatformError::Invalid(
                 "execution paths must be absolute".into(),
             ));
         }
-        if !tokio::fs::metadata(&request.cwd)
+        if !tokio::fs::metadata(&cwd)
             .await
             .is_ok_and(|metadata| metadata.is_dir())
         {
@@ -1083,12 +1092,11 @@ impl HostPlatform {
                 "working directory not found".into(),
             ));
         }
-        let mut roots = request.roots;
-        if !roots.contains(&request.workspace) {
-            roots.push(request.workspace.clone());
+        if !roots.contains(&workspace) {
+            roots.push(workspace);
         }
         let (spec, _) = self
-            .build_process_spec(&request.command, &request.cwd)
+            .build_process_spec(&request.command, &cwd)
             .await
             .map_err(Self::process_error)?;
         let owner = self.arc()?;
@@ -1097,14 +1105,14 @@ impl HostPlatform {
                 &request.task_id,
                 spec,
                 &roots,
-                &request.output_dir,
+                &output_dir,
                 request.timeout_ms,
             )
             .await
             .map_err(Self::process_error)?;
         Ok(SpawnReply {
             task_id: request.task_id,
-            output_path: process.retain_task(),
+            output_path: process.retain_task().to_string_lossy().into_owned(),
         })
     }
 
@@ -1147,7 +1155,11 @@ impl HostPlatform {
                 .map_err(|error| HostPlatformError::Failed(error.to_string()));
         }
         if let Some(job) = self.job_task(&request.task_id) {
-            let pid = *job.pid.lock().unwrap();
+            let mut pid = *job.pid.lock().unwrap();
+            if pid.is_none() {
+                let _ = tokio::time::timeout(Duration::from_secs(2), job.ready.notified()).await;
+                pid = *job.pid.lock().unwrap();
+            }
             let Some(pid) = pid else {
                 return Err(HostPlatformError::TaskRunning);
             };
@@ -1208,16 +1220,20 @@ impl HostPlatform {
                 "taskId must be a single filename component".into(),
             ));
         }
-        if !request.cwd.is_absolute()
-            || !request.workspace.is_absolute()
-            || !request.output_dir.is_absolute()
-            || request.roots.iter().any(|root| !root.is_absolute())
+        let cwd = PathBuf::from(&request.cwd);
+        let workspace = PathBuf::from(&request.workspace);
+        let output_dir = PathBuf::from(&request.output_dir);
+        let mut roots: Vec<PathBuf> = request.roots.iter().map(PathBuf::from).collect();
+        if !cwd.is_absolute()
+            || !workspace.is_absolute()
+            || !output_dir.is_absolute()
+            || roots.iter().any(|root| !root.is_absolute())
         {
             return Err(HostPlatformError::Invalid(
                 "execution paths must be absolute".into(),
             ));
         }
-        if !tokio::fs::metadata(&request.cwd)
+        if !tokio::fs::metadata(&cwd)
             .await
             .is_ok_and(|metadata| metadata.is_dir())
         {
@@ -1225,19 +1241,18 @@ impl HostPlatform {
                 "working directory not found".into(),
             ));
         }
-        let mut roots = request.roots;
-        if !roots.contains(&request.workspace) {
-            roots.push(request.workspace.clone());
+        if !roots.contains(&workspace) {
+            roots.push(workspace);
         }
-        tokio::fs::create_dir_all(&request.output_dir)
+        tokio::fs::create_dir_all(&output_dir)
             .await
             .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
         let (shell, _) = self
             .start_shell(
                 &request.task_id,
-                &request.cwd,
+                &cwd,
                 &roots,
-                &request.output_dir,
+                &output_dir,
                 PtySize {
                     cols: request.cols,
                     rows: request.rows,
@@ -1247,7 +1262,7 @@ impl HostPlatform {
             .map_err(Self::process_error)?;
         Ok(SpawnReply {
             task_id: request.task_id,
-            output_path: shell.output_path().to_owned(),
+            output_path: shell.output_path().to_string_lossy().into_owned(),
         })
     }
 
@@ -1307,6 +1322,7 @@ impl HostPlatform {
                 pid: std::sync::Mutex::new(None),
                 ended: std::sync::Mutex::new(false),
                 end_marker: start.end_marker,
+                ready: tokio::sync::Notify::new(),
             });
             {
                 let mut commands = self.commands.lock().unwrap();
@@ -1548,7 +1564,7 @@ impl HostPlatform {
                 command,
                 &env,
                 self,
-                &shell.executable_path,
+                Path::new(&shell.executable_path),
                 shell.edition,
                 cwd,
                 &toolchain,
@@ -1569,7 +1585,7 @@ impl HostPlatform {
         };
         Ok((
             ProcessSpec {
-                executable: shell.executable_path.clone(),
+                executable: PathBuf::from(&shell.executable_path),
                 args: args
                     .iter()
                     .map(OsString::from)
@@ -2113,7 +2129,7 @@ pub async fn resolve_shell(
     };
     match selected {
         Some((shell, source)) => ShellStatus::Available(ExecShellRuntime {
-            executable_path: shell.path.clone(),
+            executable_path: shell.path.to_string_lossy().into_owned(),
             edition: shell.edition,
             source,
             output_encoding: match shell.edition {
@@ -3159,7 +3175,7 @@ impl HostPlatform {
                         ShellEdition::WindowsPowershell
                     };
                     return ShellStatus::Available(ExecShellRuntime {
-                        executable_path: path,
+                        executable_path: path.to_string_lossy().into_owned(),
                         edition,
                         source: ShellSource::Fallback,
                         output_encoding: match edition {
@@ -3176,7 +3192,7 @@ impl HostPlatform {
         } else {
             if let Some(path) = find_executable("bash") {
                 return ShellStatus::Available(ExecShellRuntime {
-                    executable_path: path,
+                    executable_path: path.to_string_lossy().into_owned(),
                     edition: ShellEdition::Bash,
                     source: ShellSource::Fallback,
                     output_encoding: OutputEncoding::Utf8,
@@ -3554,7 +3570,7 @@ pub(crate) mod shell {
                             exit_code: state.code.as_ref().and_then(|code| code.parse().ok()),
                             signal: None,
                             duration_ms: 0,
-                            output_path: self.path.clone(),
+                            output_path: self.path.to_string_lossy().into_owned(),
                             output_bytes: state.bytes,
                             output_truncated: state.omitted > 0,
                             preview: state.tail.clone(),
@@ -3574,7 +3590,7 @@ pub(crate) mod shell {
                         exit_code: None,
                         signal: None,
                         duration_ms: 0,
-                        output_path: self.path.clone(),
+                        output_path: self.path.to_string_lossy().into_owned(),
                         output_bytes: state.bytes,
                         output_truncated: state.omitted > 0,
                         preview: state.tail.clone(),
@@ -3617,6 +3633,7 @@ pub(crate) mod shell {
         pub(crate) pid: Mutex<Option<u32>>,
         pub(crate) ended: Mutex<bool>,
         pub(crate) end_marker: String,
+        pub(crate) ready: Notify,
     }
 
     #[derive(Clone)]
@@ -3794,7 +3811,7 @@ pub(crate) mod shell {
                 _ => &["-i"],
             };
             let spec = ProcessSpec {
-                executable: runtime.executable_path.clone(),
+                executable: PathBuf::from(&runtime.executable_path),
                 args: args.iter().map(|s| (*s).into()).collect(),
                 cwd: cwd.into(),
                 env: self
@@ -3908,6 +3925,8 @@ pub(crate) mod shell {
                                     let mut slot = job.pid.lock().unwrap();
                                     if slot.is_none() {
                                         *slot = Some(pid);
+                                        drop(slot);
+                                        job.ready.notify_waiters();
                                     }
                                 }
                             }
@@ -4204,7 +4223,7 @@ pub(crate) mod shell {
                     .as_ref()
                     .map(|end| end.duration)
                     .unwrap_or_else(|| self.started.elapsed().as_millis() as u64),
-                output_path: self.path.clone(),
+                output_path: self.path.to_string_lossy().into_owned(),
                 output_bytes: capture.total,
                 output_truncated: capture.total > capture.text.len() as u64,
                 preview: tail.text,

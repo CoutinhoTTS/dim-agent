@@ -390,7 +390,7 @@ impl HooksRuntime {
         }
         let request = SpawnWithStdinRequest {
             command: command.into(),
-            cwd: self.config.cwd.clone().into(),
+            cwd: self.config.cwd.clone(),
             env: self.environment(handler),
             stdin: Some(STANDARD.encode(stdin)),
             timeout_ms: handler.timeout.as_millis() as u64,
