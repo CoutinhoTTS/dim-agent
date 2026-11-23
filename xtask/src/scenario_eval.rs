@@ -13645,6 +13645,15 @@ mod tests {
         /// that stopped on its wall clock must still return, with cleanup
         /// bounded.
         SwitchMoveAndCloseStall,
+        /// The first move names the explicit line `7`, and the tool line `2`
+        /// opens while that move waits for its target's first turn. No other
+        /// line opens afterwards, so the later move to the latest tool line
+        /// can only run on `2`.
+        ChainedToolLineBeforeActivation,
+        /// The first move names the explicit line `7` and fires before any
+        /// tool line exists; `2` opens after that move's input, and its first
+        /// turn fires the later move to the latest tool line.
+        ChainedToolLineAfterActivation,
         /// The setup's context window read answers `context_usage_unavailable`,
         /// so the check is deferred, and the deferred read answers
         /// `session_reloading`: a failure that is not the deferral itself.
@@ -13662,6 +13671,8 @@ mod tests {
         settled_at: AtomicUsize,
         idles: AtomicUsize,
         usages: AtomicUsize,
+        /// The `branchId` of every `session.branch_set_default`, in order.
+        moves: Mutex<Vec<String>>,
         attached: tokio::sync::Notify,
         closes: AtomicUsize,
     }
@@ -13708,6 +13719,17 @@ mod tests {
         /// One `session.event` notice of `event` on `main`.
         fn notice(event: Value) -> Vec<u8> {
             notice_on("main", event)
+        }
+        /// One `branch/create` notice of tool line `branch` at `sequence`.
+        fn created(sequence: u64, branch: &str) -> Value {
+            json!({"type": "branch", "name": "create", "id": format!("e{sequence}"),
+                   "sequence": sequence,
+                   "data": {"branch": branch, "source": {"kind": "tool"}}})
+        }
+        /// One `turn` notice at `sequence`.
+        fn turn(sequence: u64, name: &str) -> Value {
+            json!({"type": "turn", "name": name, "id": format!("e{sequence}"),
+                   "sequence": sequence, "data": {}})
         }
         /// The refusal a client gets while the call has no waiter.
         fn not_pending() -> Value {
@@ -13806,6 +13828,14 @@ mod tests {
                 let Some(line) = line.unwrap() else { break };
                 let request: Value = serde_json::from_str(&line).unwrap();
                 let method = request["method"].as_str().unwrap_or_default();
+                if method == "session.branch_set_default" {
+                    recorded.moves.lock().unwrap().push(
+                        request["params"]["branchId"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                }
                 if method == "session.attach" {
                     recorded.attached.notify_one();
                 }
@@ -13927,6 +13957,8 @@ mod tests {
                         PeerScript::SwitchMoveStalls
                         | PeerScript::SwitchSubmitStalls
                         | PeerScript::SwitchMoveAndCloseStall => None,
+                        PeerScript::ChainedToolLineBeforeActivation
+                        | PeerScript::ChainedToolLineAfterActivation => None,
                         PeerScript::DeferredUsageFails => None,
                     };
                     if let Some((request, sequence)) = closed {
@@ -13994,6 +14026,37 @@ mod tests {
                         ))
                         .await
                         .unwrap();
+                    if matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                    ) {
+                        let before =
+                            matches!(script, PeerScript::ChainedToolLineBeforeActivation);
+                        let written = match (before, submits) {
+                            // The tool line opens while the first move waits
+                            // for its own target's first turn; the line that
+                            // starts afterwards fires that move.
+                            (true, 1) => vec![("2", created(2, "2")), ("7", turn(3, "start"))],
+                            // The first move's input: its target's turn starts,
+                            // and its end stops the run on the turn budget.
+                            (true, 2) => vec![("7", turn(4, "start")), ("7", turn(5, "end"))],
+                            // The first move fires before any tool line exists.
+                            (false, 1) => vec![("7", turn(2, "start"))],
+                            // The tool line opens after that, and its first
+                            // turn starts before the run stops.
+                            (false, 2) => vec![
+                                ("2", created(3, "2")),
+                                ("2", turn(4, "start")),
+                                ("2", turn(5, "end")),
+                            ],
+                            _ => Vec::new(),
+                        };
+                        for (branch, event) in written {
+                            write.write_all(&notice_on(branch, event)).await.unwrap();
+                        }
+                        continue;
+                    }
                     // The held line asks nothing: the run's only work is the
                     // turn the peer holds open. A switch that never fires
                     // likewise asks nothing: its turn starts and ends.
@@ -14231,6 +14294,119 @@ mod tests {
         assert!(
             failed(driven.stop, None, JudgeOutcome::Judged),
             "the outcome is a failed run on its own"
+        );
+    }
+
+    /// A chained move to the latest tool line uses the line the run has seen
+    /// opened, even when it opened while the move before it waited: a line
+    /// that exists when the move is activated is the one its role names, so
+    /// the move runs instead of waiting for a creation that never comes
+    /// (model-prompts §9.8).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chained_switch_uses_the_tool_line_the_run_has_seen() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-chained-tool-line-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::ChainedToolLineBeforeActivation).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.moves = vec![
+            Switch {
+                to: SwitchTarget::Id("7".into()),
+                message: "to the line that waited".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+        ];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            moves,
+            ["7", "2"],
+            "the chained move moves to the tool line the run had seen opened: {:?}",
+            driven.error
+        );
+        assert_ne!(
+            driven.stop, "switch_target_not_reached",
+            "the move's target existed: {:?}",
+            driven.error
+        );
+    }
+
+    /// A chained move to the latest tool line waits for a creation when the
+    /// run has seen none: the line that opens after the move is activated is
+    /// the one its role names, and its first turn fires the move
+    /// (model-prompts §9.8).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chained_switch_waits_for_the_tool_line_opened_after_it_was_activated() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-chained-tool-line-later-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::ChainedToolLineAfterActivation).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.moves = vec![
+            Switch {
+                to: SwitchTarget::Id("7".into()),
+                message: "to the line that waited".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+        ];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            moves,
+            ["7", "2"],
+            "the chained move moves to the tool line opened after it was activated: {:?}",
+            driven.error
+        );
+        assert_ne!(
+            driven.stop, "switch_target_not_reached",
+            "the move's target existed: {:?}",
+            driven.error
         );
     }
 
