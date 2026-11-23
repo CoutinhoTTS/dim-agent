@@ -19,7 +19,7 @@ use dim_agent_types::{
     FAILURE_CAUSE_CHARS, FAILURE_CAUSE_FRAMES, FAILURE_REASON_CHARS, MessagePart, ModelFailureKind,
     ToolCall, Usage, one_line,
 };
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::poll_immediate};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -53,15 +53,27 @@ pub(crate) fn convert(
         let mut answered = false;
         let mut unfinished_call = None;
         let terminal = loop {
-            let next = tokio::select! {
-                biased;
-                _ = generation.cancelled() => {
-                    break Some(Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")));
+            // A stream queues a client tool call and the terminal that may
+            // explain it in one flush, so a terminal behind a failed call is
+            // already delivered; when none is, the parse failure is final
+            // rather than holding the request open for a part that may never
+            // arrive.
+            let next = if unfinished_call.is_some() {
+                match poll_immediate(stream.next()).await {
+                    Some(next) => next,
+                    None => break unfinished_call.take().map(Err),
                 }
-                _ = cancel.cancelled() => {
-                    break Some(Err(HostError::Cancelled("Model request cancelled".into())));
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = generation.cancelled() => {
+                        break Some(Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")));
+                    }
+                    _ = cancel.cancelled() => {
+                        break Some(Err(HostError::Cancelled("Model request cancelled".into())));
+                    }
+                    next = stream.next() => next,
                 }
-                next = stream.next() => next,
             };
             let Some(next) = next else {
                 break unfinished_call.take().map(Err);
