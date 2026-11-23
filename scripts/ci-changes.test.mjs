@@ -94,6 +94,7 @@ test('bridge, evaluation and wall-clock flows follow their owning paths',()=>{
   assert.deepEqual(classify(['xtask/src/scenario_eval.rs']),only('rust','node','eval'));
   assert.deepEqual(classify(['xtask/scenario-eval/case.json']),only('rust','node','eval'));
   assert.deepEqual(classify(['crates/dim-agent-capabilities/src/workspace_tools/exec.rs']),only('rust','node','execution'));
+  assert.deepEqual(classify(['crates/dim-agent-capabilities/src/workspace_tools/background.rs']),only('rust','node','execution'));
   assert.deepEqual(classify(['crates/dim-agent-capabilities/src/host_platform/mod.rs']),only('rust','node','execution'));
   assert.deepEqual(classify(['tests/integration/tests/local_execution.rs']),only('rust','node','execution'));
   assert.deepEqual(classify(['scripts/run-rust-test.mjs']),only(...groups));
