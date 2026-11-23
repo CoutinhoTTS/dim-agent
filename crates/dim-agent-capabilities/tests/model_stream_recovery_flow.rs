@@ -960,9 +960,8 @@ impl ModelDriver for DrainingModel {
             };
             let draining = self.draining.clone();
             let release = self.release.clone();
-            let stream = futures_util::stream::unfold(
-                (receiver, false),
-                move |(mut receiver, failed)| {
+            let stream =
+                futures_util::stream::unfold((receiver, false), move |(mut receiver, failed)| {
                     let draining = draining.clone();
                     let release = release.clone();
                     async move {
@@ -976,8 +975,7 @@ impl ModelDriver for DrainingModel {
                             (item, (receiver, failed))
                         })
                     }
-                },
-            );
+                });
             Ok(Box::pin(stream) as ModelStream)
         })
     }
@@ -1101,10 +1099,7 @@ async fn a_steer_during_the_retry_backoff_replaces_the_attempt() {
 /// A steer that arrives while a failed attempt drains does not rewrite a
 /// terminal failure: the gate a shown thought closed stays closed, and the
 /// turn ends with the provider's failure instead of a replacement.
-async fn a_steer_during_a_terminal_failure(
-    kind: ModelFailureKind,
-    retry_after: Option<Duration>,
-) {
+async fn a_steer_during_a_terminal_failure(kind: ModelFailureKind, retry_after: Option<Duration>) {
     let (cut, cut_stream) = mpsc::unbounded_channel();
     let (steer, steer_stream) = mpsc::unbounded_channel();
     let model = Arc::new(DrainingModel::new(vec![cut_stream, steer_stream]));
