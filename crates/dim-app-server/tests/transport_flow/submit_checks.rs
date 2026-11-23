@@ -2,12 +2,13 @@
 //! writing (Hooks A.6.2, appendix D items 5 and 6).
 use super::*;
 use dim_agent_capabilities::{
+    adapters::EchoModel,
     host::{HostFuture, ModelConnection, ModelDriver, ModelStream},
     input_queue::{CheckSubmission, SubmitCheckReply, SubmitCheckRequest, SubmitChecks},
 };
 use dim_agent_runtime::testing::branch_events;
 use dim_agent_runtime::{Feature, Names};
-use dim_agent_types::{ContentBlock, InputMessageData, ModelRequest};
+use dim_agent_types::{ContentBlock, InputMessageData, MessageContent, MessagePart, ModelRequest};
 use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use std::sync::Mutex;
@@ -125,18 +126,22 @@ impl ModelDriver for Recording {
     }
 }
 impl Recording {
-    /// The texts of the parts of the last user message of the last request.
+    /// The texts of the last user message of the last request, skipping
+    /// runtime state and rules appended after it.
     fn last_user_texts(&self) -> Vec<String> {
         let requests = self.0.lock().unwrap();
         let request = requests.last().expect("a model request");
-        let messages = serde_json::to_value(&request.messages).unwrap();
-        let user = messages.as_array().unwrap().last().unwrap();
-        user["content"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|part| part["text"].as_str().map(str::to_owned))
-            .collect()
+        let message = EchoModel::last_message(request).expect("an input message");
+        match &message.content {
+            MessageContent::Text(text) => vec![text.clone()],
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|part| match part {
+                    MessagePart::Text { text, .. } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect(),
+        }
     }
 }
 
