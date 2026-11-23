@@ -323,6 +323,15 @@ impl Temporary<'_> {
         }
         self.target.remove_staged(&self.name);
     }
+
+    /// Removes the staging name now, before the directory sync, while the open
+    /// file stays available to check which path the publication reached.
+    fn remove_name(&self) {
+        if !self.staged_owned() {
+            return;
+        }
+        self.remove_staged();
+    }
 }
 impl Drop for Temporary<'_> {
     fn drop(&mut self) {
@@ -631,14 +640,15 @@ fn publish_anonymous_new(
         }
         Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
     }
-    if !new_file.published_at_target(&file) {
-        return Ok(Err(path_not_written(display)));
-    }
     #[cfg(test)]
     if let Some(hook) = sync_hook {
         hook(path);
     }
-    if let Err(error) = new_file.sync() {
+    let synced = new_file.sync();
+    if !new_file.published_at_target(&file) {
+        return Ok(Err(path_not_written(display)));
+    }
+    if let Err(error) = synced {
         return Ok(Err(sync_failure(error, path, display)));
     }
     Ok(Ok(AnonymousPublication::Published))
@@ -719,15 +729,17 @@ fn publish_named_new(
         }
         return Ok(Err(result));
     }
-    if !new_file.published_at_target(&temporary.file) {
-        return Ok(Err(path_not_written(display)));
-    }
-    drop(temporary);
+    temporary.remove_name();
     #[cfg(test)]
     if let Some(hook) = sync_hook {
         hook(path);
     }
-    if let Err(error) = new_file.sync() {
+    let synced = new_file.sync();
+    if !new_file.published_at_target(&temporary.file) {
+        return Ok(Err(path_not_written(display)));
+    }
+    drop(temporary);
+    if let Err(error) = synced {
         return Ok(Err(sync_failure(error, path, display)));
     }
     Ok(Ok(()))
