@@ -180,10 +180,11 @@
 //!   with no `completed` compaction of this run is compacted with
 //!   `session.context.compact`, then each line is asked `request`. A
 //!   compaction that does not complete fails the run there, so the requests
-//!   after it are only judged when a compaction happened. A run its own budget
-//!   stops before that step, or before a submitted request ran on its line, is
-//!   an incomplete fixture: it is neither failed nor judged and enters no
-//!   probe rate.
+//!   after it are only judged when a compaction happened. A run the turn cap
+//!   stops before that step, or before a submitted request ran on its line,
+//!   is an incomplete fixture: it is neither failed nor judged and enters no
+//!   probe rate. A run its wall clock stops is failed, and a run that ends
+//!   idle is scored for what its export holds.
 //! - `sources` declares the event producers a scenario runs with and the
 //!   Session's subscription to them. One producer row is installed, only
 //!   when `sources` is present, and it declares every source through the
@@ -6558,16 +6559,21 @@ fn fixture_incomplete(driven: &Driven, scenario: &Scenario, export: &str) -> Opt
     None
 }
 
-/// Why the run its own budget stopped is an incomplete fixture, when it is: a
-/// request its probes read never ran, or the turn cap stopped the one switch
-/// follow-up request whose note was checked. A run that already failed keeps
-/// its failure and is not incomplete (model-prompts §8.1).
+/// Why the run is an incomplete fixture, when it is: the harness's turn cap
+/// stopped it before a request its probes read existed — before the step after
+/// the first idle, before a submitted input's request, or before the request a
+/// switch follow-up needed. Any other stop keeps its own scoring: a run its
+/// wall clock or an error ended is failed, and a run that ended idle is scored
+/// for what its export holds (model-prompts §8.1).
 fn incomplete_reason(
     driven: &Driven,
     scenario: &Scenario,
     export: &str,
     notes: &NotesCheck,
 ) -> Option<String> {
+    if driven.stop != "turns" {
+        return None;
+    }
     fixture_incomplete(driven, scenario, export).or_else(|| match notes {
         NotesCheck::CapCut { line } => Some(format!(
             "line {line}: the switch follow-up's request was stopped by the run's turn budget before it reached the model"
@@ -10986,6 +10992,49 @@ mod tests {
         );
     }
 
+    /// A run that stopped on its wall clock is a failed run, not an incomplete
+    /// fixture: the harness did not stop it before a request its probes read
+    /// existed, the run's own budget did, and a probe that saw no request is
+    /// the candidate's outcome (model-prompts §8.1).
+    #[test]
+    fn a_run_that_stopped_on_its_wall_clock_is_failed_not_incomplete() {
+        let mut scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let driven = Driven {
+            session: "s".into(),
+            stop: "seconds",
+            timed_out: true,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let export = json!({"kind": "event", "branch_id": "main",
+                            "event": {"id": "e1", "sequence": 1, "type": "input",
+                                      "name": "message", "data": {}}})
+        .to_string();
+        assert_eq!(
+            incomplete_reason(&driven, &scenario, &export, &NotesCheck::Observed),
+            None,
+            "the wall clock ended the run, not the step after the first idle"
+        );
+        assert!(
+            failed(driven.stop, driven.error.as_deref(), JudgeOutcome::Judged),
+            "a run that stopped on its wall clock is a failed run"
+        );
+    }
+
     /// A switch follow-up request the run's turn cap stopped has no request
     /// for its probe to read: the note check reports the cap, and the run is
     /// incomplete rather than scored (model-prompts §8.1).
@@ -11035,6 +11084,100 @@ mod tests {
         assert!(
             reason.contains("line 2") && reason.contains("turn budget"),
             "{reason}"
+        );
+    }
+
+    /// A run that ended idle is scored as it was before the incomplete class
+    /// existed: the stop is the product's state, not the harness's turn cap,
+    /// so an input it left unrun is the candidate's outcome, not a fixture
+    /// the report sets aside (model-prompts §8.1).
+    #[test]
+    fn an_idle_run_is_scored_rather_than_incomplete() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let message = || FixtureInput {
+            what: MESSAGE_INPUT,
+            line: "main".into(),
+            input: Some("m1".into()),
+        };
+        let driven = |stop: &'static str| Driven {
+            session: "s".into(),
+            stop,
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![message()],
+            incomplete: None,
+            error: None,
+        };
+        let scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        let message_event = event(
+            1,
+            ["input", "message"],
+            json!({"user": {"content": "message"}}),
+        );
+        let consumed = event(2, ["input", "consumed"], json!({"input_id": "m1"}));
+
+        assert!(
+            fixture_incomplete(&driven("turns"), &scenario, &message_event).is_some(),
+            "the input the run left unrun is what the fixture check reads"
+        );
+        assert_eq!(
+            incomplete_reason(
+                &driven("idle"),
+                &scenario,
+                &message_event,
+                &NotesCheck::Observed
+            ),
+            None,
+            "a run that ended idle is not the harness's stop"
+        );
+
+        let no_request = [message_event, consumed].join("\n");
+        assert!(
+            fixture_incomplete(&driven("turns"), &scenario, &no_request)
+                .is_some_and(|reason| reason.contains("no request ran after")),
+            "the consumed input without a request is what the fixture check reads"
+        );
+        assert_eq!(
+            incomplete_reason(
+                &driven("idle"),
+                &scenario,
+                &no_request,
+                &NotesCheck::Observed
+            ),
+            None,
+            "a run that ended idle is not the harness's stop"
+        );
+
+        let idle = record(
+            "current",
+            &scenario,
+            &[("identity", ProbeVerdict::Unparsed)],
+            JudgeOutcome::Judged,
+        );
+        assert!(!idle.failed, "idle is not one of the failed stops");
+        let mut metrics = Metrics::default();
+        metrics.add(&scenario, &idle);
+        assert_eq!(
+            (metrics.runs, metrics.failed, metrics.unjudged),
+            (1, 0, 0),
+            "the idle run is counted, as it was before the class existed"
+        );
+        assert_eq!(
+            metrics
+                .probes
+                .get(&("case".to_owned(), "identity".to_owned())),
+            Some(&ProbeCounts { passed: 0, runs: 1 }),
+            "the probe the run left unanswered is counted as a loss"
         );
     }
 
