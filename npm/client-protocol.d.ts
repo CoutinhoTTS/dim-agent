@@ -170,7 +170,7 @@ export type EventContent =
   | { kind: "tool-call"; requestId: string; asks: AskCall[] }
   | { kind: "tool-completed"; requestId: string; callId: string; result: ToolResult }
   | { kind: "tool-result"; requestId: string; results: Array<{ callId: string; result: ToolResult }> }
-  | { kind: "model-end"; requestId: string; error?: string; presentation?: ProviderPresentation; failure?: ModelFailure }
+  | { kind: "model-end"; requestId: string; error?: string; presentation?: ProviderPresentation; failure?: ModelFailure; cancelled?: string }
   | { kind: "context-configured"; model: ModelId }
   | { kind: "other" }
 
@@ -194,6 +194,10 @@ export type ModelFailure = {
   attempts: number
   waitedMs: number
   retryAfterMs?: number
+  /** A retry replaced an earlier attempt of this request; absent otherwise. */
+  retried?: boolean
+  /** The thinking block the final attempt left open, when it showed one; written only with `retried`. */
+  thinkingPartId?: string
 }
 
 export type SessionEvent = {

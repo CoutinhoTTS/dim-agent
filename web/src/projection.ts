@@ -56,6 +56,9 @@ type Stream = {
   progress?: { text: string; offset: number }
 }
 
+/** The reason a steer writes on the request it replaces before any output. */
+const REPLACED_BY_STEER = "replaced by steer"
+
 export class Projection {
   rows: TimelineRow[] = []
   /** Highest event sequence applied. */
@@ -85,6 +88,12 @@ export class Projection {
   private showedThinking = new Set<string>()
   /** Thinking blocks a replaced attempt left, whose late notices must not reopen them. */
   private discardedThoughts = new Map<string, Set<string>>()
+  /** Requests whose terminal fact arrived: no later snapshot describes them. */
+  private endedRequests = new Set<string>()
+  /** Committed text characters per request, the offset a notice must not trail. */
+  private writtenText = new Map<string, number>()
+  /** Committed thinking characters per request and the newest block's identity. */
+  private writtenThinking = new Map<string, { chars: number; partId?: string }>()
   /** Names each thought row; a rebuilt row gets a new one. */
   private rowSeq = 0
   /** The error of the model failure the latest turn end may repeat. */
@@ -132,6 +141,14 @@ export class Projection {
     const thought = this.thoughts.get(output.requestId)
     if (answer !== undefined) answer.writtenChars = output.textCharacters
     if (thought !== undefined) thought.writtenChars = output.thinkingCharacters
+    this.writtenText.set(output.requestId, output.textCharacters)
+    const written = this.writtenThinking.get(output.requestId)
+    this.writtenThinking.set(output.requestId, { chars: output.thinkingCharacters, ...(written?.partId === undefined ? {} : { partId: written.partId }) })
+  }
+
+  /** The request whose output `session.turn.get` reported as running. */
+  activeRequestId(): string | undefined {
+    return this.output?.requestId
   }
 
   /** Applies one event; false when it was already applied. */
@@ -211,7 +228,11 @@ export class Projection {
         this.showedThinking.delete(content.requestId)
         if (!this.thoughts.has(content.requestId)) this.thoughtStarts.set(content.requestId, event.createAt)
         const thought = this.openThinking(content.requestId)
-        if (thought.written === "" && event.id !== "") thought.partId = event.id
+        const first = thought.written === "" && event.id !== ""
+        if (first) thought.partId = event.id
+        const written = this.writtenThinking.get(content.requestId)
+        const partId = first ? event.id : written?.partId
+        this.writtenThinking.set(content.requestId, { chars: (written?.chars ?? 0) + [...content.delta].length, ...(partId === undefined ? {} : { partId }) })
         commit(thought, content.delta)
         this.update(thought.index, { text: shown(thought) })
         break
@@ -219,6 +240,7 @@ export class Projection {
       case "text": {
         this.showedOutput.add(content.requestId)
         this.showedThinking.delete(content.requestId)
+        this.writtenText.set(content.requestId, (this.writtenText.get(content.requestId) ?? 0) + [...content.delta].length)
         if (this.emptyThought(content.requestId)) this.discardThinking(content.requestId)
         else this.closeThinking(content.requestId, event.createAt)
         const answer = this.openAnswer(content.requestId)
@@ -251,6 +273,15 @@ export class Projection {
         for (const result of content.results) this.completeTool(result.callId, result.result)
         break
       case "model-end": {
+        const thought = this.thoughts.get(content.requestId)
+        const replaced = thought !== undefined && thought.written === ""
+          && ((content.failure?.retried === true && thought.partId !== content.failure.thinkingPartId)
+            || content.cancelled === REPLACED_BY_STEER)
+        if (replaced) {
+          this.discardThinking(content.requestId)
+          if (this.showedThinking.delete(content.requestId)) this.showedOutput.delete(content.requestId)
+        }
+        this.endedRequests.add(content.requestId)
         const incomplete = this.showedOutput.delete(content.requestId)
         this.showedThinking.delete(content.requestId)
         this.closeThinking(content.requestId, event.createAt)
@@ -273,6 +304,9 @@ export class Projection {
         for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId, event.createAt)
         for (const requestId of [...this.answers.keys()]) this.closeAnswer(requestId)
         this.discardedThoughts.clear()
+        this.endedRequests.clear()
+        this.writtenText.clear()
+        this.writtenThinking.clear()
         // The marker belongs to this turn only, whatever the outcome.
         const shown = this.shownFailure
         this.shownFailure = undefined
@@ -295,7 +329,22 @@ export class Projection {
   /** Shows a request's output that is not written yet. */
   progress(progress: ModelProgress): void {
     const requestId = progress.requestId
-    if (requestId === undefined) return
+    if (requestId === undefined || this.endedRequests.has(requestId)) return
+    const text = [...progress.text].length
+    const thinking = [...progress.thinking].length
+    const writtenText = this.writtenText.get(requestId) ?? 0
+    const writtenThinking = this.writtenThinking.get(requestId)
+    if (progress.thinking !== "") {
+      if (progress.textOffset + text < writtenText) return
+      if (writtenThinking !== undefined) {
+        if (progress.thinkingOffset + thinking <= writtenThinking.chars) return
+        if (progress.thinkingOffset < writtenThinking.chars
+          && progress.thinkingPartId !== undefined && progress.thinkingPartId !== ""
+          && writtenThinking.partId !== undefined && writtenThinking.partId !== ""
+          && progress.thinkingPartId !== writtenThinking.partId) return
+      }
+    }
+    if (progress.text !== "" && progress.textOffset + text <= writtenText) return
     const reclaimed = progress.thinkingPartId !== undefined && this.discardedThoughts.get(requestId)?.has(progress.thinkingPartId) === true
     const thought = this.thoughts.get(requestId)
     if (!reclaimed && thought !== undefined && thought.written === "" && this.replacedAttempt(progress, thought)) {
@@ -303,8 +352,10 @@ export class Projection {
       if (this.showedThinking.delete(requestId)) this.showedOutput.delete(requestId)
     }
     if (progress.thinking !== "" && !reclaimed) {
-      this.showedOutput.add(requestId)
-      this.showedThinking.add(requestId)
+      if (!this.showedOutput.has(requestId)) {
+        this.showedOutput.add(requestId)
+        this.showedThinking.add(requestId)
+      }
       const thought = this.openThinking(requestId)
       if (progress.thinkingPartId !== undefined) thought.partId = progress.thinkingPartId
       if (progress.thinkingStartedAt !== undefined && !this.thoughtStarts.has(requestId)) this.thoughtStarts.set(requestId, progress.thinkingStartedAt)

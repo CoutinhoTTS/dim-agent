@@ -123,6 +123,8 @@ function readModelFailure(value: unknown, at: string): ModelFailure | undefined 
   const requestId = optStr(source, "requestId", at)
   const reason = optStr(source, "reason", at)
   const retryAfterMs = source.retryAfterMs === undefined || source.retryAfterMs === null ? undefined : num(source, "retryAfterMs", at)
+  const retried = source.retried === undefined || source.retried === null ? undefined : bool(source, "retried", at)
+  const thinkingPartId = optStr(source, "thinkingPartId", at)
   const cause = source.cause === undefined || source.cause === null ? [] : arr(source.cause, `${at}.cause`).map((frame, index) => {
     if (typeof frame !== "string") fail(`${at}.cause[${index}]`, "a string")
     return frame
@@ -137,6 +139,8 @@ function readModelFailure(value: unknown, at: string): ModelFailure | undefined 
     attempts: num(source, "attempts", at),
     waitedMs: num(source, "waitedMs", at),
     ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    ...(retried === undefined ? {} : { retried }),
+    ...(thinkingPartId === undefined ? {} : { thinkingPartId }),
   }
 }
 
@@ -708,16 +712,19 @@ function content(type: string, name: string, data: Json, at: string): EventConte
         }),
       }
     case "step/model-output-end": {
-      const failed = str(data, "status", at) === "failed"
+      const status = str(data, "status", at)
+      const failed = status === "failed"
       const error = failed ? str(data, "error", at) : undefined
       const presentation = failed ? readPresentation(data.presentation, `${at}.presentation`) : undefined
       const failure = failed ? readModelFailure(data.failure, `${at}.failure`) : undefined
+      const cancelled = status === "cancelled" ? str(data, "reason", at) : undefined
       return {
         kind: "model-end",
         requestId: str(data, "request_id", at),
         ...(error === undefined ? {} : { error }),
         ...(presentation === undefined ? {} : { presentation }),
         ...(failure === undefined ? {} : { failure }),
+        ...(cancelled === undefined ? {} : { cancelled }),
       }
     }
     case "context/configured":
