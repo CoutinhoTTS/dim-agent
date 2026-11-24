@@ -15,6 +15,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use dim_agent_capabilities::steer::REPLACED_BY_STEER;
+
 use crate::model::shell::ShellRun;
 use crate::model::view::{
     ApprovalView, CompactionDetail, CompactionDetailState, CompactionPart, CompactionPartSize,
@@ -649,6 +651,28 @@ impl Projection {
                 );
             }
             EventContent::ModelEnd(data) => {
+                let replaced = self.empty_thought(&data.request_id)
+                    && match &data.outcome {
+                        ModelOutputOutcome::Failed {
+                            failure: Some(failure),
+                            ..
+                        } => {
+                            failure.retried
+                                && self
+                                    .thinking_rows
+                                    .get(&data.request_id)
+                                    .and_then(|thought| thought.part_id.as_ref())
+                                    != failure.thinking_part_id.as_ref()
+                        }
+                        ModelOutputOutcome::Cancelled { reason } => reason == REPLACED_BY_STEER,
+                        _ => false,
+                    };
+                if replaced {
+                    self.discard_thinking(&data.request_id);
+                    if self.showed_thinking.remove(&data.request_id) {
+                        self.showed.remove(&data.request_id);
+                    }
+                }
                 self.thinking_characters.remove(&data.request_id);
                 let incomplete = self.showed.remove(&data.request_id);
                 self.showed_thinking.remove(&data.request_id);
@@ -4938,11 +4962,12 @@ mod tests {
                 },
             })),
         );
-        let decoded = serde_json::from_value::<dim_agent_types::AgentEvent>(end.clone());
+        let decoded = serde_json::from_value::<Event>(end.clone());
         assert!(
             decoded.is_ok(),
-            "the terminal fact carries its retry boundary: {}",
-            serde_json::to_string(&end).unwrap()
+            "the terminal fact carries its retry boundary: {} ({:?})",
+            serde_json::to_string(&end).unwrap(),
+            decoded.as_ref().err()
         );
         apply(&mut projection, &[end]);
         let rows = projection.snapshot().rows;
@@ -4982,11 +5007,12 @@ mod tests {
                 },
             })),
         );
-        let decoded = serde_json::from_value::<dim_agent_types::AgentEvent>(end.clone());
+        let decoded = serde_json::from_value::<Event>(end.clone());
         assert!(
             decoded.is_ok(),
-            "the terminal fact names the final attempt's block: {}",
-            serde_json::to_string(&end).unwrap()
+            "the terminal fact names the final attempt's block: {} ({:?})",
+            serde_json::to_string(&end).unwrap(),
+            decoded.as_ref().err()
         );
         apply(&mut projection, &[end]);
         let rows = projection.snapshot().rows;
