@@ -50,7 +50,7 @@ and `JobTask.stop_requested` remain. The `Terminal` (including its `OutputRecord
 immutable; `retainOutput` never mutates it (see §2.2).
 ### 1.3 Settlement
 `settle(taskId)` is the only release. Terminal → remove; Reserved/Running →
-`task_running`; absent or already settled → `task_unknown`. `kill` never releases. `kill`
+`task_running`; absent or already settled → `Ok`. `kill` never releases. `kill`
 on a `Reserved` record answers `task_running` and does not cancel the start; `kill` on a
 terminal record is a no-op.
 
@@ -235,7 +235,7 @@ A `write`/`resize` `task_ended` means the shell is terminal → step 7.
 8. **Reads.** `session.exec.output` → `tail(hostTaskId)`; `outputPage` → `output(hostTaskId,
    cursor, limit)`; a gone record reads the registered file; the shell display read is
    `output(shellId, ...)`/`tail(shellId)`. A `wait` timeout is `running`, no kill; settle
-   only terminal; a repeated settle is `task_unknown`.
+   only terminal; a repeated settle is `Ok`.
 ### 4.2 Exec: start, wait, handoff, stop
 ```text
 exec: read execShell() for the edition; keep & and heavy-search refusals

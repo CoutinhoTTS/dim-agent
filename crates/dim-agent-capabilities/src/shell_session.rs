@@ -1388,45 +1388,46 @@ impl ShellSession {
             }
             return Err(error.to_string());
         }
-        if let Some((_result_path, error_path)) = pwsh_paths {
-            let this = self.clone();
-            let host = self.host.clone();
-            let watched = task_id.clone();
-            let output_path = output_path.clone();
-            self.tasks.lock().await.spawn(async move {
-                let reply = host
-                    .wait(
-                        WaitRequest {
-                            task_id: watched.clone(),
-                            timeout_ms: None,
-                        },
-                        never_cancelled(),
-                    )
-                    .await;
-                if let Ok(reply) = reply {
-                    if this
-                        .inner
-                        .lock()
-                        .await
-                        .background
-                        .remove(&watched)
-                        .is_none()
-                    {
-                        return;
-                    }
-                    let _ = host
-                        .settle(TaskRequest {
-                            task_id: watched.clone(),
-                        })
-                        .await;
-                    let mut data = ended_from_reply(&watched, &reply, &output_path);
-                    if let ToolContent::Text(text) = &mut data.result.content {
-                        text.push_str(&format!("\nStandard error: {}", error_path.display()));
-                    }
-                    this.settle(data);
+        let error_path = pwsh_paths.as_ref().map(|(_, error)| error.clone());
+        let this = self.clone();
+        let host = self.host.clone();
+        let watched = task_id.clone();
+        let watched_output = output_path.clone();
+        self.tasks.lock().await.spawn(async move {
+            let reply = host
+                .wait(
+                    WaitRequest {
+                        task_id: watched.clone(),
+                        timeout_ms: None,
+                    },
+                    never_cancelled(),
+                )
+                .await;
+            if let Ok(reply) = reply {
+                if this
+                    .inner
+                    .lock()
+                    .await
+                    .background
+                    .remove(&watched)
+                    .is_none()
+                {
+                    return;
                 }
-            });
-        }
+                let _ = host
+                    .settle(TaskRequest {
+                        task_id: watched.clone(),
+                    })
+                    .await;
+                let mut data = ended_from_reply(&watched, &reply, &watched_output);
+                if let Some(error_path) = &error_path
+                    && let ToolContent::Text(text) = &mut data.result.content
+                {
+                    text.push_str(&format!("\nStandard error: {}", error_path.display()));
+                }
+                this.settle(data);
+            }
+        });
         let mut result = ToolResult::text(format!(
             "Background command started.\nTask ID: {task_id}\nOutput: {}",
             output_path.display()
@@ -1581,19 +1582,34 @@ impl ShellSession {
                     ),
                 });
             }
-            let terminated = killed.map_err(|error| std::io::Error::other(error.to_string()));
-            let _ = self
-                .host
-                .settle(TaskRequest {
-                    task_id: task.task_id.clone(),
-                })
-                .await;
-            let data = match terminated {
-                Ok(()) => ExecEndedData {
-                    task_id: task_id.to_owned(),
-                    status: ExecStatus::Cancelled,
-                    result: ToolResult::text("Background command stopped."),
-                },
+            let data = match killed {
+                Ok(()) => {
+                    let reply = self
+                        .host
+                        .wait(
+                            WaitRequest {
+                                task_id: task.task_id.clone(),
+                                timeout_ms: None,
+                            },
+                            never_cancelled(),
+                        )
+                        .await
+                        .ok();
+                    let _ = self
+                        .host
+                        .settle(TaskRequest {
+                            task_id: task.task_id.clone(),
+                        })
+                        .await;
+                    reply.map_or_else(
+                        || ExecEndedData {
+                            task_id: task_id.to_owned(),
+                            status: ExecStatus::Cancelled,
+                            result: ToolResult::text("Background command stopped."),
+                        },
+                        |reply| ended_from_reply(task_id, &reply, &task.output_path),
+                    )
+                }
                 Err(error) => {
                     let mut result = ToolResult::error(format!(
                         "Background command could not be terminated: {error}\nOutput: {}",
@@ -1877,6 +1893,7 @@ fn never_cancelled() -> crate::host::CancelledFn {
 fn exit_line(code: &str) -> String {
     match code {
         "failed" => "[Command failed]".to_owned(),
+        "cancelled" => "[Command cancelled]".to_owned(),
         "unknown" => "[Command finished with unknown exit code]".to_owned(),
         code => format!("[Command finished with exit code {code}]"),
     }
@@ -1884,7 +1901,17 @@ fn exit_line(code: &str) -> String {
 
 fn ended_from_reply(task_id: &str, reply: &WaitReply, output_path: &Path) -> ExecEndedData {
     let code = wait_code(reply);
-    let mut result = ended_result(task_id, output_path, &reply.preview, &code);
+    let mut result = if matches!(
+        reply.failure,
+        Some(
+            crate::host_platform::TaskFailure::ShellReset
+                | crate::host_platform::TaskFailure::ShellExited
+        )
+    ) {
+        reset_result(task_id, output_path, &reply.preview)
+    } else {
+        ended_result(task_id, output_path, &reply.preview, &code)
+    };
     if let Some(failure) = &reply.failure
         && let ToolContent::Text(text) = &mut result.content
     {
