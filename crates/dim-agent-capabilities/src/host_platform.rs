@@ -17,13 +17,13 @@ use std::{
     io,
     path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
-    sync::Arc,
+    sync::{Arc, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, ChildStderr, ChildStdout},
-    sync::Mutex,
+    sync::{Mutex, watch},
 };
 use tokio_util::sync::CancellationToken;
 
@@ -31,6 +31,14 @@ mod confined;
 mod exec_shell_settings;
 #[cfg(unix)]
 mod isolation;
+pub(crate) mod output;
+mod task;
+
+pub(crate) use task::{OutputRecord, TaskKind, TaskRecord, TaskStatus, Terminal};
+
+/// Step 1 keeps the old table name as an alias; step 3 removes it with the exec handoff.
+#[allow(dead_code, reason = "step 1 compatibility name; removed in step 3")]
+pub(crate) type ExecutionTask = TaskKind;
 pub use confined::{
     ConfinedError, ConfinedOutput, ConfinedSpec, ConfinedStream, Confinement, SystemServices,
 };
@@ -228,14 +236,6 @@ const ENVIRONMENT: &[&str] = &[
 
 /// Process facts and the source of the exec shell preference.
 #[derive(Clone)]
-pub(crate) enum ExecutionTask {
-    Command(Arc<crate::workspace_tools::exec::CommandTask>),
-    Shell(Arc<shell::ShellTask>),
-    Job(Arc<shell::ShellJob>),
-    ShellCommand(Arc<shell::ShellCommand>),
-}
-
-#[derive(Clone)]
 pub struct HostPlatform {
     mounted: std::sync::Weak<Self>,
     pub home: PathBuf,
@@ -250,7 +250,7 @@ pub struct HostPlatform {
     /// The fixed system roots, captured when the platform mounts. The sandbox
     /// and file-access facts read this one list.
     pub platform_roots: Vec<PathBuf>,
-    pub(crate) commands: Arc<std::sync::Mutex<std::collections::HashMap<String, ExecutionTask>>>,
+    pub(crate) commands: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<TaskRecord>>>>,
     pub(crate) command_shutdown: CancellationToken,
     pub(crate) command_workers: tokio_util::task::TaskTracker,
     shell: Arc<Mutex<ResolvedShell>>,
@@ -1138,21 +1138,12 @@ impl HostPlatform {
         request: WaitRequest,
         cancelled: crate::host::CancelledFn,
     ) -> Result<WaitReply, HostPlatformError> {
-        if let Some(shell) = self.shell_task(&request.task_id) {
-            return tokio::select! {
-                biased;
-                _ = cancelled() => Err(HostPlatformError::Cancelled),
-                value = shell.wait(request.timeout_ms) => Ok(value),
-            };
+        let task = self
+            .task(&request.task_id)
+            .ok_or(HostPlatformError::TaskUnknown)?;
+        if matches!(task.kind, TaskKind::Job(_)) {
+            return Err(HostPlatformError::TaskUnknown);
         }
-        if let Some(command) = self.shell_command(&request.task_id) {
-            return tokio::select! {
-                biased;
-                _ = cancelled() => Err(HostPlatformError::Cancelled),
-                value = command.wait(request.timeout_ms) => Ok(value),
-            };
-        }
-        let task = self.command_task(&request.task_id)?;
         tokio::select! {
             biased;
             _ = cancelled() => Err(HostPlatformError::Cancelled),
@@ -1162,65 +1153,125 @@ impl HostPlatform {
 
     /// Kills a task's process tree.
     pub async fn kill(&self, request: TaskRequest) -> Result<(), HostPlatformError> {
-        if let Some(shell) = self.shell_task(&request.task_id) {
-            return shell
-                .terminate()
-                .await
-                .map_err(|error| HostPlatformError::Failed(error.to_string()));
-        }
-        if let Some(job) = self.job_task(&request.task_id) {
-            let mut pid = *job.pid.lock().unwrap();
-            if pid.is_none() {
-                let _ = tokio::time::timeout(Duration::from_secs(2), job.ready.notified()).await;
-                pid = *job.pid.lock().unwrap();
-            }
-            let Some(pid) = pid else {
-                return Err(HostPlatformError::TaskRunning);
-            };
-            kill_job(pid)
-                .await
-                .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
-            *job.ended.lock().unwrap() = true;
+        let task = self
+            .task(&request.task_id)
+            .ok_or(HostPlatformError::TaskUnknown)?;
+        if task.is_terminal() {
             return Ok(());
         }
-        if self.shell_command(&request.task_id).is_some() {
-            return Err(HostPlatformError::TaskUnknown);
+        if !task.is_running() {
+            return Err(HostPlatformError::TaskRunning);
         }
-        let task = self.command_task(&request.task_id)?;
-        task.terminate()
-            .await
-            .map_err(|error| HostPlatformError::Failed(error.to_string()))
+        match &task.kind {
+            TaskKind::Command(command) => {
+                command.kill.cancel();
+                let terminal = task.wait(None).await;
+                match terminal.status {
+                    WaitStatus::Failed => Err(HostPlatformError::Failed(
+                        task.terminal()
+                            .and_then(|terminal| terminal.failure.clone())
+                            .unwrap_or_else(|| "execution task failed".into()),
+                    )),
+                    _ => Ok(()),
+                }
+            }
+            TaskKind::Shell(shell) => {
+                shell.terminate();
+                let terminal = task.wait(None).await;
+                match terminal.status {
+                    WaitStatus::Failed => Err(HostPlatformError::Failed(
+                        task.terminal()
+                            .and_then(|terminal| terminal.failure.clone())
+                            .unwrap_or_else(|| "execution task failed".into()),
+                    )),
+                    _ => Ok(()),
+                }
+            }
+            TaskKind::ShellCommand(_) => Err(HostPlatformError::TaskUnknown),
+            TaskKind::Job(job) => {
+                job.stop_requested
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                let mut pid = job.pid.subscribe();
+                let mut current = *pid.borrow_and_update();
+                if current.is_none() {
+                    let _ = tokio::time::timeout(Duration::from_secs(2), pid.changed()).await;
+                    current = *pid.borrow_and_update();
+                }
+                if task.is_terminal() {
+                    return Ok(());
+                }
+                let Some(pid) = current else {
+                    return Err(HostPlatformError::TaskRunning);
+                };
+                kill_job(pid)
+                    .await
+                    .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
+                task.finish(Terminal {
+                    status: TaskStatus::Cancelled,
+                    exit_code: None,
+                    signal: None,
+                    duration_ms: task.started.elapsed().as_millis() as u64,
+                    failure: None,
+                    output: job.output_record(),
+                    note: None,
+                });
+                Ok(())
+            }
+        }
     }
 
     /// Releases an ended task's record.
     pub async fn settle(&self, request: TaskRequest) -> Result<(), HostPlatformError> {
-        if let Some(shell) = self.shell_task(&request.task_id) {
-            if shell.exit().is_some() {
-                self.settle_shell(&request.task_id, &shell);
-                return Ok(());
-            }
+        let task = self
+            .task(&request.task_id)
+            .ok_or(HostPlatformError::TaskUnknown)?;
+        if !task.is_terminal() {
             return Err(HostPlatformError::TaskRunning);
         }
-        if let Some(job) = self.job_task(&request.task_id) {
-            if job.pid.lock().unwrap().is_some() && !*job.ended.lock().unwrap() {
-                return Err(HostPlatformError::TaskRunning);
+        let mut commands = self.commands.lock().unwrap();
+        commands.remove(&request.task_id);
+        if let TaskKind::Shell(shell) = &task.kind {
+            shell.sweep();
+            for child in shell.children_list() {
+                commands.remove(&child.id);
             }
-            self.commands.lock().unwrap().remove(&request.task_id);
-            return Ok(());
         }
-        if let Some(command) = self.shell_command(&request.task_id) {
-            if !command.ended() {
-                return Err(HostPlatformError::TaskRunning);
-            }
-            self.commands.lock().unwrap().remove(&request.task_id);
-            return Ok(());
-        }
-        let task = self.command_task(&request.task_id)?;
-        if !task.ended() {
-            return Err(HostPlatformError::TaskRunning);
-        }
-        self.settle_command(&request.task_id, &task);
         Ok(())
+    }
+
+    pub(crate) fn task(&self, id: &str) -> Option<Arc<TaskRecord>> {
+        self.commands.lock().unwrap().get(id).cloned()
+    }
+
+    pub(crate) fn shell_task(&self, id: &str) -> Option<Arc<shell::ShellTask>> {
+        match &self.task(id)?.kind {
+            TaskKind::Shell(shell) => Some(shell.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn shell_command(&self, id: &str) -> Option<Arc<shell::ShellCommand>> {
+        match &self.task(id)?.kind {
+            TaskKind::ShellCommand(command) => Some(command.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn job_marker(&self, id: &str) -> Option<String> {
+        match &self.task(id)?.kind {
+            TaskKind::Job(job) => Some(job.end_marker.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn job_completion(
+        &self,
+        id: &str,
+    ) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        match &self.task(id)?.kind {
+            TaskKind::Job(job) => job.completion.clone(),
+            _ => None,
+        }
     }
 
     /// Starts a persistent PTY shell on this node and returns the task id.
@@ -1304,22 +1355,25 @@ impl HostPlatform {
                 .parent()
                 .unwrap_or_else(|| Path::new("."));
             let command = Arc::new(shell::ShellCommand::new(
+                shell.clone(),
                 start.start_marker,
                 start.end_marker,
                 directory.join(format!("{}.log", start.task_id)),
             ));
+            let record = TaskRecord::new(
+                start.task_id.clone(),
+                TaskKind::ShellCommand(command.clone()),
+            );
             {
                 let mut commands = self.commands.lock().unwrap();
                 if commands.contains_key(&start.task_id) {
                     return Err(HostPlatformError::TaskExists);
                 }
-                commands.insert(
-                    start.task_id.clone(),
-                    ExecutionTask::ShellCommand(command.clone()),
-                );
+                commands.insert(start.task_id.clone(), record.clone());
             }
-            shell.set_active_command(Some(command.clone()));
-            Some((start.task_id, command))
+            shell.set_active_command(Some(record.clone()));
+            shell.add_child(&record);
+            Some((start.task_id, record))
         } else {
             None
         };
@@ -1332,20 +1386,36 @@ impl HostPlatform {
                     "job taskId must be a single filename component".into(),
                 ));
             }
-            let job = Arc::new(shell::ShellJob {
-                pid: std::sync::Mutex::new(None),
-                ended: std::sync::Mutex::new(false),
-                end_marker: start.end_marker,
-                ready: tokio::sync::Notify::new(),
+            let directory = shell
+                .output_path()
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .to_path_buf();
+            let output_path = directory.join(format!("{}.log", start.task_id));
+            let completion = shell.pwsh().then(|| {
+                (
+                    directory.join(format!("{}.result", start.task_id)),
+                    directory.join(format!("{}.err", start.task_id)),
+                )
             });
+            let job = Arc::new(shell::ShellJob {
+                shell: Arc::downgrade(&shell),
+                pid: watch::channel(None).0,
+                end_marker: start.end_marker,
+                output_path,
+                completion,
+                stop_requested: AtomicBool::new(false),
+            });
+            let record = TaskRecord::new(start.task_id.clone(), TaskKind::Job(job.clone()));
             {
                 let mut commands = self.commands.lock().unwrap();
                 if commands.contains_key(&start.task_id) {
                     return Err(HostPlatformError::TaskExists);
                 }
-                commands.insert(start.task_id.clone(), ExecutionTask::Job(job.clone()));
+                commands.insert(start.task_id.clone(), record.clone());
             }
-            Some((start.task_id, job))
+            shell.add_child(&record);
+            Some((start.task_id, record))
         } else {
             None
         };
@@ -1361,6 +1431,12 @@ impl HostPlatform {
             }
             shell.set_active_command(None);
             return Err(HostPlatformError::Failed(error.to_string()));
+        }
+        if let Some((_, record)) = &command {
+            record.start();
+        }
+        if let Some((_, record)) = &job {
+            record.start();
         }
         Ok(())
     }
@@ -3371,9 +3447,9 @@ impl HostPlatform {
         crate::workspace_tools::background::OutputPage,
         crate::workspace_tools::background::OutputPageError,
     > {
-        use crate::workspace_tools::{
-            background::{OutputPageError, PAGE_CHAR_TRAILING_BYTES, decode_page},
-            exec::OUTPUT_FILE_BYTE_LIMIT,
+        use crate::host_platform::output::OUTPUT_FILE_BYTE_LIMIT;
+        use crate::workspace_tools::background::{
+            OutputPageError, PAGE_CHAR_TRAILING_BYTES, decode_page,
         };
         use std::io::SeekFrom;
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -3432,19 +3508,24 @@ pub fn signal_name(_: ExitStatus) -> Option<String> {
 }
 
 pub(crate) mod shell {
+    use super::output::bounded_preview;
+    use super::output::tail_bytes;
     use super::{
         ExecShellRuntime, HostPlatform, ProcessSpec, ProcessSpecError, PtyProcessTree, PtySize,
         ShellEdition, ShellStatus,
     };
-    use crate::workspace_tools::{
-        background::{OutputPageError, PAGE_CHAR_TRAILING_BYTES, decode_page},
-        exec::{bounded_preview, tail_bytes},
+    use super::{TaskKind, TaskRecord, TaskStatus, Terminal, terminate_job};
+    use crate::workspace_tools::background::{
+        OutputPageError, PAGE_CHAR_TRAILING_BYTES, decode_page,
     };
     use std::{
         collections::VecDeque,
         io::{self, Read, Write},
         path::{Path, PathBuf},
-        sync::{Arc, Condvar, Mutex},
+        sync::{
+            Arc, Condvar, Mutex, Weak,
+            atomic::{AtomicBool, Ordering},
+        },
         time::{Duration, Instant},
     };
     use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
@@ -3462,13 +3543,13 @@ pub(crate) mod shell {
         pty: AsyncMutex<Option<PtyProcessTree>>,
         capture: Mutex<Capture>,
         events: Mutex<ShellEvents>,
-        active_command: Mutex<Option<Arc<ShellCommand>>>,
+        active_command: Mutex<Option<Weak<super::TaskRecord>>>,
+        children: Mutex<Vec<Weak<super::TaskRecord>>>,
         event_space: Condvar,
         event_notify: Arc<Notify>,
-        terminal: watch::Sender<Option<ShellExit>>,
         kill: CancellationToken,
         path: PathBuf,
-        started: Instant,
+        edition: super::ShellEdition,
     }
 
     impl Drop for ShellTask {
@@ -3478,16 +3559,15 @@ pub(crate) mod shell {
     }
 
     pub(crate) struct ShellCommand {
+        pub(crate) shell: Arc<ShellTask>,
         start_marker: String,
         end_marker: String,
         path: PathBuf,
         state: Mutex<ShellCommandState>,
-        notify: Notify,
     }
 
     struct ShellCommandState {
         started: bool,
-        ended: bool,
         code: Option<String>,
         output: String,
         bytes: u64,
@@ -3497,14 +3577,19 @@ pub(crate) mod shell {
     }
 
     impl ShellCommand {
-        pub(crate) fn new(start_marker: String, end_marker: String, path: PathBuf) -> Self {
+        pub(crate) fn new(
+            shell: Arc<ShellTask>,
+            start_marker: String,
+            end_marker: String,
+            path: PathBuf,
+        ) -> Self {
             Self {
+                shell,
                 start_marker,
                 end_marker,
                 path,
                 state: Mutex::new(ShellCommandState {
                     started: false,
-                    ended: false,
                     code: None,
                     output: String::new(),
                     bytes: 0,
@@ -3512,17 +3597,14 @@ pub(crate) mod shell {
                     tail: String::new(),
                     file: None,
                 }),
-                notify: Notify::new(),
             }
         }
 
-        fn feed(&self, line: &str) {
+        fn feed(&self, line: &str) -> Option<String> {
             let mut state = self.state.lock().unwrap();
             let mut rest = line;
             if !state.started {
-                let Some(position) = rest.find(&self.start_marker) else {
-                    return;
-                };
+                let position = rest.find(&self.start_marker)?;
                 state.started = true;
                 rest = &rest[position + self.start_marker.len()..];
             }
@@ -3540,25 +3622,32 @@ pub(crate) mod shell {
             }
             let Some(position) = rest.find(&self.end_marker) else {
                 if last_full_marker(rest).is_some() {
-                    return;
+                    return None;
                 }
                 append_command_output(&mut state, rest);
-                return;
+                return None;
             };
             append_command_output(&mut state, &rest[..position]);
-            let code = rest[position + self.end_marker.len()..].trim();
-            state.code = Some(code.to_owned());
-            state.ended = true;
-            drop(state);
-            self.notify.notify_waiters();
-        }
-
-        pub(crate) fn ended(&self) -> bool {
-            self.state.lock().unwrap().ended
+            let code = rest[position + self.end_marker.len()..].trim().to_owned();
+            state.code = Some(code.clone());
+            Some(code)
         }
 
         pub(crate) fn output_path(&self) -> &Path {
             &self.path
+        }
+
+        pub(crate) fn output_record(&self) -> super::OutputRecord {
+            let state = self.state.lock().unwrap();
+            super::OutputRecord {
+                path: self.path.to_string_lossy().into_owned(),
+                bytes: state.bytes,
+                truncated: state.omitted > 0,
+                text: None,
+                preview: state.tail.clone(),
+                preview_truncated: state.omitted > 0,
+                failure: None,
+            }
         }
 
         pub(crate) fn tail(&self) -> crate::workspace_tools::exec::OutputTail {
@@ -3587,58 +3676,6 @@ pub(crate) mod shell {
                 state: None,
             }
         }
-
-        pub(crate) async fn wait(&self, timeout_ms: Option<u64>) -> super::WaitReply {
-            let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
-            loop {
-                {
-                    let state = self.state.lock().unwrap();
-                    if state.ended {
-                        return super::WaitReply {
-                            status: match state.code.as_deref() {
-                                Some("0") => super::WaitStatus::Exited,
-                                Some("failed") => super::WaitStatus::Failed,
-                                Some(_) => super::WaitStatus::Failed,
-                                None => super::WaitStatus::Exited,
-                            },
-                            exit_code: state.code.as_ref().and_then(|code| code.parse().ok()),
-                            signal: None,
-                            duration_ms: 0,
-                            output_path: self.path.to_string_lossy().into_owned(),
-                            output_bytes: state.bytes,
-                            output_truncated: state.omitted > 0,
-                            preview: state.tail.clone(),
-                            preview_truncated: state.omitted > 0,
-                            failure_note: None,
-                        };
-                    }
-                }
-                let Some(deadline) = deadline else {
-                    self.notify.notified().await;
-                    continue;
-                };
-                if Instant::now() >= deadline {
-                    let state = self.state.lock().unwrap();
-                    return super::WaitReply {
-                        status: super::WaitStatus::Running,
-                        exit_code: None,
-                        signal: None,
-                        duration_ms: 0,
-                        output_path: self.path.to_string_lossy().into_owned(),
-                        output_bytes: state.bytes,
-                        output_truncated: state.omitted > 0,
-                        preview: state.tail.clone(),
-                        preview_truncated: state.omitted > 0,
-                        failure_note: None,
-                    };
-                }
-                let _ = tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(deadline),
-                    self.notify.notified(),
-                )
-                .await;
-            }
-        }
     }
 
     fn append_command_output(state: &mut ShellCommandState, text: &str) {
@@ -3664,18 +3701,43 @@ pub(crate) mod shell {
     }
 
     pub(crate) struct ShellJob {
-        pub(crate) pid: Mutex<Option<u32>>,
-        pub(crate) ended: Mutex<bool>,
+        pub(crate) shell: Weak<ShellTask>,
+        pub(crate) pid: watch::Sender<Option<u32>>,
         pub(crate) end_marker: String,
-        pub(crate) ready: Notify,
+        pub(crate) output_path: PathBuf,
+        pub(crate) completion: Option<(PathBuf, PathBuf)>,
+        pub(crate) stop_requested: AtomicBool,
     }
 
-    #[derive(Clone)]
-    pub(crate) struct ShellExit {
-        pub(crate) exit: Option<portable_pty::ExitStatus>,
-        status: &'static str,
-        error: Option<String>,
-        duration: u64,
+    impl ShellJob {
+        pub(crate) fn output_record(&self) -> super::OutputRecord {
+            use std::io::{Read, Seek, SeekFrom};
+            let bytes = std::fs::metadata(&self.output_path)
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            let text = std::fs::File::open(&self.output_path).map_or_else(
+                |_| String::new(),
+                |mut file| {
+                    let window = 64 * 1024;
+                    if bytes > window {
+                        let _ = file.seek(SeekFrom::End(-(window as i64)));
+                    }
+                    let mut tail = Vec::new();
+                    let _ = file.read_to_end(&mut tail);
+                    String::from_utf8_lossy(&tail).into_owned()
+                },
+            );
+            let (preview, preview_truncated) = bounded_preview(&text, bytes as usize);
+            super::OutputRecord {
+                path: self.output_path.to_string_lossy().into_owned(),
+                bytes,
+                truncated: false,
+                text: None,
+                preview,
+                preview_truncated,
+                failure: None,
+            }
+        }
     }
 
     const EVENT_RETAIN_CHARS: usize = 1024 * 1024;
@@ -3863,60 +3925,73 @@ pub(crate) mod shell {
             let (spec, temporary, _) = self
                 .prepare_isolated_process(spec, roots, Some(directory))
                 .await?;
-            let mut commands = self.commands.lock().unwrap();
-            if self.command_shutdown.is_cancelled() {
-                return Err(ProcessSpecError {
-                    code: "cancelled",
-                    reason: "Execution host closed".into(),
+            let (shell, record, mut file) = {
+                let mut commands = self.commands.lock().unwrap();
+                if self.command_shutdown.is_cancelled() {
+                    return Err(ProcessSpecError {
+                        code: "cancelled",
+                        reason: "Execution host closed".into(),
+                    });
+                }
+                if commands.contains_key(id) {
+                    return Err(ProcessSpecError {
+                        code: "task_exists",
+                        reason: "Execution task already exists".into(),
+                    });
+                }
+                std::fs::create_dir_all(directory).map_err(|error| ProcessSpecError {
+                    code: "io",
+                    reason: error.to_string(),
+                })?;
+                let path = directory.join(format!("{id}.log"));
+                let mut options = std::fs::OpenOptions::new();
+                options.create_new(true).append(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600);
+                }
+                let file = options.open(&path).map_err(|error| ProcessSpecError {
+                    code: if error.kind() == io::ErrorKind::AlreadyExists {
+                        "task_exists"
+                    } else {
+                        "io"
+                    },
+                    reason: error.to_string(),
+                })?;
+                let shell = Arc::new(ShellTask {
+                    pty: AsyncMutex::new(None),
+                    capture: Mutex::default(),
+                    events: Mutex::default(),
+                    active_command: Mutex::new(None),
+                    children: Mutex::new(Vec::new()),
+                    event_space: Condvar::new(),
+                    event_notify: Arc::new(Notify::new()),
+                    kill: CancellationToken::new(),
+                    path,
+                    edition: runtime.edition,
                 });
-            }
-            if commands.contains_key(id) {
-                return Err(ProcessSpecError {
-                    code: "task_exists",
-                    reason: "Execution task already exists".into(),
-                });
-            }
-            std::fs::create_dir_all(directory).map_err(|error| ProcessSpecError {
-                code: "io",
-                reason: error.to_string(),
-            })?;
-            let path = directory.join(format!("{id}.log"));
-            let mut options = std::fs::OpenOptions::new();
-            options.create_new(true).append(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                options.mode(0o600);
-            }
-            let mut file = options.open(&path).map_err(|error| ProcessSpecError {
-                code: if error.kind() == io::ErrorKind::AlreadyExists {
-                    "task_exists"
-                } else {
-                    "io"
-                },
-                reason: error.to_string(),
-            })?;
-            let mut pty = self.spawn_pty(spec, size).map_err(|e| ProcessSpecError {
-                code: "failed",
-                reason: e.to_string(),
-            })?;
+                let record = TaskRecord::new(id.to_owned(), TaskKind::Shell(shell.clone()));
+                commands.insert(id.to_owned(), record.clone());
+                (shell, record, file)
+            };
+            let mut pty = match self.spawn_pty(spec, size) {
+                Ok(pty) => pty,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&shell.path);
+                    self.commands.lock().unwrap().remove(id);
+                    return Err(ProcessSpecError {
+                        code: "failed",
+                        reason: error.to_string(),
+                    });
+                }
+            };
             pty.hold(temporary);
             let mut reader = pty.take_reader();
-            let shell = Arc::new(ShellTask {
-                pty: AsyncMutex::new(Some(pty)),
-                capture: Mutex::default(),
-                events: Mutex::default(),
-                active_command: Mutex::new(None),
-                event_space: Condvar::new(),
-                event_notify: Arc::new(Notify::new()),
-                terminal: watch::channel(None).0,
-                kill: CancellationToken::new(),
-                path,
-                started: Instant::now(),
-            });
-            commands.insert(id.into(), super::ExecutionTask::Shell(shell.clone()));
-            drop(commands);
+            *shell.pty.lock().await = Some(pty);
+            record.start();
             let jobs = self.commands.clone();
+            let shell_record = record.clone();
             let pump = Arc::downgrade(&shell);
             let (drained, reader_finished) = tokio::sync::oneshot::channel();
             std::thread::spawn(move || {
@@ -3935,17 +4010,12 @@ pub(crate) mod shell {
                     while let Some(newline) = pending.find('\n') {
                         let line: String = pending.drain(..=newline).collect();
                         let active = pump.active_command.lock().unwrap().clone();
-                        if let Some(command) = active {
-                            command.feed(&line);
-                            if command.ended() {
-                                let mut active = pump.active_command.lock().unwrap();
-                                if active
-                                    .as_ref()
-                                    .is_some_and(|current| Arc::ptr_eq(current, &command))
-                                {
-                                    *active = None;
-                                }
-                            }
+                        if let Some(record) = active.and_then(|weak| weak.upgrade())
+                            && let TaskKind::ShellCommand(command) = &record.kind
+                            && let Some(code) = command.feed(&line)
+                        {
+                            record.finish(shell_command_terminal(&record, command, code));
+                            pump.clear_active(&record);
                         }
                         if let Some((task_id, reported)) = parse_shell_job(&line) {
                             let pid = pump
@@ -3955,29 +4025,54 @@ pub(crate) mod shell {
                                 .and_then(|pty| pty.job_pid(reported).ok());
                             if let Some(pid) = pid {
                                 let jobs = jobs.lock().unwrap();
-                                if let Some(super::ExecutionTask::Job(job)) = jobs.get(&task_id) {
-                                    let mut slot = job.pid.lock().unwrap();
-                                    if slot.is_none() {
-                                        *slot = Some(pid);
-                                        drop(slot);
-                                        job.ready.notify_waiters();
+                                if let Some(record) = jobs.get(&task_id)
+                                    && let TaskKind::Job(job) = &record.kind
+                                    && job
+                                        .shell
+                                        .upgrade()
+                                        .is_some_and(|shell| Arc::ptr_eq(&shell, &pump))
+                                {
+                                    job.pid.send_replace(Some(pid));
+                                    if job.stop_requested.load(Ordering::SeqCst) {
+                                        let _ = terminate_job(pid);
+                                        record.finish(Terminal {
+                                            status: TaskStatus::Cancelled,
+                                            exit_code: None,
+                                            signal: None,
+                                            duration_ms: record.started.elapsed().as_millis()
+                                                as u64,
+                                            failure: None,
+                                            output: job.output_record(),
+                                            note: None,
+                                        });
                                     }
                                 }
                             }
                         }
                         {
                             let jobs = jobs.lock().unwrap();
-                            for task in jobs.values() {
-                                if let super::ExecutionTask::Job(job) = task
-                                    && line.contains(&job.end_marker)
+                            for record in jobs.values() {
+                                if record.is_terminal() {
+                                    continue;
+                                }
+                                let TaskKind::Job(job) = &record.kind else {
+                                    continue;
+                                };
+                                if !job
+                                    .shell
+                                    .upgrade()
+                                    .is_some_and(|shell| Arc::ptr_eq(&shell, &pump))
                                 {
-                                    *job.ended.lock().unwrap() = true;
+                                    continue;
+                                }
+                                if line.contains(&job.end_marker) {
+                                    record.finish(job_terminal(record, job));
                                 }
                             }
                         }
                     }
                     let mut capture = pump.capture.lock().unwrap();
-                    if pump.exit().is_some() {
+                    if shell_record.is_terminal() {
                         break;
                     }
                     capture.total += chunk.len() as u64;
@@ -3987,7 +4082,7 @@ pub(crate) mod shell {
                             capture.text.len() - tail_bytes(&capture.text, RETAINED).len();
                         capture.text.drain(..dropped);
                     }
-                    let room = (crate::workspace_tools::exec::OUTPUT_FILE_BYTE_LIMIT as usize)
+                    let room = (crate::host_platform::output::OUTPUT_FILE_BYTE_LIMIT as usize)
                         .saturating_sub(written);
                     if room > 0 {
                         let take = chunk.len().min(room);
@@ -3998,14 +4093,14 @@ pub(crate) mod shell {
                     drop(capture);
                     {
                         let mut events = pump.events.lock().unwrap();
-                        while events.chars > EVENT_RETAIN_CHARS && pump.exit().is_none() {
+                        while events.chars > EVENT_RETAIN_CHARS && !shell_record.is_terminal() {
                             let (guard, _) = pump
                                 .event_space
                                 .wait_timeout(events, Duration::from_millis(100))
                                 .unwrap();
                             events = guard;
                         }
-                        if pump.exit().is_none() {
+                        if !shell_record.is_terminal() {
                             events.push(chunk);
                         }
                     }
@@ -4014,6 +4109,7 @@ pub(crate) mod shell {
                 let _ = drained.send(());
             });
             let worker = shell.clone();
+            let worker_record = record.clone();
             let shutdown = self.command_shutdown.clone();
             self.command_workers.spawn(async move {
                 let mut poll = tokio::time::interval(Duration::from_millis(100));
@@ -4050,47 +4146,15 @@ pub(crate) mod shell {
                 };
                 worker.pty.lock().await.take();
                 let _ = tokio::time::timeout(
-                    crate::workspace_tools::exec::EXIT_STDIO_GRACE,
+                    crate::host_platform::output::EXIT_STDIO_GRACE,
                     reader_finished,
                 )
                 .await;
-                let _capture = worker.capture.lock().unwrap();
-
-                worker.terminal.send_replace(Some(ShellExit {
-                    exit,
-                    status,
-                    error,
-                    duration: worker.started.elapsed().as_millis() as u64,
-                }));
+                let terminal =
+                    shell_terminal(&worker_record, worker.output_record(), exit, status, error);
+                worker_record.finish(terminal);
             });
             Ok((shell, runtime))
-        }
-        pub(crate) fn shell_task(&self, id: &str) -> Option<Arc<ShellTask>> {
-            match self.commands.lock().unwrap().get(id) {
-                Some(super::ExecutionTask::Shell(shell)) => Some(shell.clone()),
-                _ => None,
-            }
-        }
-
-        pub(crate) fn shell_command(&self, id: &str) -> Option<Arc<ShellCommand>> {
-            match self.commands.lock().unwrap().get(id) {
-                Some(super::ExecutionTask::ShellCommand(command)) => Some(command.clone()),
-                _ => None,
-            }
-        }
-
-        pub(crate) fn job_task(&self, id: &str) -> Option<Arc<ShellJob>> {
-            match self.commands.lock().unwrap().get(id) {
-                Some(super::ExecutionTask::Job(job)) => Some(job.clone()),
-                _ => None,
-            }
-        }
-        pub(crate) fn settle_shell(&self, id: &str, shell: &Arc<ShellTask>) {
-            let mut shells = self.commands.lock().unwrap();
-            if matches!(shells.get(id),Some(super::ExecutionTask::Shell(s)) if Arc::ptr_eq(s,shell))
-            {
-                shells.remove(id);
-            }
         }
     }
 
@@ -4099,8 +4163,86 @@ pub(crate) mod shell {
             &self.path
         }
 
-        pub(crate) fn set_active_command(&self, command: Option<Arc<ShellCommand>>) {
-            *self.active_command.lock().unwrap() = command;
+        pub(crate) fn pwsh(&self) -> bool {
+            matches!(
+                self.edition,
+                super::ShellEdition::Pwsh | super::ShellEdition::WindowsPowershell
+            )
+        }
+
+        pub(crate) fn set_active_command(&self, command: Option<Arc<super::TaskRecord>>) {
+            *self.active_command.lock().unwrap() = command.map(|command| Arc::downgrade(&command));
+        }
+
+        pub(crate) fn clear_active(&self, record: &super::TaskRecord) {
+            let mut active = self.active_command.lock().unwrap();
+            if active
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|current| std::ptr::eq(Arc::as_ptr(&current), record))
+            {
+                *active = None;
+            }
+        }
+
+        pub(crate) fn add_child(&self, record: &Arc<super::TaskRecord>) {
+            self.children.lock().unwrap().push(Arc::downgrade(record));
+        }
+
+        pub(crate) fn children_list(&self) -> Vec<Arc<super::TaskRecord>> {
+            self.children
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(Weak::upgrade)
+                .collect()
+        }
+
+        pub(crate) fn sweep(&self) {
+            for record in self.children_list() {
+                if record.is_terminal() {
+                    continue;
+                }
+                let output = match &record.kind {
+                    super::TaskKind::ShellCommand(command) => command.output_record(),
+                    super::TaskKind::Job(job) => {
+                        if let Some(pid) = *job.pid.borrow() {
+                            let _ = terminate_job(pid);
+                        }
+                        job.output_record()
+                    }
+                    _ => super::OutputRecord::default(),
+                };
+                record.finish(super::Terminal {
+                    status: super::TaskStatus::Failed,
+                    exit_code: None,
+                    signal: None,
+                    duration_ms: record.started.elapsed().as_millis() as u64,
+                    failure: Some("shell_exited".into()),
+                    output,
+                    note: None,
+                });
+            }
+            self.active_command.lock().unwrap().take();
+        }
+
+        pub(crate) fn terminate(&self) {
+            self.kill.cancel();
+        }
+
+        pub(crate) fn output_record(&self) -> super::OutputRecord {
+            let capture = self.capture.lock().unwrap();
+            let (preview, preview_truncated) =
+                bounded_preview(&capture.text, capture.total as usize);
+            super::OutputRecord {
+                path: self.path.to_string_lossy().into_owned(),
+                bytes: capture.total,
+                truncated: capture.total > capture.text.len() as u64,
+                text: None,
+                preview,
+                preview_truncated,
+                failure: None,
+            }
         }
 
         pub(crate) fn state(&self) -> super::ShellState {
@@ -4133,26 +4275,6 @@ pub(crate) mod shell {
                     _ = tokio::time::sleep(remaining) => {}
                 }
             }
-        }
-        pub(crate) fn exit(&self) -> Option<ShellExit> {
-            self.terminal.borrow().clone()
-        }
-        pub(crate) async fn done(&self) -> ShellExit {
-            self.terminal
-                .subscribe()
-                .wait_for(Option::is_some)
-                .await
-                .expect("shell owner publishes completion")
-                .as_ref()
-                .unwrap()
-                .clone()
-        }
-        pub(crate) async fn terminate(&self) -> io::Result<()> {
-            self.kill.cancel();
-            self.done()
-                .await
-                .error
-                .map_or(Ok(()), |e| Err(io::Error::other(e)))
         }
         pub(crate) async fn write(&self, data: &[u8]) -> io::Result<()> {
             self.pty
@@ -4222,48 +4344,69 @@ pub(crate) mod shell {
                 truncated,
             }
         }
-        pub(crate) async fn wait(&self, ms: Option<u64>) -> super::WaitReply {
-            let end = if let Some(ms) = ms {
-                tokio::select! {
-                    biased;
-                    end = self.done() => Some(end),
-                    _ = tokio::time::sleep(Duration::from_millis(ms)) => None,
-                }
-            } else {
-                Some(self.done().await)
-            };
-            let tail = self.tail();
-            let capture = self.capture.lock().unwrap();
-            let status = match end.as_ref().map(|end| end.status) {
-                Some("exited") => super::WaitStatus::Exited,
-                Some("signaled") => super::WaitStatus::Signaled,
-                Some("timed_out") => super::WaitStatus::TimedOut,
-                Some("cancelled") => super::WaitStatus::Cancelled,
-                Some(_) => super::WaitStatus::Failed,
-                None => super::WaitStatus::Running,
-            };
-            let (exit_code, signal) = match end.as_ref().and_then(|end| end.exit.as_ref()) {
-                Some(exit) => (
-                    Some(exit.exit_code() as i32),
-                    exit.signal().map(str::to_owned),
-                ),
-                None => (None, None),
-            };
-            super::WaitReply {
-                status,
-                exit_code,
-                signal,
-                duration_ms: end
-                    .as_ref()
-                    .map(|end| end.duration)
-                    .unwrap_or_else(|| self.started.elapsed().as_millis() as u64),
-                output_path: self.path.to_string_lossy().into_owned(),
-                output_bytes: capture.total,
-                output_truncated: capture.total > capture.text.len() as u64,
-                preview: tail.text,
-                preview_truncated: tail.truncated,
-                failure_note: end.and_then(|end| end.error),
-            }
+    }
+
+    fn shell_command_terminal(
+        record: &super::TaskRecord,
+        command: &ShellCommand,
+        code: String,
+    ) -> super::Terminal {
+        let status = match code.as_str() {
+            "0" => super::TaskStatus::Exited,
+            _ => super::TaskStatus::Failed,
+        };
+        super::Terminal {
+            status,
+            exit_code: code.parse().ok(),
+            signal: None,
+            duration_ms: record.started.elapsed().as_millis() as u64,
+            failure: (status == super::TaskStatus::Failed).then(|| code.clone()),
+            output: command.output_record(),
+            note: None,
+        }
+    }
+
+    fn job_terminal(record: &super::TaskRecord, job: &ShellJob) -> super::Terminal {
+        super::Terminal {
+            status: super::TaskStatus::Exited,
+            exit_code: None,
+            signal: None,
+            duration_ms: record.started.elapsed().as_millis() as u64,
+            failure: None,
+            output: job.output_record(),
+            note: None,
+        }
+    }
+
+    fn shell_terminal(
+        record: &super::TaskRecord,
+        output: super::OutputRecord,
+        exit: Option<portable_pty::ExitStatus>,
+        status: &str,
+        error: Option<String>,
+    ) -> super::Terminal {
+        let status = match status {
+            "exited" => super::TaskStatus::Exited,
+            "signaled" => super::TaskStatus::Signaled,
+            "timed_out" => super::TaskStatus::TimedOut,
+            "cancelled" => super::TaskStatus::Cancelled,
+            _ => super::TaskStatus::Failed,
+        };
+        let (exit_code, signal) = match exit.as_ref() {
+            Some(exit) => (
+                Some(exit.exit_code() as i32),
+                exit.signal().map(str::to_owned),
+            ),
+            None => (None, None),
+        };
+        super::Terminal {
+            status,
+            exit_code,
+            signal,
+            duration_ms: record.started.elapsed().as_millis() as u64,
+            failure: error.clone(),
+            output,
+            note: error,
         }
     }
 

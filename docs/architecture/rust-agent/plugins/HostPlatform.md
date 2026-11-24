@@ -39,7 +39,10 @@ output, tail and task log. The command/task and shell settlement rules are in
 
 ## Events and lifetime
 
-No Timeline events. The owner keeps command supervisors, pipe pumps, the shell reader and the
+No Timeline events. Every task kind — exec command, shell command, shell job and persistent
+shell — is one record in the owner's table: the record holds the state and the single terminal
+watch, and its per-kind payload holds the process, PTY, capture or pid. The owner keeps command
+supervisors, pipe pumps, the shell reader and the
 shell worker until kill, settle or owner shutdown; `apply` captures the process
 environment, reads the initial shell snapshot, retains the configured
 FileStorage source and requires the execution-settings port. `exec_shell()`

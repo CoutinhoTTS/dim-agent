@@ -11,8 +11,8 @@ use crate::{
     host::{HostError, ToolExecutionContext},
     host_platform::{
         EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, ISOLATION_SUMMARY,
-        Isolation, Os, ProcessSpec, ProcessSpecError, ProcessTree, ShellEdition, ShellKind,
-        WaitReply, WaitStatus, signal_name,
+        Isolation, Os, OutputRecord, ProcessSpec, ProcessSpecError, ProcessTree, ShellEdition,
+        ShellKind, TaskKind, TaskRecord, TaskStatus, Terminal, WaitStatus, signal_name,
     },
     tool_registry::definition,
 };
@@ -23,12 +23,16 @@ use serde_json::{Value, json};
 use std::{
     io,
     path::{Component, Path, PathBuf},
-    process::ExitStatus,
     sync::Arc,
     time::Duration,
 };
-use tokio::{io::AsyncReadExt, sync::Mutex, task::JoinHandle, time::Instant};
+use tokio::{io::AsyncReadExt, sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+
+pub use crate::host_platform::output::{
+    Decoder, EXIT_STDIO_GRACE, OUTPUT_FILE_BYTE_LIMIT, OutputSink, bounded_preview,
+    capture_preview, pump, sanitize, tail_bytes, truncate_preview,
+};
 
 /// Default foreground wait before a command moves to the background.
 const DEFAULT_WAIT_TIME: Duration = Duration::from_millis(30_000);
@@ -37,14 +41,6 @@ const MIN_EXEC_TIMEOUT_MS: u64 = 1_000;
 const MAX_EXEC_TIMEOUT_MS: u64 = 3_600_000;
 /// Foreground output stays inline until this UTF-16 length is exceeded.
 const INLINE_OUTPUT_CHAR_LIMIT: usize = 30_000;
-const OUTPUT_PREVIEW_MAX_LINES: usize = 2_000;
-const OUTPUT_PREVIEW_MAX_BYTES: usize = 50 * 1024;
-const PREVIEW_BUFFER_HEADROOM_BYTES: usize = OUTPUT_PREVIEW_MAX_BYTES * 2;
-/// Maximum bytes written to one exec output file. Read by the paged output
-/// read (`BackgroundExec::output_page`) as the file-level truncation signal.
-pub(crate) const OUTPUT_FILE_BYTE_LIMIT: u64 = 64 * 1024 * 1024;
-/// Pipe reading continues this long after the root process exits.
-pub const EXIT_STDIO_GRACE: Duration = Duration::from_millis(100);
 const DESCRIPTION_CHARS: usize = 200;
 
 pub fn definition_for(platform: &crate::host_platform::HostPlatform) -> ToolDefinition {
@@ -169,11 +165,11 @@ fn failed(message: impl Into<String>, code: &str) -> ToolResult {
 
 /// Declares the command a started call ran (session boundary A.6): the exit
 /// status the result observed, or none.
-fn ran(mut result: ToolResult, command: &str, exit: Option<ExitStatus>) -> ToolResult {
+fn ran(mut result: ToolResult, command: &str, exit: Option<CommandExit>) -> ToolResult {
     result.effects = Some(vec![ToolEffect::CommandRun {
         command: command.to_owned(),
-        exit_code: exit.and_then(|status| status.code()),
-        signal: exit.and_then(signal_name),
+        exit_code: exit.as_ref().and_then(|status| status.code),
+        signal: exit.and_then(|status| status.signal),
     }]);
     result
 }
@@ -1681,93 +1677,6 @@ fn correct_windows_path(value: &str) -> String {
     value.to_owned()
 }
 
-/// Incremental canonical UTF-8 decoding of one stream (ADR 018): invalid and
-/// truncated bytes become `<0xNN>`, never U+FFFD.
-#[derive(Default)]
-pub struct Decoder {
-    pending: Vec<u8>,
-}
-impl Decoder {
-    pub fn write(&mut self, chunk: &[u8]) -> String {
-        let mut input = std::mem::take(&mut self.pending);
-        input.extend_from_slice(chunk);
-        self.decode(&input, false)
-    }
-    pub fn end(&mut self) -> String {
-        let input = std::mem::take(&mut self.pending);
-        self.decode(&input, true)
-    }
-    fn decode(&mut self, input: &[u8], last: bool) -> String {
-        let mut output = String::new();
-        let mut offset = 0;
-        while offset < input.len() {
-            let first = input[offset];
-            if first <= 0x7f {
-                output.push(first as char);
-                offset += 1;
-                continue;
-            }
-            let length = match first {
-                0xc2..=0xdf => 2,
-                0xe0..=0xef => 3,
-                0xf0..=0xf4 => 4,
-                _ => 0,
-            };
-            if length == 0 {
-                output.push_str(&escape_byte(first));
-                offset += 1;
-                continue;
-            }
-            if offset + length > input.len() {
-                if !last {
-                    self.pending = input[offset..].to_vec();
-                    break;
-                }
-                output.push_str(&escape_byte(first));
-                offset += 1;
-                continue;
-            }
-            match std::str::from_utf8(&input[offset..offset + length]) {
-                Ok(text) => {
-                    output.push_str(text);
-                    offset += length;
-                }
-                Err(_) => {
-                    output.push_str(&escape_byte(first));
-                    offset += 1;
-                }
-            }
-        }
-        output
-    }
-}
-
-fn escape_byte(byte: u8) -> String {
-    format!("<0x{byte:02X}>")
-}
-
-/// Removes control characters except `\t\n\r`, and U+FFF9–U+FFFB.
-pub fn sanitize(text: &str) -> String {
-    text.chars()
-        .filter(|&ch| {
-            !(matches!(ch, '\u{0}'..='\u{8}' | '\u{b}' | '\u{c}' | '\u{e}'..='\u{1f}')
-                || matches!(ch, '\u{7f}'..='\u{9f}' | '\u{fff9}'..='\u{fffb}'))
-        })
-        .collect()
-}
-
-/// The tail of `text` within `max` UTF-8 bytes, on a character boundary.
-pub fn tail_bytes(text: &str, max: usize) -> &str {
-    if text.len() <= max {
-        return text;
-    }
-    let mut start = text.len() - max;
-    while !text.is_char_boundary(start) {
-        start += 1;
-    }
-    &text[start..]
-}
-
 /// The head of `text` within `max` UTF-8 bytes, on a character boundary.
 fn head_bytes(text: &str, max: usize) -> &str {
     if text.len() <= max {
@@ -1778,48 +1687,6 @@ fn head_bytes(text: &str, max: usize) -> &str {
         end -= 1;
     }
     &text[..end]
-}
-
-/// TS `truncatePreview`: the last 2000 lines within 50 KiB.
-pub fn truncate_preview(text: &str) -> String {
-    let sanitized = sanitize(text);
-    if sanitized.is_empty() {
-        return sanitized;
-    }
-    let lines: Vec<&str> = sanitized.split('\n').collect();
-    let tail = &lines[lines.len().saturating_sub(OUTPUT_PREVIEW_MAX_LINES)..];
-    let joined = tail.join("\n");
-    if joined.len() <= OUTPUT_PREVIEW_MAX_BYTES {
-        return joined;
-    }
-    if tail.len() == 1 || (tail.len() == 2 && tail[1].is_empty()) {
-        let suffix = if tail.len() == 2 { "\n" } else { "" };
-        return format!(
-            "{}{suffix}",
-            tail_bytes(tail[0], OUTPUT_PREVIEW_MAX_BYTES - suffix.len())
-        );
-    }
-    let (mut low, mut high) = (0, tail.len() - 1);
-    while low < high {
-        let middle = (low + high) / 2;
-        if tail[middle..].join("\n").len() <= OUTPUT_PREVIEW_MAX_BYTES {
-            high = middle;
-        } else {
-            low = middle + 1;
-        }
-    }
-    let joined = tail[low..].join("\n");
-    tail_bytes(&joined, OUTPUT_PREVIEW_MAX_BYTES).to_owned()
-}
-
-/// exec's preview bounds — the sanitized tail within 2,000 lines and 50 KiB —
-/// and whether they left anything out: bytes outside the captured `preview`
-/// buffer, or a sanitized tail the rule cut. ShellInput's command record and a
-/// background task's final result both read this one rule.
-pub fn bounded_preview(preview: &str, decoded: usize) -> (String, bool) {
-    let text = truncate_preview(preview);
-    let truncated = decoded > preview.len() || text.len() < sanitize(preview).len();
-    (text, truncated)
 }
 
 /// Merged canonical output of one command, inline until it outgrows the
@@ -1902,25 +1769,6 @@ impl Capture {
     }
 }
 
-/// Appends `text` to the bounded output tail that [`truncate_preview`] reads:
-/// past twice the preview budget, only the last part from a line start stays.
-pub fn capture_preview(preview: &mut String, text: &str) {
-    preview.push_str(text);
-    if preview.len() > PREVIEW_BUFFER_HEADROOM_BYTES {
-        let keep = tail_bytes(preview, PREVIEW_BUFFER_HEADROOM_BYTES);
-        let keep = keep
-            .find('\n')
-            .filter(|index| index + 1 < keep.len())
-            .map_or(keep, |index| &keep[index + 1..]);
-        *preview = keep.to_owned();
-    }
-}
-
-/// Where [`pump`] delivers the decoded text of a pipe, in read order.
-pub trait OutputSink: Send + Sync {
-    fn push(&self, text: &str) -> impl Future<Output = ()> + Send;
-}
-
 pub(crate) struct Output {
     capture: Mutex<Capture>,
     /// Cancelled when the capture failed; the command is then terminated.
@@ -1947,13 +1795,6 @@ impl Output {
     /// Whether the capture stopped appending at `OUTPUT_FILE_BYTE_LIMIT`.
     pub(super) async fn truncated(&self) -> bool {
         self.capture.lock().await.truncated
-    }
-    pub(super) async fn total(&self) -> u64 {
-        self.capture.lock().await.output_bytes
-    }
-    pub(super) async fn preview_truncated(&self) -> bool {
-        let capture = self.capture.lock().await;
-        truncate_preview(&capture.preview).len() < capture.preview.len()
     }
 }
 #[derive(serde::Serialize)]
@@ -1994,27 +1835,10 @@ impl HostPlatform {
             });
         }
         let (spec, temporary, isolation) = self.prepare_isolated_process(spec, roots, None).await?;
-        let mut commands = self.commands.lock().unwrap();
-        if self.command_shutdown.is_cancelled() {
-            return Err(ProcessSpecError {
-                code: "cancelled",
-                reason: "Execution host closed".into(),
-            });
-        }
-        if commands.contains_key(task_id) {
-            return Err(ProcessSpecError {
-                code: "task_exists",
-                reason: "Execution task already exists".into(),
-            });
-        }
-        let mut tree = self.spawn_tree(spec).map_err(|error| ProcessSpecError {
-            code: "exec_invalid_request",
-            reason: format!("Failed to spawn process: {error}"),
-        })?;
-        tree.hold(temporary);
+        let path = output_dir.join(format!("{task_id}.log"));
         let output = Arc::new(Output {
             capture: Mutex::new(Capture {
-                path: output_dir.join(format!("{task_id}.log")),
+                path: path.clone(),
                 inline: String::new(),
                 inline_units: 0,
                 preview: String::new(),
@@ -2026,27 +1850,45 @@ impl HostPlatform {
             }),
             failed: CancellationToken::new(),
         });
+        let task = Arc::new(CommandTask {
+            output: output.clone(),
+            path,
+            isolation,
+            kill: CancellationToken::new(),
+        });
+        let record = TaskRecord::new(task_id.to_owned(), TaskKind::Command(task.clone()));
+        {
+            let mut commands = self.commands.lock().unwrap();
+            if self.command_shutdown.is_cancelled() {
+                return Err(ProcessSpecError {
+                    code: "cancelled",
+                    reason: "Execution host closed".into(),
+                });
+            }
+            if commands.contains_key(task_id) {
+                return Err(ProcessSpecError {
+                    code: "task_exists",
+                    reason: "Execution task already exists".into(),
+                });
+            }
+            commands.insert(task_id.to_owned(), record.clone());
+        }
+        let mut tree = match self.spawn_tree(spec) {
+            Ok(tree) => tree,
+            Err(error) => {
+                self.commands.lock().unwrap().remove(task_id);
+                return Err(ProcessSpecError {
+                    code: "exec_invalid_request",
+                    reason: format!("Failed to spawn process: {error}"),
+                });
+            }
+        };
+        tree.hold(temporary);
         let stop_pumps = CancellationToken::new();
-        let started = Instant::now();
         let pumps = vec![
             tokio::spawn(pump(tree.stdout(), output.clone(), stop_pumps.clone())),
             tokio::spawn(pump(tree.stderr(), output.clone(), stop_pumps.clone())),
         ];
-        let (observed_tx, observed) = tokio::sync::watch::channel(None);
-        let (terminal_tx, terminal) = tokio::sync::watch::channel(None);
-        let task = Arc::new(CommandTask {
-            output: output.clone(),
-            path: output_dir.join(format!("{task_id}.log")),
-            started,
-            isolation,
-            kill: CancellationToken::new(),
-            observed,
-            terminal,
-        });
-        commands.insert(
-            task_id.to_owned(),
-            crate::host_platform::ExecutionTask::Command(task.clone()),
-        );
         let running = RunningCommand {
             tree,
             stop_pumps,
@@ -2054,10 +1896,12 @@ impl HostPlatform {
             output: output.clone(),
         };
         let worker = task.clone();
+        let supervised = record.clone();
         let shutdown = self.command_shutdown.clone();
+        record.start();
         self.command_workers.spawn(async move {
             running
-                .supervise(&worker, timeout, shutdown, observed_tx, terminal_tx)
+                .supervise(supervised, &worker, timeout, shutdown)
                 .await;
         });
         Ok(ExecProcess {
@@ -2065,26 +1909,18 @@ impl HostPlatform {
             task_id: task_id.to_owned(),
             output,
             task,
+            record,
             settle_on_drop: true,
         })
     }
 
     pub(crate) fn command_task(&self, task_id: &str) -> Result<Arc<CommandTask>, CaptureError> {
-        match self.commands.lock().unwrap().get(task_id) {
-            Some(crate::host_platform::ExecutionTask::Command(task)) => Ok(task.clone()),
+        match &self.task(task_id).ok_or(CaptureError::Unknown)?.kind {
+            TaskKind::Command(task) => Ok(task.clone()),
             _ => Err(CaptureError::Unknown),
         }
     }
 
-    pub(crate) fn settle_command(&self, task_id: &str, task: &Arc<CommandTask>) {
-        let mut commands = self.commands.lock().unwrap();
-        if matches!(
-            commands.get(task_id),
-            Some(crate::host_platform::ExecutionTask::Command(held)) if Arc::ptr_eq(held, task)
-        ) {
-            commands.remove(task_id);
-        }
-    }
     pub async fn retain_output_by_id(&self, task_id: &str) -> Result<String, CaptureError> {
         self.command_task(task_id)?
             .output
@@ -2121,52 +1957,22 @@ impl OutputSink for Output {
     }
 }
 
-/// Reads one pipe through its own [`Decoder`] until EOF, a read error, or
-/// [`EXIT_STDIO_GRACE`] of reading after `stop` (the root exited) fires.
-pub async fn pump(
-    mut pipe: impl tokio::io::AsyncRead + Unpin,
-    output: Arc<impl OutputSink>,
-    stop: CancellationToken,
-) {
-    let mut decoder = Decoder::default();
-    let mut buffer = vec![0; 16 * 1024];
-    let mut drain_budget = EXIT_STDIO_GRACE;
-    loop {
-        let draining = stop.is_cancelled();
-        let started = Instant::now();
-        let read = if draining {
-            if drain_budget.is_zero() {
-                break;
-            }
-            match tokio::time::timeout(drain_budget, pipe.read(&mut buffer)).await {
-                Ok(read) => read,
-                Err(_) => break,
-            }
-        } else {
-            tokio::select! {
-                read = pipe.read(&mut buffer) => read,
-                _ = stop.cancelled() => continue,
-            }
-        };
-        match read {
-            Ok(0) | Err(_) => break,
-            Ok(count) => {
-                let text = decoder.write(&buffer[..count]);
-                if draining {
-                    drain_budget = drain_budget.saturating_sub(started.elapsed());
-                }
-                output.push(&text).await;
-            }
-        }
+/// What ended the wait for a running command.
+#[derive(Clone, Debug)]
+pub(super) struct CommandExit {
+    pub(super) code: Option<i32>,
+    pub(super) signal: Option<String>,
+}
+impl CommandExit {
+    pub(super) fn success(&self) -> bool {
+        self.signal.is_none() && self.code == Some(0)
     }
-    output.push(&decoder.end()).await;
 }
 
-/// What ended the wait for a running command.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) enum Observed {
     Cancelled,
-    Exited(ExitStatus),
+    Exited(CommandExit),
     TimedOut,
     OutputFailed,
 }
@@ -2194,20 +2000,10 @@ impl Settled {
 }
 
 pub(crate) struct CommandTask {
-    output: Arc<Output>,
-    path: PathBuf,
-    started: Instant,
-    isolation: Option<Isolation>,
+    pub(super) output: Arc<Output>,
+    pub(super) path: PathBuf,
+    pub(super) isolation: Option<Isolation>,
     pub(crate) kill: CancellationToken,
-    observed: tokio::sync::watch::Receiver<Option<Result<Observed, String>>>,
-    terminal: tokio::sync::watch::Receiver<Option<Arc<CommandTerminal>>>,
-}
-
-struct CommandTerminal {
-    observed: Result<Observed, String>,
-    termination_error: Option<String>,
-    duration_ms: u64,
-    output: Settled,
 }
 
 struct RunningCommand {
@@ -2220,25 +2016,25 @@ struct RunningCommand {
 impl RunningCommand {
     async fn supervise(
         mut self,
+        record: Arc<TaskRecord>,
         task: &CommandTask,
         timeout: Option<u64>,
         shutdown: CancellationToken,
-        observed_tx: tokio::sync::watch::Sender<Option<Result<Observed, String>>>,
-        terminal_tx: tokio::sync::watch::Sender<Option<Arc<CommandTerminal>>>,
     ) {
-        let deadline = timeout.map(|ms| task.started + Duration::from_millis(ms));
+        let deadline = timeout.map(|ms| record.started + Duration::from_millis(ms));
         let observed = tokio::select! {
             biased;
-            status = self.tree.wait() => {
-                status.map(Observed::Exited).map_err(|error| error.to_string())
-            },
-            _ = async { tokio::time::sleep_until(deadline.expect("guarded")).await }, if deadline.is_some() => Ok(Observed::TimedOut),
+            status = self.tree.wait() => status
+                .map(|status| {
+                    let code = status.code();
+                    Observed::Exited(CommandExit { code, signal: signal_name(status) })
+                })
+                .map_err(|error| error.to_string()),
+            _ = async { tokio::time::sleep_until(deadline.expect("guarded").into()).await }, if deadline.is_some() => Ok(Observed::TimedOut),
             _ = self.output.failed.cancelled() => Ok(Observed::OutputFailed),
             _ = task.kill.cancelled() => Ok(Observed::Cancelled),
             _ = shutdown.cancelled() => Ok(Observed::Cancelled),
         };
-        let duration_ms = task.started.elapsed().as_millis() as u64;
-        observed_tx.send_replace(Some(observed.clone()));
         let termination_error = if matches!(observed, Ok(Observed::Exited(_))) {
             None
         } else {
@@ -2250,12 +2046,13 @@ impl RunningCommand {
         };
         let output = self.close().await;
         drop(self);
-        terminal_tx.send_replace(Some(Arc::new(CommandTerminal {
+        record.finish(command_terminal(
+            &record,
             observed,
-            duration_ms,
             termination_error,
             output,
-        })));
+            task,
+        ));
     }
 
     /// Starts the bounded pipe drain and waits for output writes to finish.
@@ -2284,7 +2081,74 @@ impl RunningCommand {
         }
     }
 }
+
+fn command_terminal(
+    record: &TaskRecord,
+    observed: Result<Observed, String>,
+    termination_error: Option<String>,
+    output: Settled,
+    task: &CommandTask,
+) -> Terminal {
+    let (mut status, exit_code, signal, failed_exit) = match &observed {
+        Ok(Observed::Exited(exit)) => (
+            if exit.signal.is_some() {
+                TaskStatus::Signaled
+            } else {
+                TaskStatus::Exited
+            },
+            exit.code,
+            exit.signal.clone(),
+            !exit.success(),
+        ),
+        Ok(Observed::TimedOut) => (TaskStatus::TimedOut, None, None, false),
+        Ok(Observed::Cancelled) => (TaskStatus::Cancelled, None, None, false),
+        Ok(Observed::OutputFailed) | Err(_) => (TaskStatus::Failed, None, None, false),
+    };
+    if termination_error.is_some() || output.failure.is_some() {
+        status = TaskStatus::Failed;
+    }
+    let note = failed_exit
+        .then(|| {
+            task.isolation
+                .as_ref()
+                .and_then(|isolation| isolation.failure_hint(output.shown()))
+        })
+        .flatten();
+    let output = OutputRecord {
+        path: task.path.to_string_lossy().into_owned(),
+        bytes: output.output_bytes,
+        truncated: output.truncated,
+        text: output.output_path.is_none().then(|| output.inline.clone()),
+        preview: output.preview.clone(),
+        preview_truncated: output.preview_truncated,
+        failure: output.failure.clone(),
+    };
+    Terminal {
+        status,
+        exit_code,
+        signal,
+        duration_ms: record.started.elapsed().as_millis() as u64,
+        failure: termination_error,
+        output,
+        note,
+    }
+}
+
 impl CommandTask {
+    pub(crate) async fn output_record(&self) -> OutputRecord {
+        let capture = self.output.capture.lock().await;
+        let preview = truncate_preview(&capture.preview);
+        OutputRecord {
+            path: self.path.to_string_lossy().into_owned(),
+            bytes: capture.output_bytes,
+            truncated: capture.truncated,
+            text: capture.file.is_none().then(|| capture.inline.clone()),
+            preview: preview.clone(),
+            preview_truncated: preview.len() < capture.preview.len(),
+            failure: capture.failure.clone(),
+        }
+    }
+
     pub(crate) async fn page(
         &self,
         cursor: u64,
@@ -2317,86 +2181,6 @@ impl CommandTask {
             .map_err(|_| OutputPageError::Unavailable)?;
         decode_page(&bytes, cursor, limit, truncated)
     }
-
-    async fn completion(&self) -> Arc<CommandTerminal> {
-        let mut done = self.terminal.clone();
-        done.wait_for(Option::is_some)
-            .await
-            .expect("command supervisor publishes its terminal")
-            .as_ref()
-            .unwrap()
-            .clone()
-    }
-    pub(crate) async fn wait(&self, timeout_ms: Option<u64>) -> WaitReply {
-        let done = if let Some(ms) = timeout_ms {
-            tokio::select! {
-                biased;
-                result = self.completion() => Some(result),
-                _ = tokio::time::sleep(Duration::from_millis(ms)) => None,
-            }
-        } else {
-            Some(self.completion().await)
-        };
-        let Some(done) = done else {
-            return WaitReply {
-                status: WaitStatus::Running,
-                exit_code: None,
-                signal: None,
-                duration_ms: self.started.elapsed().as_millis() as u64,
-                output_path: self.path.to_string_lossy().into_owned(),
-                output_bytes: self.output.total().await,
-                output_truncated: self.output.truncated().await,
-                preview: self.output.preview().await,
-                preview_truncated: self.output.preview_truncated().await,
-                failure_note: None,
-            };
-        };
-        let exit = match done.observed {
-            Ok(Observed::Exited(status)) => Some(status),
-            _ => None,
-        };
-        let status = match &done.observed {
-            _ if done.termination_error.is_some() || done.output.failure.is_some() => {
-                WaitStatus::Failed
-            }
-            Ok(Observed::Exited(status)) if signal_name(*status).is_some() => WaitStatus::Signaled,
-            Ok(Observed::Exited(_)) => WaitStatus::Exited,
-            Ok(Observed::TimedOut) => WaitStatus::TimedOut,
-            Ok(Observed::Cancelled) => WaitStatus::Cancelled,
-            _ => WaitStatus::Failed,
-        };
-        let exit_code = exit.and_then(|status| status.code());
-        let signal = exit.and_then(signal_name);
-        let failure_note = match exit {
-            Some(status) if !status.success() => self
-                .isolation
-                .and_then(|i| i.failure_hint(done.output.shown())),
-            _ => None,
-        };
-        WaitReply {
-            status,
-            exit_code,
-            signal,
-            duration_ms: done.duration_ms,
-            output_path: self.path.to_string_lossy().into_owned(),
-            output_bytes: done.output.output_bytes,
-            output_truncated: done.output.truncated,
-            preview: done.output.preview.clone(),
-            preview_truncated: done.output.preview_truncated,
-            failure_note,
-        }
-    }
-    pub(crate) async fn terminate(&self) -> io::Result<()> {
-        self.kill.cancel();
-        self.completion()
-            .await
-            .termination_error
-            .as_deref()
-            .map_or(Ok(()), |error| Err(io::Error::other(error.to_owned())))
-    }
-    pub(crate) fn ended(&self) -> bool {
-        self.terminal.borrow().is_some()
-    }
 }
 
 pub struct ExecProcess {
@@ -2404,6 +2188,7 @@ pub struct ExecProcess {
     task_id: String,
     pub(super) output: Arc<Output>,
     task: Arc<CommandTask>,
+    record: Arc<TaskRecord>,
     settle_on_drop: bool,
 }
 impl Drop for ExecProcess {
@@ -2411,16 +2196,16 @@ impl Drop for ExecProcess {
         if !self.settle_on_drop {
             return;
         }
-        if self.task.ended() {
-            self.host.settle_command(&self.task_id, &self.task);
+        if self.record.is_terminal() {
+            self.host.commands.lock().unwrap().remove(&self.task_id);
         } else {
             self.task.kill.cancel();
-            let task = self.task.clone();
+            let record = self.record.clone();
             let owner = self.host.clone();
             let id = self.task_id.clone();
             self.host.command_workers.spawn(async move {
-                task.completion().await;
-                owner.settle_command(&id, &task);
+                record.wait(None).await;
+                owner.commands.lock().unwrap().remove(&id);
             });
         }
     }
@@ -2431,20 +2216,62 @@ impl ExecProcess {
         self.task.path.clone()
     }
     async fn next(&self) -> io::Result<Observed> {
-        let mut observed = self.task.observed.clone();
-        observed
-            .wait_for(Option::is_some)
-            .await
-            .expect("command supervisor publishes its observation")
-            .clone()
-            .unwrap()
-            .map_err(io::Error::other)
+        let reply = self.record.wait(None).await;
+        match reply.status {
+            WaitStatus::Exited | WaitStatus::Signaled => Ok(Observed::Exited(CommandExit {
+                code: reply.exit_code,
+                signal: reply.signal,
+            })),
+            WaitStatus::TimedOut => Ok(Observed::TimedOut),
+            WaitStatus::Cancelled => Ok(Observed::Cancelled),
+            WaitStatus::Failed => {
+                if self
+                    .record
+                    .terminal()
+                    .is_some_and(|terminal| terminal.output.failure.is_some())
+                {
+                    Ok(Observed::OutputFailed)
+                } else {
+                    Err(io::Error::other(
+                        reply
+                            .failure_note
+                            .unwrap_or_else(|| "command failed".into()),
+                    ))
+                }
+            }
+            WaitStatus::Running => Err(io::Error::other("command did not settle")),
+        }
     }
     async fn close(&self) -> Settled {
-        self.task.completion().await.output.clone()
+        let terminal = self
+            .record
+            .terminal()
+            .expect("command terminal is published");
+        let output = terminal.output.clone();
+        Settled {
+            output_path: output.text.is_none().then(|| output.path.clone()),
+            output_bytes: output.bytes,
+            truncated: output.truncated,
+            preview: output.preview.clone(),
+            preview_truncated: output.preview_truncated,
+            inline: output.text.unwrap_or_default(),
+            failure: output.failure,
+        }
     }
     async fn terminate(&self) -> io::Result<()> {
-        self.task.terminate().await
+        if self.record.is_terminal() {
+            return self
+                .record
+                .terminal()
+                .and_then(|terminal| terminal.failure.clone())
+                .map_or(Ok(()), |error| Err(io::Error::other(error)));
+        }
+        self.task.kill.cancel();
+        self.record.wait(None).await;
+        self.record
+            .terminal()
+            .and_then(|terminal| terminal.failure.clone())
+            .map_or(Ok(()), |error| Err(io::Error::other(error)))
     }
 
     /// Terminates, reaps and closes a process nobody will own. Preserve the
@@ -2455,7 +2282,7 @@ impl ExecProcess {
         terminated.map_err(|error| Box::new(terminate_failed(&error, &settled)))
     }
     fn wall_time_ms(&self) -> u64 {
-        self.task.started.elapsed().as_millis() as u64
+        self.record.started.elapsed().as_millis() as u64
     }
     /// Adds HostPlatform's note to a failed command's `note` when the command
     /// was sandboxed and its output shows a typical denial.
@@ -2481,7 +2308,7 @@ impl ExecProcess {
         };
         let mut unterminated = None;
         let exit = match &observed {
-            Ok(Some(Observed::Exited(status))) => Some(*status),
+            Ok(Some(Observed::Exited(status))) => Some(status.clone()),
             _ => {
                 if let Err(error) = self.terminate().await {
                     tracing::warn!(%error, task_id, "background exec termination failed");
@@ -2491,7 +2318,7 @@ impl ExecProcess {
             }
         };
         let settled = self.close().await;
-        let (status, summary, name) = match (&observed, exit) {
+        let (status, summary, name) = match (&observed, &exit) {
             _ if let Some(error) = &unterminated => (
                 ExecStatus::Failed,
                 format!("Command could not be terminated: {error}"),
@@ -2530,7 +2357,7 @@ impl ExecProcess {
                 "failed",
             ),
         };
-        let note = match exit {
+        let note = match &exit {
             Some(status) if !status.success() && settled.failure.is_none() => {
                 self.failure_note(summary.clone(), &settled)
             }
@@ -2550,7 +2377,7 @@ impl ExecProcess {
         if let Some(path) = &settled.output_path {
             structured.insert("outputPath".into(), path.clone().into());
         }
-        insert_exit(&mut structured, exit);
+        insert_exit(&mut structured, exit.as_ref());
         let content = match &settled.output_path {
             Some(path) => file_backed_content(
                 path,
@@ -2570,21 +2397,21 @@ impl ExecProcess {
     }
 }
 
-fn insert_exit(structured: &mut JsonObject, exit: Option<ExitStatus>) {
+fn insert_exit(structured: &mut JsonObject, exit: Option<&CommandExit>) {
     let Some(status) = exit else { return };
-    if let Some(code) = status.code() {
+    if let Some(code) = status.code {
         structured.insert("exitCode".into(), code.into());
     }
-    if let Some(signal) = signal_name(status) {
-        structured.insert("signal".into(), signal.into());
+    if let Some(signal) = &status.signal {
+        structured.insert("signal".into(), signal.clone().into());
     }
 }
 
-fn exit_failure_summary(status: ExitStatus) -> String {
-    if let Some(code) = status.code() {
+fn exit_failure_summary(status: &CommandExit) -> String {
+    if let Some(code) = status.code {
         return format!("Command exited with code {code}.");
     }
-    match signal_name(status) {
+    match &status.signal {
         Some(signal) => format!("Command terminated by signal {signal}."),
         None => "Command failed without an exit code.".into(),
     }
@@ -2780,7 +2607,7 @@ async fn run_process(
     process: ExecProcess,
     background: bool,
     cancel: CancellationToken,
-) -> Result<(ToolResult, Option<ExitStatus>), HostError> {
+) -> Result<(ToolResult, Option<CommandExit>), HostError> {
     if cancel.is_cancelled() {
         if let Err(result) = process.abandon().await {
             return Ok((*result, None));
@@ -2895,9 +2722,9 @@ async fn run_process(
     }
     let completed = exit.success();
     let note = (!completed).then(|| {
-        let note = match exit.code() {
+        let note = match exit.code {
             Some(code) => format!("Command exited with code {code}."),
-            None => exit_failure_summary(exit),
+            None => exit_failure_summary(&exit),
         };
         process.failure_note(note, &settled)
     });
@@ -2912,7 +2739,7 @@ async fn run_process(
     if let Some(path) = &settled.output_path {
         fields.insert("outputPath".into(), path.clone().into());
     }
-    insert_exit(&mut fields, Some(exit));
+    insert_exit(&mut fields, Some(&exit));
     Ok((
         ToolResult {
             content: ToolContent::Text(settled_content(&settled, note.as_deref())),
@@ -2948,7 +2775,7 @@ async fn hand_off(
     process: ExecProcess,
     immediate: bool,
     cancel: &CancellationToken,
-) -> Result<(ToolResult, Option<ExitStatus>), HostError> {
+) -> Result<(ToolResult, Option<CommandExit>), HostError> {
     let output_path = match process.host.retain_output_by_id(&request.task_id).await {
         Ok(path) => path,
         Err(error) => {

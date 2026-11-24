@@ -11,6 +11,9 @@
 //! Session (`SessionLifecycle::take_hold`), so an idle unload never ends it.
 use crate::{
     context_block::{element, raw, text},
+    host_platform::output::{
+        OutputSink, bounded_preview, capture_preview, pump, sanitize, tail_bytes,
+    },
     host_platform::signal_name,
     host_platform::{HostPlatform, ProcessTree},
     methods::{
@@ -18,9 +21,6 @@ use crate::{
     },
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
     timeline_tree::TreeCommands,
-    workspace_tools::exec::{
-        OutputSink, bounded_preview, capture_preview, pump, sanitize, tail_bytes,
-    },
 };
 use dim_agent_runtime::{
     AgentBuilder, Names, SessionConfig, SessionHold, SessionIdentity, SessionLifecycle,

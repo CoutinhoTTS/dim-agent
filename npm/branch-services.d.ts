@@ -392,6 +392,7 @@ export type OutputTail = {
   truncated: boolean
 }
 
+/** Process facts and the source of the exec shell preference. */
 export interface HostPlatform {
   /**
    * [`Self::spawn`] with `stdin` written to the child's standard input,

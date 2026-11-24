@@ -106,21 +106,9 @@ struct OccupyingTask {
     ended: Arc<Notify>,
 }
 
-enum BackgroundKind {
-    /// A shell job; completion marker arrives over the PTY stream.
-    Posix,
-    /// A detached child; completion marker arrives in the result file.
-    Pwsh {
-        result_path: PathBuf,
-        error_path: PathBuf,
-    },
-}
-
 struct BackgroundTask {
     task_id: String,
     output_path: PathBuf,
-    end_marker: String,
-    kind: BackgroundKind,
 }
 
 struct Inner {
@@ -673,19 +661,20 @@ impl ShellSession {
             let mut inner = self.inner.lock().await;
             inner.retained.push_str(text);
             let tail = tail_bytes(&inner.retained, text.len() + MARKER_LINE_LIMIT);
-            let matched: Vec<(String, String)> = inner
+            let matched: Vec<(String, String, String)> = inner
                 .background
                 .values()
-                .filter(|task| matches!(task.kind, BackgroundKind::Posix))
+                .filter(|task| self.host.job_completion(&task.task_id).is_none())
                 .filter_map(|task| {
-                    marker_code(tail, &task.end_marker).map(|code| (task.task_id.clone(), code))
+                    let marker = self.host.job_marker(&task.task_id)?;
+                    marker_code(tail, &marker).map(|code| (task.task_id.clone(), code, marker))
                 })
                 .collect();
-            for (task_id, code) in matched {
+            for (task_id, code, marker) in matched {
                 let Some(task) = inner.background.remove(&task_id) else {
                     continue;
                 };
-                strip_marker(&mut inner.retained, &task.end_marker);
+                strip_marker(&mut inner.retained, &marker);
                 let preview = file_tail(&task.output_path, OUTPUT_LIMIT);
                 let data = ExecEndedData {
                     task_id: task.task_id.clone(),
@@ -908,6 +897,23 @@ impl ShellSession {
                 .await;
             match waited {
                 Ok(reply) if reply.status != WaitStatus::Running => {
+                    if reply.status == WaitStatus::Failed
+                        && reply.exit_code.is_none()
+                        && reply.signal.is_none()
+                        && let Some(shell_id) = self.inner.lock().await.shell.clone()
+                        && let Some(record) = self.host.task(&shell_id)
+                        && let Some(terminal) = record.terminal()
+                    {
+                        let mut result = ToolResult::text(shell_exit_note(&terminal));
+                        result.is_error = Some(true);
+                        let _ = self
+                            .host
+                            .settle(TaskRequest {
+                                task_id: command_id.clone(),
+                            })
+                            .await;
+                        return Ok(ran(result, command, None));
+                    }
                     let text = self.command_result_text(&command_id, &reply).await;
                     let mut result = ToolResult::text(text);
                     result.is_error = (reply.exit_code != Some(0)).then_some(true);
@@ -1249,10 +1255,10 @@ impl ShellSession {
             let inner = self.inner.lock().await;
             inner.dialect
         };
-        let (wrapped, kind) = match dialect {
+        let (wrapped, pwsh_paths) = match dialect {
             ShellDialect::Posix => (
                 posix_background(command, &output_path, &completion, &pid_marker),
-                BackgroundKind::Posix,
+                None,
             ),
             ShellDialect::Pwsh => {
                 let shell = {
@@ -1272,19 +1278,9 @@ impl ShellSession {
                         &completion,
                         &pid_marker,
                     ),
-                    BackgroundKind::Pwsh {
-                        result_path: result_path.clone(),
-                        error_path: error_path.clone(),
-                    },
+                    Some((result_path, error_path)),
                 )
             }
-        };
-        let pwsh_paths = match &kind {
-            BackgroundKind::Pwsh {
-                result_path,
-                error_path,
-            } => Some((result_path.clone(), error_path.clone())),
-            BackgroundKind::Posix => None,
         };
         {
             let mut inner = self.inner.lock().await;
@@ -1310,8 +1306,6 @@ impl ShellSession {
                 BackgroundTask {
                     task_id: task_id.clone(),
                     output_path: output_path.clone(),
-                    end_marker: completion.full(),
-                    kind,
                 },
             );
         }
@@ -1776,6 +1770,14 @@ fn ended_result(task_id: &str, output_path: &Path, preview: &str, code: &str) ->
         "outputPath": output_path.to_string_lossy(),
     })));
     result
+}
+
+fn shell_exit_note(terminal: &crate::host_platform::Terminal) -> String {
+    match (terminal.signal.as_deref(), terminal.exit_code) {
+        (Some(signal), _) => format!("[shell killed by signal: {signal}]"),
+        (_, Some(code)) => format!("[shell exited: code {code}]"),
+        _ => "[shell exited]".to_owned(),
+    }
 }
 
 /// A shell death settles open tasks as failed with a reset note.
