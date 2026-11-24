@@ -1551,6 +1551,69 @@ impl Owner {
         }
     }
 
+    /// Takes the evaluator-first decision for the turn ending at `after`
+    /// (Pursuit §4.1): claims the evaluation and creates its line. Returns
+    /// whether the decision was taken; `false` means the fold moved and the
+    /// turn end is still open for another decision.
+    async fn evaluate_turn_end(self: &Arc<Self>, after: u64) -> Result<bool, AgentError> {
+        // A driving input or a goal change can commit after this turn end and
+        // still be waiting to fold: the claim rechecks the end, the pending
+        // request and the driving input over every committed fact (C4, C5,
+        // Pursuit §4.1).
+        let Some((summary, objective)) = self.claim_evaluation(after).await? else {
+            return Ok(false);
+        };
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
+            &self.branch_id,
+            crate::testing::Stage::Create,
+            after,
+        )
+        .await;
+        let cancel = self.stop.clone();
+        let cancelled: Arc<dyn Fn() -> BoxFuture<'static, Result<(), rutis::Error>> + Send + Sync> =
+            Arc::new(move || {
+                let cancel = cancel.clone();
+                Box::pin(async move {
+                    cancel.cancelled().await;
+                    Ok(())
+                })
+            });
+        let options = BranchOptions {
+            prompt: text::evaluator_prompt(
+                &self.branch_id,
+                &after.to_string(),
+                &objective,
+                &summary,
+            ),
+            source: BranchSource::Host {
+                operation_id: fold::evaluation_operation(after),
+            },
+        };
+        let created = self
+            .tree
+            .create(self.branch_id.clone(), after, options, cancelled)
+            .await;
+        if let Err(error) = &created {
+            tracing::warn!(branch_id = %self.branch_id, evaluation = after, %error, "Goal evaluator creation failed");
+        }
+        if created.is_err()
+            && !self.stopped()
+            && !self.created(after).await?
+            && self.state.lock().unwrap().fold.is_current(after)
+        {
+            self.record(
+                after,
+                Some(text::State::Paused("evaluation_failed".to_owned())),
+                false,
+            )
+            .await?;
+        }
+        self.settle();
+        Ok(true)
+    }
+
     /// The turn-end decision (A.4, Pursuit §4.1): an evaluator creation when
     /// the judge asks for one, otherwise the continuation limit.
     async fn do_turn_end(self: &Arc<Self>, after: u64) -> Result<(), AgentError> {
@@ -1583,60 +1646,7 @@ impl Owner {
             fold::decide_evaluation(&state.fold, after)
         };
         if evaluation {
-            // A driving input or a goal change can commit after this turn end
-            // and still be waiting to fold: the claim rechecks the end, the
-            // pending request and the driving input over every committed fact
-            // (C4, C5, Pursuit §4.1).
-            if let Some((summary, objective)) = self.claim_evaluation(after).await? {
-                #[cfg(feature = "testing")]
-                crate::testing::stage_held(
-                    &self.session_id,
-                    &self.branch_id,
-                    crate::testing::Stage::Create,
-                    after,
-                )
-                .await;
-                let cancel = self.stop.clone();
-                let cancelled: Arc<
-                    dyn Fn() -> BoxFuture<'static, Result<(), rutis::Error>> + Send + Sync,
-                > = Arc::new(move || {
-                    let cancel = cancel.clone();
-                    Box::pin(async move {
-                        cancel.cancelled().await;
-                        Ok(())
-                    })
-                });
-                let options = BranchOptions {
-                    prompt: text::evaluator_prompt(
-                        &self.branch_id,
-                        &after.to_string(),
-                        &objective,
-                        &summary,
-                    ),
-                    source: BranchSource::Host {
-                        operation_id: fold::evaluation_operation(after),
-                    },
-                };
-                let created = self
-                    .tree
-                    .create(self.branch_id.clone(), after, options, cancelled)
-                    .await;
-                if let Err(error) = &created {
-                    tracing::warn!(branch_id = %self.branch_id, evaluation = after, %error, "Goal evaluator creation failed");
-                }
-                if created.is_err()
-                    && !self.stopped()
-                    && !self.created(after).await?
-                    && self.state.lock().unwrap().fold.is_current(after)
-                {
-                    self.record(
-                        after,
-                        Some(text::State::Paused("evaluation_failed".to_owned())),
-                        false,
-                    )
-                    .await?;
-                }
-                self.settle();
+            if self.evaluate_turn_end(after).await? {
                 return Ok(());
             }
         }
@@ -1678,15 +1688,26 @@ impl Owner {
             return Ok(());
         }
         let write = self.write_guard().await?;
-        let decision = {
+        let (evaluation, decision) = {
             let state = self.state.lock().unwrap();
             if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
                 || state.fold.interrupt_after(after).is_some()
             {
                 return Ok(());
             }
-            fold::decide_turn_end(&state.fold, limit, progress)
+            (
+                fold::decide_evaluation(&state.fold, after),
+                fold::decide_turn_end(&state.fold, limit, progress),
+            )
         };
+        if evaluation {
+            // A Queue that held the evaluator-first decision back was
+            // withdrawn: the turn end belongs to that decision again
+            // (Pursuit §4.1), not to a continuation or a pause.
+            drop(write);
+            self.evaluate_turn_end(after).await?;
+            return Ok(());
+        }
         let Some(decision) = decision else {
             return Ok(());
         };
@@ -1695,7 +1716,9 @@ impl Owner {
         // C4, C5, #1989: a report input or a new turn that commits behind the
         // decision makes this continuation stale. The recheck reads the fold at
         // the latest committed cutoff, and the append refuses a head that moved
-        // after that read. A pause was decided above, at the writer's cutoff.
+        // after that read. The recheck also returns the turn end to the
+        // evaluator-first decision when a Queue that held it back was
+        // withdrawn. A pause was decided above, at the writer's cutoff.
         match decision {
             Decision::Pause { reason } => {
                 drop(write);
@@ -1704,7 +1727,7 @@ impl Owner {
             }
             Decision::Continuation { .. } => loop {
                 let through = self.await_dispatched().await?;
-                let decision = {
+                let (evaluation, decision) = {
                     let state = self.state.lock().unwrap();
                     if self.timeline.committed() != through {
                         continue;
@@ -1714,8 +1737,19 @@ impl Owner {
                     {
                         return Ok(());
                     }
-                    fold::decide_turn_end(&state.fold, limit, progress)
+                    (
+                        fold::decide_evaluation(&state.fold, after),
+                        fold::decide_turn_end(&state.fold, limit, progress),
+                    )
                 };
+                if evaluation {
+                    // A Queue that held the evaluator-first decision back was
+                    // withdrawn: the turn end belongs to that decision again
+                    // (Pursuit §4.1), not to this continuation.
+                    drop(write);
+                    self.evaluate_turn_end(after).await?;
+                    return Ok(());
+                }
                 let Some(Decision::Continuation { count, idle }) = decision else {
                     return Ok(());
                 };
@@ -2071,10 +2105,11 @@ impl Owner {
                 // during the settings read cannot pass as the expected one. The
                 // recheck reads the fold at the latest committed cutoff and
                 // catches up to that Queue; a turn the Queue opened moves
-                // `turn_start`, a newer turn end replaces the judged one, and the
-                // append refuses a head that moved after the recheck. A pause is
-                // decided once, at the writer's cutoff, and does not claim a
-                // Queue that commits after it.
+                // `turn_start`, a newer turn end replaces the judged one, a turn
+                // interrupt after the judged end pauses the goal, and the append
+                // refuses a head that moved after the recheck. A pause is decided
+                // once, at the writer's cutoff, and does not claim a Queue that
+                // commits after it.
                 let write = self.write_guard().await?;
                 let decision = {
                     let state = self.state.lock().unwrap();
@@ -2084,6 +2119,7 @@ impl Owner {
                         || state.fold.turn_end.as_ref().map(|end| end.sequence)
                             != Some(end.sequence)
                         || state.fold.turn_start != turn_start
+                        || state.fold.interrupt_after(end.sequence).is_some()
                     {
                         return Ok(());
                     }
@@ -2117,6 +2153,7 @@ impl Owner {
                                     || state.fold.turn_end.as_ref().map(|end| end.sequence)
                                         != Some(end.sequence)
                                     || state.fold.turn_start != turn_start
+                                    || state.fold.interrupt_after(end.sequence).is_some()
                                 {
                                     return Ok(());
                                 }
