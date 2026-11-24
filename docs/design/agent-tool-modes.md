@@ -42,12 +42,11 @@ repository; the shell is the one without a product form.
 | `codemode` | one program | discover tools, call them, branch, loop, aggregate; child results stay out of the model context | the `codemode` tool beside the direct tools |
 | `shell` | one shell session | compose commands; working directory, environment and jobs persist across calls | the minimal-execution profile only |
 
-In `codemode` and `shell` only the entry and the tools a program cannot consume are declared (§2).
-That absence is a property of the mode — the model does its work through one surface — not the goal
-of the change. Fewer declarations
-per request, fewer round trips and less context churn follow from it; the tools declared today
-carry about 12 kB of description and about 20 kB with schemas, but saving that is a result, not the
-requirement.
+In `codemode` and `shell` only the entry and the tools §2 lists are declared. That absence is a
+property of the mode — the model does its work through one surface — not the goal of the change.
+Fewer declarations per request, fewer round trips and less context churn follow from it; the tools
+declared today carry about 12 kB of description and about 20 kB with schemas, but saving that is a
+result, not the requirement.
 
 ### 1.3 The one real risk: how well the model uses the mode
 
@@ -104,8 +103,8 @@ adds `ask_user` and `recall`. `normal` declares the work tools.
   `ask_user` and `recall` are orchestration inputs a program can process and use — it may ask the
   operator several times and act on each answer, or search the history and decide from it — so they
   are calls, not declarations.
-- `skill` is different: its result is instructions for the model, not data for the program, so it
-  stays declared.
+- `skill` is declared because the model needs the instructions directly; a program may call it too,
+  but loading them through a program would only return them as data.
 - `shell` is the shell, plus `ask_user` and `recall`, because it has no program to carry them. It
   cannot load a skill, read an image, call an MCP tool, open a line, start a member, schedule or
   manage settings and plugins. Those are the mode's boundary: a task that needs one runs in another
@@ -193,8 +192,8 @@ owns this projection. Three terms:
   restart settles the in-flight request as the loop already does and does not reissue it; a
   continuation request is a new request and pins the current mode, as does the request that follows
   a tool result.
-- Only `visible` reaches the model request, its token accounting and compaction. `delegated` never
-  appears in a prompt, a declaration or the usage counter.
+- A tool that is only delegated never appears in a prompt, a declaration or the usage counter;
+  `skill` is in both sets.
 - The mount list and an Agent profile's tool list narrow the surface and never widen it. `normal`
   and `shell` hide the other modes' entry tools even when a list names them.
 
@@ -322,7 +321,7 @@ are its requirements; the ones marked missing are follow-up work, not part of th
 - Stop through the route in §6, so a shell task stops and writes `exec/ended`. Missing.
 - Pageable output, and operator-visible state: the current directory, the running job, a command
   waiting for input. Output paging exists for native tasks; the state view is missing.
-- A description and examples for the dialect, backgrounding and timeouts. Missing.
+- The description exists; examples for the dialect, backgrounding and timeouts are missing.
 
 The boundary is §2's: a shell Session cannot load a skill, read an image, call an MCP tool, open a
 line, start a member, schedule or manage settings and plugins. A task that needs one runs in another
@@ -357,7 +356,8 @@ there is no default row to set.
 The picker lists all three modes; `normal` is always available, and `codemode` or `shell` is shown
 as unavailable when its `hello.features` entry is absent. A switch takes effect from the next
 request, and the row shows the effective mode, so a mode that fell back to `normal` is not reported
-as in force.
+as in force. A client that offers Goal disables `set` and `resume` while the Session is in `shell`
+and shows the named refusal otherwise.
 
 ## 9. Compatibility
 
@@ -367,14 +367,15 @@ as in force.
 - The v3 Code Mode gate stays. `excluded_tools` keeps `codemode` out of that Session's callable set,
   the fallback rule makes the Session `normal`, and a v3 client can neither select nor receive Code
   Mode ([child tool batches §2.6](appserver/child-tool-batches.md#26-app-server-code-mode-gate)).
-- [CodeMode](plugins/CodeMode.md) and [child tool batches](appserver/child-tool-batches.md) change
-  in two respects: the `codemode` tool is offered in `codemode` mode, not to every v4 Session, and
-  its request declares only `codemode` and `skill` instead of every adopted tool. The child-event
-  contract is unchanged.
-- The canonical contracts gain the mode with the implementation, each by its owner:
-  `SessionConfig.toolMode` in [session access](contracts/session-access.md), the live mode and
-  projection in [ToolRegistry](../architecture/rust-agent/plugins/ToolRegistry.md), and the
-  declaration set plus admission split in [CodeMode](plugins/CodeMode.md).
+- [CodeMode](plugins/CodeMode.md) changes in four respects with the implementation: the mode gate
+  (offered in `codemode` mode, not to every v4 Session), the declaration set (`codemode` and `skill`
+  instead of every adopted tool), the admission split (a child only inside `delegated`), and the
+  outer result rebuilding content blocks instead of serializing the program value as JSON. Its
+  child-event contract is unchanged.
+- [Goal](plugins/Goal.md) gains the shell lifecycle in §2.
+- The remaining contracts gain the mode with the implementation, each by its owner:
+  `SessionConfig.toolMode` in [session access](contracts/session-access.md), and the live mode plus
+  projection in [ToolRegistry](../architecture/rust-agent/plugins/ToolRegistry.md).
 - A Session restored from a record that predates this field becomes `normal`, except in the
   minimal-execution profile, whose host sets `shell` on create and restore (§6). A Session that used
   the `codemode` tool therefore loses it on upgrade until the operator selects `codemode`. That is
@@ -437,8 +438,8 @@ as in force.
   `session.language`: the current value lives in the registry, the durable copy in the stored
   record.
 - §7.1 for the live mode: the resource is the value; lifecycle is the Session's; the operations are
-  `get` and `update`, whose cancellation stops the record write and which report the effective mode
-  rather than refusing one.
+  `get` and `update`. A cancellation before the record write changes nothing; after it the new value
+  stays stored and in force. Both report the effective mode rather than refusing one.
 - §7.2: no object or resource handle crosses an owner; no new service, and the mode methods join
   the existing Session method face; the parameters are data.
 - [ADR 002](../adr/002-plugin-scope.md) D1: the mode is Session configuration and the pinned mode is
@@ -447,7 +448,15 @@ as in force.
   and changed by its owner's operation. D5: the mode methods take data.
 ## 12. Requirements raised to mechanism owners
 
-None. The change stays within the owners that already exist: ToolRegistry projects its own set and
+None for the mechanism. One requirement goes to another capability's owner:
+
+- **Goal.** On each continuation, read the Session's mode and, in `shell`, pause with reason `mode`
+  instead of continuing; refuse `session.goal.set` and `resume` in `shell`; leave resumption to the
+  operator after the Session leaves `shell` (§2). Goal reads `ToolRegistry`'s current mode, the
+  value `session.tool_mode.get` reports, not another owner's state. Its owner carries this into
+  [Goal](plugins/Goal.md).
+
+Everything else stays within the owners that already exist: ToolRegistry projects its own set and
 holds the live mode, ToolBinding pins the mode with the callable set, ToolExecution refuses a call
 outside it, ContextUsage counts `visible`, the App Server owns the stored record and the Session
 methods, and each client owns its control and its remembered choice.
