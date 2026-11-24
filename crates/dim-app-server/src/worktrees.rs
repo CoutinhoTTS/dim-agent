@@ -8,8 +8,8 @@
 //! creation meets the registration instead of slipping in. A creation compares
 //! its directory with that registration and moves to another task id, and it
 //! registers its own directory under the same lock until its Session row is
-//! written, so a removal meets the creation too. Git is the fact; a record is a
-//! candidate.
+//! written or its failed creation hands that registration to the removal, so a
+//! removal meets the creation too. Git is the fact; a record is a candidate.
 use crate::methods::ManagementMethods;
 use crate::storage::{
     PreparedWorktree, Store, WorktreeCreation, WorktreeDirectory, WorktreeDirectoryRecord,
