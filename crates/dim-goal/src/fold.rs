@@ -862,6 +862,15 @@ impl Fold {
     pub fn interrupted(&self) -> bool {
         self.last_interrupt > self.active
     }
+    /// The turn interrupt that still pauses the goal and that no state record
+    /// answered yet: the decision a settlement may have dropped while it held
+    /// task admission (Pursuit §4.1).
+    pub(crate) fn pending_interrupt(&self) -> Option<u64> {
+        (self.running()
+            && self.last_interrupt > self.active
+            && !self.is_decided(self.last_interrupt))
+        .then_some(self.last_interrupt)
+    }
     pub fn count(&self) -> usize {
         self.continuation_count
     }

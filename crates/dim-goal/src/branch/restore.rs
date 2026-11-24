@@ -40,12 +40,19 @@ impl Owner {
     }
 
     /// Releases task admission and takes up what the settlement deferred: a
-    /// creation or a fold that reached `settle` while the decisions were
-    /// suspended ran no task, and no later input may be needed for it
-    /// (Pursuit §13 E2).
+    /// creation, an interrupt or a fold that reached `settle` while the
+    /// decisions were suspended ran no task, and no later input may be needed
+    /// for it (Pursuit §4.1, §13 E2).
     pub(super) fn resume_settlement(self: &Arc<Self>) {
-        self.state.lock().unwrap().terminating = false;
+        let interrupt = {
+            let mut state = self.state.lock().unwrap();
+            state.terminating = false;
+            state.fold.pending_interrupt()
+        };
         self.settle();
+        if let Some(interrupt) = interrupt {
+            self.interrupted(interrupt);
+        }
     }
 
     pub(super) fn resume_decisions(self: &Arc<Self>) {
