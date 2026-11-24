@@ -1471,6 +1471,8 @@ async fn a_creation_that_folds_while_the_settlement_holds_admission_is_ended() {
         &evaluator,
     );
     record.release();
+    // Reaching the held end is the assertion: the case has no earlier fact to
+    // wait for, so a regression hangs here instead of failing one.
     ended.arrived().await;
     ended.release();
     written.release();
