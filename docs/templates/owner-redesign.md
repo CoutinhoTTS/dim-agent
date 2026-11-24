@@ -40,6 +40,14 @@ say why none of those works, and link the design shared by the plugins involved 
 creates, holds, hands over and cleans up the object, and what happens when any side closes or reloads.
 A resource handle crosses only as a whole transfer: the receiver becomes its owner and settles it.
 
+The client protocol and user-visible behavior stay as they are. List any change with its reason and
+the affected clients.
+
+### Supersedes
+
+The clauses of other designs that define this owner's surface, each replaced by a link to this
+contract or removed in the same change. Other owners' clauses stay.
+
 ### Exceptions with reasons
 
 One line each, only for a deviation §7 allows, such as an object handed out with its shared
@@ -54,7 +62,8 @@ As in the [design template](design.md).
 
 The `#[rutis::service]` block on the owner type for the owner's own face; for what the owner
 registers with a mechanism registration point, the registration call instead. Then the request,
-reply and error types.
+reply and error types. Error types serialize to the codes in the error table, callbacks are
+direct parameters, and an operation bound to the calling row takes the caller.
 
 ## Delivery part
 
