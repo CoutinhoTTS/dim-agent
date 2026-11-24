@@ -876,19 +876,36 @@ impl ShellSession {
                 if reply.status == WaitStatus::Failed
                     && reply.exit_code.is_none()
                     && reply.signal.is_none()
-                    && let Some(shell_id) = self.inner.lock().await.shell.clone()
-                    && let Some(record) = self.host.task(&shell_id)
-                    && let Some(terminal) = record.terminal()
                 {
-                    let mut result = ToolResult::text(shell_exit_note(&terminal));
-                    result.is_error = Some(true);
-                    let _ = self
-                        .host
-                        .settle(TaskRequest {
-                            task_id: command_id.clone(),
-                        })
-                        .await;
-                    return Ok(ran(result, command, None));
+                    let note = match reply.failure_note.clone() {
+                        Some(note) => Some(note),
+                        None => {
+                            let shell_id = self.inner.lock().await.shell.clone();
+                            let terminal = shell_id
+                                .as_ref()
+                                .and_then(|id| self.host.task(id))
+                                .and_then(|record| record.terminal());
+                            terminal
+                                .map(|terminal| shell_exit_note(&terminal))
+                                .or_else(|| {
+                                    self.inner
+                                        .try_lock()
+                                        .ok()
+                                        .and_then(|inner| inner.shell_exit.clone())
+                                })
+                        }
+                    };
+                    if let Some(note) = note {
+                        let mut result = ToolResult::text(note);
+                        result.is_error = Some(true);
+                        let _ = self
+                            .host
+                            .settle(TaskRequest {
+                                task_id: command_id.clone(),
+                            })
+                            .await;
+                        return Ok(ran(result, command, None));
+                    }
                 }
                 let text = self.command_result_text(&command_id, &reply).await;
                 let mut result = ToolResult::text(text);

@@ -4486,6 +4486,16 @@ pub(crate) mod shell {
                 }
                 _ => super::TaskFailure::ShellExited,
             };
+            let note = shell_terminal
+                .as_ref()
+                .map(
+                    |terminal| match (terminal.signal.as_deref(), terminal.exit_code) {
+                        (Some(signal), _) => format!("[shell killed by signal: {signal}]"),
+                        (_, Some(code)) => format!("[shell exited: code {code}]"),
+                        _ => "[shell exited]".to_owned(),
+                    },
+                )
+                .unwrap_or_else(|| "[shell exited]".to_owned());
             for record in self.children_list() {
                 if record.is_terminal() {
                     continue;
@@ -4507,7 +4517,7 @@ pub(crate) mod shell {
                     duration_ms: record.started.elapsed().as_millis() as u64,
                     failure: Some(failure.clone()),
                     output,
-                    note: None,
+                    note: Some(note.clone()),
                 });
             }
             self.active_command.lock().unwrap().take();
