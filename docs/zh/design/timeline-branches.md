@@ -538,6 +538,8 @@ WorkspaceTools 不变。
 
 协调文字和状态说明合在一起判定，作为同一个族，由第一次为其中任何一段放入候选的改动来做（[面向模型的提示词 §8](model-prompts.md#8-一次改动怎样判定)）：工具描述在 `BranchToolConfig.description`、状态说明在 `BranchToolConfig.default_note`、`BranchToolConfig.user_default_note` 与 `BranchToolConfig.former_default_note`、名册的收尾句在 `BranchToolConfig.roster_closing`。以后改动其中一段就要重跑整个族，因为单独读着顺的文本，仍可能输给另一段文本赢下的对照。开线那段文字在 §12.3 的 should-open 场景上判定，对本设计还要加上 `root-opens-after-switch`：只让默认分支开线的守卫会让根去回答请求而不是开一条线，那个场景正是这个差别的落点。
 
+**门 2，开线率。** 开线那段文字还要按开线探针判定：`long-work-and-a-flaky-test` 与 `refactor-and-a-pasted-report` 的 `line-opened-for-one-job`，以及 `switch-then-open-lines` 的 `new-default-opens-a-line`。一条探针不计入门 2 的条件是：按那一轮的已判次数，就算候选臂每一次已判运行都通过，也不可能同时跨过 `δ = 0.05` 的增益和 `α = 0.10` 的单侧 mid-p。被排除的探针仍留在门 1。剩下的探针里，至少有一条要比当前臂增益超过 `δ`，并在该剩余族上按 Holm 校正的 `α = 0.10` 拒绝；任何开线探针显著下降都算门 1 的回退。候选只有门 1（不退步且达到下限）和门 2 都通过，才算通过开线文本；某一轮的计数让门 2 一条探针都不剩时判为 inconclusive，因为没有测到增益。开线探针和次数都在数据之前固定。
+
 ## 13. 相互影响
 
 | 功能 | 影响 |
