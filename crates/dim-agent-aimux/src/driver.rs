@@ -869,6 +869,19 @@ impl ModelDriver for AimuxDriver {
                         report = &mut response, if awaiting_headers => {
                             awaiting_headers = false;
                             if let Ok(report) = report {
+                                // A report written after the allowance is late
+                                // here as well: its timer may not have fired.
+                                if report.received > deadline_at {
+                                    abort.abort();
+                                    let error = stream::idle_failure(format!(
+                                        "no response headers arrived within {} seconds of sending the request",
+                                        stream::STREAM_IDLE_TIMEOUT.as_secs()
+                                    ));
+                                    if let Some(pending) = pending.as_mut() {
+                                        pending.failed(&error.to_string());
+                                    }
+                                    return Err(error);
+                                }
                                 headers_arrived = true;
                                 if report.status.is_success() {
                                     deadline_at = report.received + stream::STREAM_IDLE_TIMEOUT;
