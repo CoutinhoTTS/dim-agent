@@ -2256,6 +2256,20 @@ async fn a_job_write_terminalizes_and_reads_its_output() {
         })
         .await
         .unwrap();
+    let missing_parent = dir.join("missing").join("job-2.log");
+    let invalid = platform
+        .write(ShellWrite {
+            task_id: "job-shell".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"printf 'x'\n"),
+            command: None,
+            job: Some(ShellJobStart {
+                task_id: "job-2".into(),
+                end_marker: "__DIM_END_aaaabbbb_ccccdddd__".into(),
+                output_path: missing_parent.to_string_lossy().into_owned(),
+            }),
+        })
+        .await;
+    assert!(matches!(invalid, Err(HostPlatformError::Invalid(_))));
     let output_path = dir.join("job-1.log");
     let line = format!(
         "printf '\\033'; printf '\\033['; printf '\\033[2~'; printf '\\033]0;t\\033\\\\'; printf 'job-output\\n' > '{}'; printf '%s%s%d\\n' '__DIM_END_aaaabbbb_' 'ccccdddd__' 0\n",
@@ -2301,6 +2315,19 @@ async fn a_job_write_terminalizes_and_reads_its_output() {
         })
         .await
         .unwrap();
+    let reused = platform
+        .write(ShellWrite {
+            task_id: "job-shell".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"printf 'again'\n"),
+            command: None,
+            job: Some(ShellJobStart {
+                task_id: "job-1".into(),
+                end_marker: "__DIM_END_aaaabbbb_ccccdddd__".into(),
+                output_path: output_path.to_string_lossy().into_owned(),
+            }),
+        })
+        .await;
+    assert!(matches!(reused, Err(HostPlatformError::TaskExists)));
     platform
         .kill(TaskRequest {
             task_id: "job-shell".into(),
