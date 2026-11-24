@@ -23,8 +23,8 @@ and tree-supervision primitives to local tools.
 `child_path_process` remain `#[service(skip)]`: they carry process handles and cannot cross.
 
 A task id is reserved by the owner before a command or background job starts. `spawn` and the job
-part of `shell.write` answer `task_exists` for an id already in the table, an unusable output
-directory, or an existing output log. `wait` reports the terminal record and never removes it; a
+part of `shell.write` answer `task_exists` for an id already in the table or an existing output
+log, and `invalid` for a missing output parent or an output path outside the shell directory. `wait` reports the terminal record and never removes it; a
 timeout stops the wait and answers `running`. `settle` releases only an ended task or an exited
 shell and answers `task_running` otherwise; `kill` is the explicit stop. Command and job logs stay under the output directory the caller gives the owner; the
 persistent shell defaults to `execRoot`. Logs are registered by the branch when the model is

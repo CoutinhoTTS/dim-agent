@@ -1600,14 +1600,7 @@ impl HostPlatform {
             let record = TaskRecord::new(start.task_id.clone(), TaskKind::Job(job.clone()));
             {
                 let mut commands = self.commands.lock().unwrap();
-                if commands.contains_key(&start.task_id)
-                    || commands.values().any(|existing| {
-                        matches!(
-                            &existing.kind,
-                            TaskKind::Job(other) if other.output_path == job.output_path
-                        )
-                    })
-                {
+                if commands.contains_key(&start.task_id) {
                     return Err(HostPlatformError::TaskExists);
                 }
                 commands.insert(start.task_id.clone(), record.clone());

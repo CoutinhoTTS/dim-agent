@@ -93,7 +93,8 @@ table, worker tracker and shutdown token are `Arc`/cloneable fields created by
 
 `ShellWrite` is `{taskId, data, command?: {taskId, startMarker, endMarker}, job?:
 {taskId, endMarker, outputPath}}`; the optional start declares the task the
-written bytes begin. The event API is deleted (§3.2).
+written bytes begin. A job's `outputPath` must be absolute, inside the shell output directory,
+with an existing parent, and its file stem must equal `taskId`. The event API is deleted (§3.2).
 ### 2.2 Task snapshot
 | Field | Exec command | Shell command | Job | Shell |
 | --- | --- | --- | --- | --- |
