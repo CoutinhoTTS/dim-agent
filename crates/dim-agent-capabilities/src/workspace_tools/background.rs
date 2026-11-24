@@ -5,9 +5,13 @@
 //! dispatch of every `exec/ended` that is not `cancelled`. Each running task
 //! holds its Session (`SessionLifecycle::take_hold`) until its `exec/ended` is
 //! appended, so an idle unload never ends it (idle unload §5, R2).
-use super::exec::{ExecProcess, Output, recovered_result, sanitize};
+use super::exec::{background_result, recovered_result, sanitize};
 use crate::{
     context_block,
+    host_platform::{
+        HostPlatform, HostPlatformError, OutputRequest, TaskFailure, TaskRequest, WaitReply,
+        WaitRequest, WaitStatus,
+    },
     prompt_guide::{GuideEntries, GuideEntry, GuideScope},
 };
 use dim_agent_runtime::{
@@ -31,6 +35,8 @@ pub struct StartRequest {
     pub call_id: String,
     /// Proposed id; a `before` hook may rewrite it, the final one is returned.
     pub task_id: String,
+    /// The owner's task id; `task_id` is the branch-visible id a hook may rewrite.
+    pub host_task_id: String,
     pub description: String,
     pub title: Option<String>,
     pub output_path: String,
@@ -42,8 +48,6 @@ pub enum StartError {
     Closing,
     /// `exec/started` was not written.
     Timeline(AgentError),
-    /// Rejected handover could not confirm process-tree termination.
-    Termination(Box<ToolResult>),
 }
 
 #[derive(Debug, Clone, thiserror::Error, serde::Serialize)]
@@ -188,10 +192,15 @@ pub(crate) const PAGE_CHAR_TRAILING_BYTES: usize = 3;
 struct Task {
     description: String,
     cancel: CancellationToken,
-    output: Option<Arc<Output>>,
+    /// The owner's task id while this process owns the task; absent for a
+    /// task rebuilt from the Timeline after an unload.
+    host_task_id: Option<String>,
     /// The task's registered output file (`exec/started.output_path`): what
     /// the paged read answers from, in every state of the task.
     output_path: String,
+    /// The terminal preview, stored once the owner ends so a read during the
+    /// `exec/ended` commit serves the final bytes.
+    final_preview: Option<String>,
     /// The dispatched `exec/ended`, once its wake decision is done.
     ended: watch::Sender<Option<ExecEndedData>>,
 }
@@ -199,17 +208,116 @@ impl Task {
     fn new(
         description: String,
         cancel: CancellationToken,
-        output: Option<Arc<Output>>,
+        host_task_id: Option<String>,
         output_path: String,
     ) -> Self {
         Self {
             description,
             cancel,
-            output,
+            host_task_id,
             output_path,
+            final_preview: None,
             ended: watch::Sender::new(None),
         }
     }
+}
+
+fn missing_reply(output_path: &str) -> WaitReply {
+    WaitReply {
+        status: WaitStatus::Failed,
+        text: None,
+        exit_code: None,
+        signal: None,
+        duration_ms: 0,
+        output_path: output_path.to_owned(),
+        output_bytes: 0,
+        output_truncated: false,
+        preview: String::new(),
+        preview_truncated: false,
+        failure: Some(TaskFailure::OwnerUnloaded),
+        failure_note: None,
+    }
+}
+
+async fn wait_owner(
+    platform: &HostPlatform,
+    host_task_id: &str,
+    cancel: &CancellationToken,
+) -> Option<WaitReply> {
+    let waited = platform
+        .wait(
+            WaitRequest {
+                task_id: host_task_id.to_owned(),
+                timeout_ms: None,
+            },
+            cancelled_fn(cancel),
+        )
+        .await;
+    match waited {
+        Ok(reply) => Some(reply),
+        Err(HostPlatformError::Cancelled) => {
+            let _ = platform
+                .kill(TaskRequest {
+                    task_id: host_task_id.to_owned(),
+                })
+                .await;
+            platform
+                .wait(
+                    WaitRequest {
+                        task_id: host_task_id.to_owned(),
+                        timeout_ms: None,
+                    },
+                    never_cancelled(),
+                )
+                .await
+                .ok()
+        }
+        Err(_) => None,
+    }
+}
+
+async fn stop_owner(platform: &HostPlatform, host_task_id: &str) {
+    let _ = platform
+        .kill(TaskRequest {
+            task_id: host_task_id.to_owned(),
+        })
+        .await;
+    let _ = platform
+        .wait(
+            WaitRequest {
+                task_id: host_task_id.to_owned(),
+                timeout_ms: None,
+            },
+            never_cancelled(),
+        )
+        .await;
+    let _ = platform
+        .settle(TaskRequest {
+            task_id: host_task_id.to_owned(),
+        })
+        .await;
+}
+
+fn cancelled_fn(token: &CancellationToken) -> crate::host::CancelledFn {
+    let token = token.clone();
+    std::sync::Arc::new(move || {
+        let token = token.clone();
+        Box::pin(async move {
+            token.cancelled().await;
+            Ok(())
+        })
+    })
+}
+
+fn never_cancelled() -> crate::host::CancelledFn {
+    let token = CancellationToken::new();
+    std::sync::Arc::new(move || {
+        let token = token.clone();
+        Box::pin(async move {
+            token.cancelled().await;
+            Ok(())
+        })
+    })
 }
 
 #[derive(Default)]
@@ -241,11 +349,7 @@ impl BackgroundExec {
     /// Starting needs the live process, so it is the exec tool's own
     /// operation; the `backgroundExec` face serves the task id afterwards.
     #[service(skip)]
-    pub async fn start(
-        self: &Arc<Self>,
-        request: StartRequest,
-        process: ExecProcess,
-    ) -> Result<String, StartError> {
+    pub async fn start(self: &Arc<Self>, request: StartRequest) -> Result<String, StartError> {
         #[cfg(feature = "testing")]
         testing::pause(&request.output_path).await;
         let _handover = self.tasks.token();
@@ -255,11 +359,12 @@ impl BackgroundExec {
             self.session.take_hold()
         };
         let Some(hold) = hold else {
-            process.abandon().await.map_err(StartError::Termination)?;
+            stop_owner(&self.platform, &request.host_task_id).await;
             return Err(StartError::Closing);
         };
         let cancel = self.lifecycle.child_token();
         let description = request.description.clone();
+        let host_task_id = request.host_task_id.clone();
         let mut registered = None;
         let committed = self.timeline.append_registered(
             EventKind::ExecStarted(ExecStartedData {
@@ -285,7 +390,7 @@ impl BackgroundExec {
                     Task::new(
                         description.clone(),
                         cancel.clone(),
-                        Some(process.output.clone()),
+                        Some(host_task_id.clone()),
                         data.output_path.clone(),
                     ),
                 );
@@ -299,7 +404,7 @@ impl BackgroundExec {
                 if let Some(task_id) = registered {
                     self.state.lock().unwrap().tasks.remove(&task_id);
                 }
-                process.abandon().await.map_err(StartError::Termination)?;
+                stop_owner(&self.platform, &host_task_id).await;
                 return Err(if self.state.lock().unwrap().closing {
                     StartError::Closing
                 } else {
@@ -311,12 +416,24 @@ impl BackgroundExec {
             unreachable!("exec/started kind is preserved")
         };
         let task_id = data.task_id.clone();
+        let output_path = data.output_path.clone();
         let owner = self.clone();
+        let platform = self.platform.clone();
         let supervised = task_id.clone();
         let parent = dim_agent_runtime::core::current_parent_call_id();
         self.tasks.spawn(async move {
             let run = async {
-                let (status, result) = process.finish_background(&supervised, cancel).await;
+                let reply = wait_owner(&platform, &host_task_id, &cancel).await;
+                if let Some(reply) = &reply {
+                    let mut state = owner.state.lock().unwrap();
+                    if let Some(task) = state.tasks.get_mut(&supervised) {
+                        task.final_preview = Some(reply.preview.clone());
+                    }
+                }
+                let (status, result) = match reply {
+                    Some(reply) => background_result(&supervised, &reply),
+                    None => background_result(&supervised, &missing_reply(&output_path)),
+                };
                 let mut ended = owner.timeline.append(
                     EventKind::ExecEnded(ExecEndedData {
                         task_id: supervised.clone(),
@@ -325,6 +442,11 @@ impl BackgroundExec {
                     })
                     .into(),
                 );
+                let _ = platform
+                    .settle(TaskRequest {
+                        task_id: host_task_id,
+                    })
+                    .await;
                 drop(hold);
                 if let Ok(event) = &ended {
                     let mut publication = owner.timeline.watch();
@@ -343,7 +465,7 @@ impl BackgroundExec {
                     tracing::warn!(%error, task_id = supervised, "exec/ended was not written");
                     state.tasks.remove(&supervised);
                 } else if let Some(task) = state.tasks.get_mut(&supervised) {
-                    task.output = None;
+                    task.host_task_id = None;
                 }
             };
             if let Some(parent) = parent {
@@ -358,18 +480,54 @@ impl BackgroundExec {
     /// Reads the live capture without reconstructing a resource from history:
     /// what `backgroundExec.output` answers.
     pub async fn output(&self, task_id: String) -> Result<String, TaskError> {
-        let output = {
+        let (host_task_id, _) = {
             let state = self.state.lock().unwrap();
             if state.closed {
                 return Err(TaskError::Closed);
             }
-            state
-                .tasks
-                .get(&task_id)
-                .and_then(|task| task.output.clone())
-                .ok_or(TaskError::Unknown)?
+            let task = state.tasks.get(&task_id).ok_or(TaskError::Unknown)?;
+            if let Some(preview) = &task.final_preview
+                && task.host_task_id.is_some()
+            {
+                return Ok(preview.clone());
+            }
+            (task.host_task_id.clone(), task.output_path.clone())
         };
-        Ok(output.preview().await)
+        let Some(host_task_id) = host_task_id else {
+            return Err(TaskError::Unknown);
+        };
+        match self
+            .platform
+            .tail(TaskRequest {
+                task_id: host_task_id.clone(),
+            })
+            .await
+        {
+            Ok(tail) => Ok(tail.text),
+            Err(HostPlatformError::TaskUnknown | HostPlatformError::OutputUnavailable(_)) => {
+                let done = self
+                    .state
+                    .lock()
+                    .unwrap()
+                    .tasks
+                    .get(&task_id)
+                    .and_then(|task| task.ended.borrow().clone());
+                Ok(done
+                    .and_then(|done| {
+                        done.result
+                            .structured_content
+                            .as_ref()?
+                            .get("preview")?
+                            .as_str()
+                            .map(str::to_owned)
+                    })
+                    .unwrap_or_default())
+            }
+            Err(error) => Err(TaskError::Read(AgentError::fault(
+                "BackgroundExec",
+                error.to_string(),
+            ))),
+        }
     }
 
     /// Reads one page of the task's registered output file, by byte offset:
@@ -388,12 +546,10 @@ impl BackgroundExec {
         self.page(&task_id, cursor, limit).await
     }
 
-    /// The paged read behind [`Self::output_page`].
-    ///
-    /// The file is the read's only source, so a running task, an ended task
-    /// and a task rebuilt after an unload answer alike; the live capture and
-    /// the result preview are not consulted. The file is append-only, so a
-    /// cursor the method handed out always names a byte that never changes.
+    /// The paged read behind [`Self::output_page`]. A live owner serves it
+    /// from the task record; a recovered task reads the registered file. The
+    /// file is append-only, so a cursor the method handed out always names a
+    /// byte that never changes.
     async fn page(
         &self,
         task_id: &str,
@@ -405,15 +561,12 @@ impl BackgroundExec {
             if state.closed {
                 return Err(OutputPageError::Closed);
             }
-            state.tasks.get(task_id).map(|task| {
-                (
-                    task.output_path.clone(),
-                    task.ended.borrow().clone(),
-                    task.output.clone(),
-                )
-            })
+            state
+                .tasks
+                .get(task_id)
+                .map(|task| (task.host_task_id.clone(), task.output_path.clone()))
         };
-        let (output_path, ended, live) = match current {
+        let (host_task_id, output_path) = match current {
             Some(current) => current,
             None => {
                 let start = self
@@ -421,29 +574,45 @@ impl BackgroundExec {
                     .await
                     .map_err(OutputPageError::Read)?
                     .ok_or(OutputPageError::Unknown)?;
-                let ended = self
-                    .terminal(task_id, self.timeline.committed())
-                    .await
-                    .map_err(OutputPageError::Read)?;
                 if self.state.lock().unwrap().closed {
                     return Err(OutputPageError::Closed);
                 }
-                (start.output_path, ended, None)
+                (None, start.output_path)
             }
         };
-        let mut page = self
-            .platform
-            .retained_output_page(std::path::Path::new(&output_path), cursor, limit)
-            .await?;
-        if let Some(truncated) = ended
-            .as_ref()
-            .and_then(|data| output_truncated(&data.result))
-        {
-            page.truncated = truncated;
-        } else if let Some(output) = live {
-            page.truncated = output.truncated().await;
+        if let Some(host_task_id) = host_task_id {
+            match self
+                .platform
+                .output(OutputRequest {
+                    task_id: host_task_id,
+                    cursor: Some(cursor),
+                    limit: Some(limit as u64),
+                    wait_ms: None,
+                    event_cursor: None,
+                })
+                .await
+            {
+                Ok(page) => {
+                    return Ok(OutputPage {
+                        text: page.text,
+                        bytes: page.bytes,
+                        next_cursor: page.next_cursor,
+                        truncated: page.truncated,
+                    });
+                }
+                Err(HostPlatformError::TaskUnknown | HostPlatformError::OutputUnavailable(_)) => {}
+                Err(HostPlatformError::Closed) => return Err(OutputPageError::Closed),
+                Err(error) => {
+                    return Err(OutputPageError::Read(AgentError::fault(
+                        "BackgroundExec",
+                        error.to_string(),
+                    )));
+                }
+            }
         }
-        Ok(page)
+        self.platform
+            .retained_output_page(std::path::Path::new(&output_path), cursor, limit)
+            .await
     }
 
     /// Waits until the task ends, or `timeout_ms` elapses: what
@@ -947,15 +1116,6 @@ pub(crate) fn wake_input(event_id: &str, data: &ExecEndedData, name: String) -> 
 /// is a result the model should see.
 pub(crate) fn wakes(data: &ExecEndedData) -> bool {
     data.status != ExecStatus::Cancelled
-}
-
-/// The `outputTruncated` flag an `exec/ended` result carries.
-fn output_truncated(result: &ToolResult) -> Option<bool> {
-    result
-        .structured_content
-        .as_ref()
-        .and_then(|fields| fields.get("outputTruncated"))
-        .and_then(serde_json::Value::as_bool)
 }
 
 /// `<dim-notification>`: work the model started has finished, failed or

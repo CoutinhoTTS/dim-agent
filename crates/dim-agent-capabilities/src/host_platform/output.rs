@@ -90,6 +90,18 @@ pub fn sanitize(text: &str) -> String {
         .collect()
 }
 
+/// The head of `text` within `max` UTF-8 bytes, on a character boundary.
+pub(crate) fn head_bytes(text: &str, max: usize) -> &str {
+    if text.len() <= max {
+        return text;
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// The tail of `text` within `max` UTF-8 bytes, on a character boundary.
 pub fn tail_bytes(text: &str, max: usize) -> &str {
     if text.len() <= max {

@@ -1124,10 +1124,6 @@ impl HostPlatform {
         })
     }
 
-    fn arc(&self) -> Result<Arc<Self>, HostPlatformError> {
-        self.mounted.upgrade().ok_or(HostPlatformError::Closed)
-    }
-
     fn process_error(error: ProcessSpecError) -> HostPlatformError {
         match error.code {
             "task_exists" => HostPlatformError::TaskExists,
@@ -1195,20 +1191,19 @@ impl HostPlatform {
             .build_process_spec(&request.command, &cwd)
             .await
             .map_err(Self::process_error)?;
-        let owner = self.arc()?;
-        let process = owner
-            .start_command(
-                &request.task_id,
-                spec,
-                &roots,
-                &output_dir,
-                request.timeout_ms,
-            )
-            .await
-            .map_err(Self::process_error)?;
+        let output_path = output_dir.join(format!("{}.log", request.task_id));
+        self.start_command(
+            &request.task_id,
+            spec,
+            &roots,
+            &output_dir,
+            request.timeout_ms,
+        )
+        .await
+        .map_err(Self::process_error)?;
         Ok(SpawnReply {
             task_id: request.task_id,
-            output_path: process.retain_task().to_string_lossy().into_owned(),
+            output_path: output_path.to_string_lossy().into_owned(),
         })
     }
 
@@ -1568,7 +1563,9 @@ impl HostPlatform {
             return Ok(page);
         }
         if let Some(command) = self.shell_command(&request.task_id) {
-            return Ok(command.page(request.cursor.unwrap_or(0), limit));
+            return command
+                .page(request.cursor.unwrap_or(0), limit)
+                .map_err(HostPlatformError::from);
         }
         if let Some(page) = self
             .task(&request.task_id)
@@ -1636,11 +1633,13 @@ impl HostPlatform {
         if let Some(command) = self.shell_command(&request.task_id) {
             return Ok(command.tail());
         }
-        if let Some(terminal) = self.task(&request.task_id).and_then(|task| task.terminal())
-            && let Some(text) = &terminal.output.text
-        {
+        if let Some(terminal) = self.task(&request.task_id).and_then(|task| task.terminal()) {
+            let text = match &terminal.output.text {
+                Some(text) => crate::host_platform::output::truncate_preview(text),
+                None => terminal.output.preview.clone(),
+            };
             return Ok(crate::workspace_tools::exec::OutputTail {
-                text: crate::host_platform::output::truncate_preview(text),
+                text,
                 total_bytes: terminal.output.bytes,
                 truncated: terminal.output.truncated,
             });
@@ -3613,7 +3612,7 @@ pub fn signal_name(_: ExitStatus) -> Option<String> {
 
 pub(crate) mod shell {
     use super::output::bounded_preview;
-    use super::output::tail_bytes;
+    use super::output::{head_bytes, tail_bytes};
     use super::{
         ExecShellRuntime, HostPlatform, ProcessSpec, ProcessSpecError, PtyProcessTree, PtySize,
         ShellEdition, ShellStatus,
@@ -3762,14 +3761,20 @@ pub(crate) mod shell {
             }
         }
 
-        pub(crate) fn page(&self, cursor: u64, limit: usize) -> super::OutputPageReply {
+        pub(crate) fn page(
+            &self,
+            cursor: u64,
+            limit: usize,
+        ) -> Result<super::OutputPageReply, OutputPageError> {
             let state = self.state.lock().unwrap();
-            let start = (cursor as usize).min(state.output.len());
-            let end = (start + limit).min(state.output.len());
-            super::OutputPageReply {
-                text: state.output[start..end].to_owned(),
+            let bytes = state.output.as_bytes();
+            let start = (cursor as usize).min(bytes.len());
+            let end = (start + limit + PAGE_CHAR_TRAILING_BYTES).min(bytes.len());
+            let page = decode_page(&bytes[start..end], cursor, limit, state.omitted > 0)?;
+            Ok(super::OutputPageReply {
+                text: page.text,
                 bytes: state.bytes,
-                next_cursor: Some(end as u64),
+                next_cursor: Some(start as u64 + page.bytes),
                 truncated: state.omitted > 0,
                 retained_from: 0,
                 reset: None,
@@ -3777,7 +3782,7 @@ pub(crate) mod shell {
                 next_event_cursor: None,
                 event_retained_from: None,
                 state: None,
-            }
+            })
         }
     }
 
@@ -3798,8 +3803,9 @@ pub(crate) mod shell {
         if text.len() <= room {
             state.output.push_str(text);
         } else {
-            state.output.push_str(&text[..room]);
-            state.omitted += text.len() - room;
+            let kept = head_bytes(text, room);
+            state.output.push_str(kept);
+            state.omitted += text.len() - kept.len();
         }
     }
 

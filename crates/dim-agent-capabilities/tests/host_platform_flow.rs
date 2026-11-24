@@ -2058,6 +2058,59 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
         })
         .await
         .unwrap();
+    let capped = "printf '%s%s' '__DIM_START_22223333_' '44445555__'; head -c 65533 /dev/zero | tr '\\0' a; printf '\\n\\303\\251\\n'; printf '%s%s%d\\n' '__DIM_END_66667777_' '88889999__' 0\n";
+    platform
+        .write(ShellWrite {
+            task_id: "capture-shell".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(capped.as_bytes()),
+            command: Some(ShellCommandStart {
+                task_id: "capped-command".into(),
+                start_marker: "__DIM_START_22223333_44445555__".into(),
+                end_marker: "__DIM_END_66667777_88889999__".into(),
+            }),
+            job: None,
+        })
+        .await
+        .unwrap();
+    let capped_end = platform
+        .wait(
+            WaitRequest {
+                task_id: "capped-command".into(),
+                timeout_ms: Some(10_000),
+            },
+            never_cancelled(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(capped_end.status, WaitStatus::Exited);
+    let inside = platform
+        .output(OutputRequest {
+            task_id: "capped-command".into(),
+            cursor: Some(65_535),
+            limit: Some(16),
+            wait_ms: None,
+            event_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert!(inside.text.is_empty(), "{:?}", inside.text);
+    let whole = platform
+        .output(OutputRequest {
+            task_id: "capped-command".into(),
+            cursor: Some(65_534),
+            limit: Some(16),
+            wait_ms: None,
+            event_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(whole.text, "é");
+    platform
+        .settle(TaskRequest {
+            task_id: "capped-command".into(),
+        })
+        .await
+        .unwrap();
     platform
         .kill(TaskRequest {
             task_id: "capture-shell".into(),

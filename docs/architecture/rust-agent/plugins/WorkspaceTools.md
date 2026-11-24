@@ -111,7 +111,9 @@ Its absence retains the original workspace boundary and does not gate loading.
 
 No direct Dispatcher subscription. Tool results return to ToolExecutor;
 background exec transfers ownership to BackgroundExec, which commits ends and
-wakes. Per-call lookups obtain FileReads/BackgroundExec on the caller's branch.
+wakes. BackgroundExec keeps the branch task id, the owner task id and the
+registered path; its live reads, stop and settle call the HostPlatform task
+operations. Per-call lookups obtain FileReads/BackgroundExec on the caller's branch.
 Generation cancellation rejects new calls and stops accepted calls; cleanup
 waits for tracked calls, including handoff. File mutations stage complete bytes
 and retain coordinator admission through I/O/publication. Foreground commands
