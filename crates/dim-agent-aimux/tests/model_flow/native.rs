@@ -6179,6 +6179,139 @@ async fn gemini_a_signed_part_closes_its_text_block_and_replays_the_split() {
     join.await.unwrap();
 }
 
+/// A real Gemini stream signs the last part of each text block with an empty
+/// part, so two signed blocks in one round keep their own text and signature
+/// (arcships/aimux@b7479351, #467; the same chunk shape the provider's
+/// `a_signed_part_closes_its_text_block` case carries).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_two_signed_blocks_keep_their_own_text_and_signature() {
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Endpoint {
+        requests: Arc<Mutex<Vec<(Uri, Value)>>>,
+    }
+    async fn respond(
+        State(endpoint): State<Endpoint>,
+        uri: Uri,
+        Json(request): Json<Value>,
+    ) -> Response {
+        let turn = {
+            let mut requests = endpoint.requests.lock().unwrap();
+            requests.push((uri, request));
+            requests.len()
+        };
+        let chunks = if turn == 1 {
+            vec![json!({"candidates":[{"content":{"role":"model","parts":[
+                {"text":"first"},
+                {"text":"","thoughtSignature":"sig-1"},
+                {"text":"second"},
+                {"text":"","thoughtSignature":"sig-2"}
+            ]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}})]
+        } else {
+            vec![
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"finished"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+            ]
+        };
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(sse(chunks)))
+            .unwrap()
+    }
+
+    let endpoint = Endpoint::default();
+    let router = Router::new()
+        .route("/v1beta/{*path}", post(respond))
+        .with_state(endpoint.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1beta", listener.local_addr().unwrap());
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let join = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let models = Arc::new(
+        AimuxModels::from_config(
+            serde_json::from_value(json!({
+                "defaultModel":{"providerId":"local","modelId":"test-model"},
+                "providers":[{"id":"local","kind":"gemini","baseUrl":url,"headers":{"x-goog-api-key":"test-key"},"models":[{"id":"test-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let agent = model_agent(models, None).await;
+    let session = agent.create_session(session_config()).await.unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let content = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelContent(data) => Some(data.content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert_eq!(content.len(), 2, "{content:?}");
+    assert!(
+        matches!(
+            &content[0],
+            MessagePart::Text {
+                text,
+                provider_metadata: Some(ContentMetadata::Gemini { thought_signature }),
+                ..
+            } if text == "first" && thought_signature == "sig-1"
+        ),
+        "{content:?}"
+    );
+    assert!(
+        matches!(
+            &content[1],
+            MessagePart::Text {
+                text,
+                provider_metadata: Some(ContentMetadata::Gemini { thought_signature }),
+                ..
+            } if text == "second" && thought_signature == "sig-2"
+        ),
+        "{content:?}"
+    );
+    session
+        .submit("second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = endpoint.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "{}", requests.len());
+    let parts = requests[1].1["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "model")
+        .unwrap()["parts"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        parts,
+        vec![
+            json!({"text":"first","thoughtSignature":"sig-1"}),
+            json!({"text":"second","thoughtSignature":"sig-2"}),
+        ],
+        "{}",
+        requests[1].1
+    );
+    drop(session);
+    cancel.cancel();
+    join.await.unwrap();
+}
+
 /// A Gemini stream finishes once it has seen both a finish reason and usage,
 /// in either order: a usage chunk followed by the finish reason ends the turn,
 /// and a text chunk behind the finish reason is not read (arcships/aimux@b7479351,
