@@ -49,7 +49,8 @@ Git 创建；调用方停止等待不会撤回该任务，Session 与 worktree �
    映射路径必须留在新根内。
 2. ManagedWorktrees 分配 `<task-id>` 并执行 `git worktree add -b <branch> <root> <base>`。`base` 先经
    `git rev-parse --verify` 解析为 commit，`branch` 由 `-b` 消费且只新建，因此以 `-` 开头的值不会变成
-   Git 选项；默认分支或目标路径已存在、或目标路径与正在删除的路径重叠时换一个 `<task-id>` 重试（最多三次），
+   Git 选项；默认分支或目标路径已存在、或目标路径与正在删除的路径重叠时换一个 `<task-id>` 重试（最多三次）；选中的目录
+   在锁内登记为“正在创建”，保留到目录记录与使用关联写入、或失败清除返回之后（见 §5）。
    显式 `branch` 冲突直接返回 `worktree_branch_exists`，不重试。add 失败只删除本次创建的空任务目录：路径与分支
    可能是并发赢家创建的，本调用不碰它们。
 3. 以根下的映射子树作为新 Session 的 `cwd`（源工作区就是仓库根时即根本身），使
@@ -116,6 +117,13 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
   父路径方向也拒绝，因为它的内容正在被删（例如任务目录下的仓库），这期间不在其上新建 Session。删除结束后被删的目录
   自然通不过创建与关联的目录检查。不相关路径的创建、分叉、删除与关联不再等删除；复核之后也不会出现指向已删根的
   新 Session 或关联。
+- **正在创建**：`worktree.create` 选中目录之后、建目录之前，在同一把锁内把选中的规范化路径登记进“正在创建”集合，
+  与“正在删除”对称。登记由创建自己的任务持有，只随创建结束而释放（目录记录与使用关联写入之后，或失败清除返回之后），
+  删除方移不掉它；集合同样只在内存里。`store.removeWorktree` 与 `store.removeUnregisteredDirectory` 在锁内
+  登记“正在删除”时与这个集合双向比对，命中（路径相同、在其上或在其下）即以 `worktree_in_use` 拒绝，所以创建通过
+  目录检查之后、把 worktree 交给 Session 之前落进来的删除不会删到正在创建的 worktree。创建自己的失败清除（撤回目录与分支）
+  先结束这条登记再走删除操作，否则撤回会被自己的登记挡住。创建成功时登记在目录记录写入后释放，同一路径随后可正常删除；两条创建撞上同一路径时
+  后一条换一个 `<task-id>`。
 - **未登记目录的复核**：由 ManagedWorktrees 提供的删除步骤在删除前用文件系统检查复核目录仍是管理根下的普通目录、
   它的直接子目录仍是管理根内的普通目录，以及删除范围内每个目录都没有 `.git` 条目（目录、gitdir 文件或符号链接，含悬空链接；
   遍历不跟随符号链接，不起 Git 子进程），不满足就拒绝。
@@ -131,7 +139,7 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
 
 | Owner | 现有机制为何不够 | 需要的合同 | 顺序与失败 |
 | --- | --- | --- | --- |
-| SessionStore | `associate_worktree` 要求 Session 已存在，不能补写创建期记录；目录记录没有时间；删除目录记录会撞上未级联的关联外键 | 创建 Session 时同一事务写入目录记录、使用关联与最后使用时间；关联写入/解除更新时间；按根查询任何存储中 Session 的 cwd；Session 创建、分叉、删除、关联写入与移除共用所有权锁，创建与关联在锁内重新核验 cwd/根；`store.removeWorktree` 与 `store.removeUnregisteredDirectory` 在锁内复核并把正在删除的路径登记到内存集合，放锁后运行调用方传入的删除（前者还在删除成功后删记录），同一路径及其上下路径的创建、关联、分叉与再次删除在删除期间被拒；删除目录记录的类型化操作（含核验缺失/Git 不登记的记录清理）。列变更遵守 native-storage-format.md | 创建失败不留记录；删除成功才删记录，失败保留供重试，且不留下删除登记 |
+| SessionStore | `associate_worktree` 要求 Session 已存在，不能补写创建期记录；目录记录没有时间；删除目录记录会撞上未级联的关联外键 | 创建 Session 时同一事务写入目录记录、使用关联与最后使用时间；关联写入/解除更新时间；按根查询任何存储中 Session 的 cwd；Session 创建、分叉、删除、关联写入与移除共用所有权锁，创建与关联在锁内重新核验 cwd/根；`store.removeWorktree` 与 `store.removeUnregisteredDirectory` 在锁内复核并把正在删除的路径登记到内存集合，放锁后运行调用方传入的删除（前者还在删除成功后删记录），同一路径及其上下路径的创建、关联、分叉与再次删除在删除期间被拒，创建在锁内把选中的目录登记进对称的“正在创建”集合、删除遇到它同样拒绝；删除目录记录的类型化操作（含核验缺失/Git 不登记的记录清理）。列变更遵守 native-storage-format.md | 创建失败不留记录；删除成功才删记录，失败保留供重试，且不留下删除登记 |
 | Agents | 现有 `cwd` 只能指向已存在目录，不能把创建目录和创建 Session 合成一次请求 | `session.create` 与 `sessions.launch` 共用可选 `worktree`、嵌套回复、创建关联与失败清除；launch 保持既有策略上限与非交互语义 | 入口只校验格式与权限；Git、失败清除由 ManagedWorktrees 执行，创建失败时入口调用它清除 |
 | App Server 协议 | 客户端各自 `git worktree add` 会重新引入路径分歧；新成员会被旧 daemon 当作未知字段拒绝 | `hello.features` 宣告 `session.create.worktree` 与 `sessions.launch.worktree`（仅在产品 home 与原生存储都存在时宣告）、`worktree.list`、`worktree.remove`、`worktree.prune`；`cwd` 声明为源工作区；三个操作注册为 `managementMethods` 的 `worktree` 命名空间，不服务配对设备 | 客户端只在宣告存在时发送；失败不留半成品，重试创建新的 `<task-id>` |
 | CLI 与 Desktop | 没有可调用的创建入口，只能让模型跑 Git | 各自的入口与展示（`--worktree`、`dimcode worktree ...`；TUI 的 `/worktree` 面板留待后续），只消费类型化结果与拒绝原因 | 由各自 owner 更新 cli-commands.md 与 clients.md；不拼路径、不读存储、不直接调用 Git |
