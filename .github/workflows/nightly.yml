@@ -134,7 +134,7 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: publish-curl-nightly
-      cancel-in-progress: false
+      queue: max
     permissions:
       contents: write
     steps:
