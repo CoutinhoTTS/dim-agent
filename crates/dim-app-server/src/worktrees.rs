@@ -1322,9 +1322,11 @@ async fn check_unregistered_tree(entry: &Path) -> Result<(), WorktreeError> {
 
 /// A task directory whose checks passed. `force` removes everything; otherwise
 /// only the plain empty subdirectories the check recorded are removed, each by
-/// name from an open directory handle, so content that appears after the check
-/// fails the removal with `worktree_in_use` instead of being deleted and a task
-/// directory or child swapped for a symlink cannot redirect the removal.
+/// name from an open directory handle on Unix, so content that appears after
+/// the check fails the removal with `worktree_in_use` instead of being deleted
+/// and a task directory or child swapped for a symlink cannot redirect the
+/// removal. A platform without that handle-relative deletion refuses the
+/// non-force removal instead of deleting by path.
 async fn remove_checked_entry(
     entry: &Path,
     empty_children: &[PathBuf],
@@ -1407,41 +1409,21 @@ fn remove_entry(directory: &std::fs::File, name: &OsStr, path: &Path) -> Result<
     })
 }
 
-/// Removes the recorded empty children and then the task directory after
-/// proving each is still a plain directory. Removing a directory here resolves
-/// a reparse point in a path component between that proof and the call; the
-/// handle-relative removal that closes the window is Unix-only.
+/// Refuses the non-force removal. A non-Unix target deletes a directory by
+/// path and offers no ready-made deletion of only an empty directory relative
+/// to an open directory handle, so a reparse point swapped into a path
+/// component after the check could redirect the deletion outside the managed
+/// root. `--force` removes the tree with `std::fs::remove_dir_all`, which walks
+/// it through directory handles and does not follow a reparse point inside it.
 #[cfg(not(unix))]
-fn remove_empty_directories(entry: &Path, empty_children: &[PathBuf]) -> Result<(), WorktreeError> {
-    for child in empty_children {
-        remove_plain_directory(child)?;
-    }
-    remove_plain_directory(entry)
-}
-
-/// Remove one directory only while it is still a plain, empty directory.
-#[cfg(not(unix))]
-fn remove_plain_directory(path: &Path) -> Result<(), WorktreeError> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
-        Ok(_) => {
-            return Err(WorktreeError::InUse(format!(
-                "{} is not a plain directory",
-                path.display()
-            )));
-        }
-        Err(error) => return Err(WorktreeError::Store(format!("{}: {error}", path.display()))),
-    }
-    match std::fs::remove_dir(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
-            Err(WorktreeError::InUse(format!(
-                "{} is not empty; --force removes it",
-                path.display()
-            )))
-        }
-        Err(error) => Err(WorktreeError::Store(format!("{}: {error}", path.display()))),
-    }
+fn remove_empty_directories(
+    entry: &Path,
+    _empty_children: &[PathBuf],
+) -> Result<(), WorktreeError> {
+    Err(WorktreeError::InUse(format!(
+        "{} is an unregistered directory; --force removes it on this platform",
+        entry.display()
+    )))
 }
 
 /// A recorded root that exists but Git no longer names: there is no working
@@ -1789,6 +1771,7 @@ mod tests {
 
     /// Content that appears in the task directory after the check must refuse
     /// the non-force removal instead of being deleted with the directory.
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_that_appears_after_the_check_is_not_deleted() {
         let entry = scratch("late-content");
@@ -1857,6 +1840,7 @@ mod tests {
 
     /// Content that appears in a subdirectory the check recorded as empty must
     /// refuse the removal before that subdirectory is deleted.
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_that_appears_in_a_checked_child_is_not_deleted() {
         let entry = scratch("late-child");
@@ -1873,5 +1857,27 @@ mod tests {
         );
         assert!(child.is_dir());
         std::fs::remove_dir_all(&entry).unwrap();
+    }
+
+    /// A non-Unix target deletes a directory by path, so a reparse point
+    /// swapped in after the check could redirect the non-force removal; this
+    /// path refuses and `--force` removes the tree instead.
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn a_path_based_removal_refuses_an_unregistered_directory() {
+        let entry = scratch("path-based-removal");
+        let child = entry.join("repo");
+        std::fs::create_dir_all(&child).unwrap();
+        let error = remove_checked_entry(&entry, std::slice::from_ref(&child), false)
+            .await
+            .expect_err("a path-based removal must refuse the non-force removal");
+        assert_eq!(error.code(), "worktree_in_use");
+        assert!(
+            matches!(&error, WorktreeError::InUse(message) if message.contains("--force")),
+            "{error:?}"
+        );
+        assert!(child.is_dir());
+        remove_checked_entry(&entry, &[], true).await.unwrap();
+        assert!(!entry.exists());
     }
 }
