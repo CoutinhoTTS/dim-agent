@@ -1341,7 +1341,7 @@ impl HostPlatform {
                         output: job.output_record().0,
                         note: None,
                     });
-                    return Err(HostPlatformError::Io(error.to_string()));
+                    return Err(HostPlatformError::Failed(error.to_string()));
                 }
                 task.finish(Terminal {
                     status: TaskStatus::Cancelled,

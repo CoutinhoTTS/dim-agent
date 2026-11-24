@@ -686,12 +686,8 @@ impl ShellSession {
         Ok(())
     }
 
-    /// Consumes PTY output: folds it into the retained buffer and the
-    /// command's capture, settles background tasks whose completion marker
-    /// arrived (removing the marker from every buffer), and advances the
-    /// occupying task. A background marker is looked for only in the tail
-    /// this chunk can have completed, so the scan stays as small as the
-    /// chunk however far `retained` has grown.
+    /// Consumes PTY output: folds it into the retained buffer and strips a
+    /// registered job's end marker. Terminal facts come from the host watcher.
     async fn handle_event(self: &Arc<Self>, event: ShellEvent) {
         match event {
             ShellEvent::Output { text, .. } => self.handle_output(&text).await,
@@ -2003,12 +1999,28 @@ pub(crate) fn regularize_output(bytes: &[u8]) -> String {
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\x1b' {
-            while let Some(&next) = chars.peek() {
-                if next.is_ascii_alphabetic() || next == '[' {
+            match chars.peek().copied() {
+                Some('[') => {
                     chars.next();
-                    break;
+                    for next in chars.by_ref() {
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
                 }
-                chars.next();
+                Some(']') => {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if next == '\x07' {
+                            break;
+                        }
+                    }
+                }
+                Some('(' | ')' | '*' | '+' | '-' | '.' | '/') => {
+                    chars.next();
+                    chars.next();
+                }
+                _ => {}
             }
         } else if ch == '\r' {
             if chars.peek() == Some(&'\n') {

@@ -2258,7 +2258,7 @@ async fn a_job_write_terminalizes_and_reads_its_output() {
         .unwrap();
     let output_path = dir.join("job-1.log");
     let line = format!(
-        "printf 'job-output\\n' > '{}'; printf '%s%s%d\\n' '__DIM_END_aaaabbbb_' 'ccccdddd__' 0\n",
+        "printf '\\033'; printf 'job-output\\n' > '{}'; printf '%s%s%d\\n' '__DIM_END_aaaabbbb_' 'ccccdddd__' 0\n",
         output_path.display()
     );
     platform
