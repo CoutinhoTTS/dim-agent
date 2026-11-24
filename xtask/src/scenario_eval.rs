@@ -8285,16 +8285,24 @@ async fn idle(
 /// as one line with their text joined, because a delta line carries mostly an
 /// id and field names and the judge reads the run as a whole (issue #2139).
 fn judge_view(export: &str) -> String {
-    type ThinkingKey = (String, String, String);
-    let flush = |view: &mut String, thinking: &mut Option<(ThinkingKey, Value)>| {
-        if let Some((_, line)) = thinking.take() {
-            view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
+    /// A request's open `step/thinking` line and its deltas' text so far.
+    struct Thinking {
+        key: (String, String, String),
+        line: Value,
+        text: String,
+    }
+    let flush = |view: &mut String, thinking: &mut Option<Thinking>| {
+        if let Some(mut thinking) = thinking.take() {
+            thinking.line["event"]["data"]["delta"] = json!(thinking.text);
+            view.push_str(
+                &serde_json::to_string(&thinking.line).expect("a parsed line serializes"),
+            );
             view.push('\n');
         }
     };
     let mut view = String::new();
     let mut previous: BTreeMap<String, Value> = BTreeMap::new();
-    let mut thinking: Option<(ThinkingKey, Value)> = None;
+    let mut thinking: Option<Thinking> = None;
     for raw in export.lines() {
         let Ok(mut line) = serde_json::from_str::<Value>(raw) else {
             flush(&mut view, &mut thinking);
@@ -8314,18 +8322,22 @@ fn judge_view(export: &str) -> String {
             view.push('\n');
             continue;
         };
-        if let Some((open, merged)) = thinking.as_mut()
-            && *open == key
+        let delta = line["event"]["data"]["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(open) = thinking.as_mut()
+            && open.key == key
         {
-            let delta = line["event"]["data"]["delta"].as_str().unwrap_or_default();
-            let text = merged["event"]["data"]["delta"]
-                .as_str()
-                .unwrap_or_default();
-            merged["event"]["data"]["delta"] = json!(format!("{text}{delta}"));
+            open.text.push_str(&delta);
             continue;
         }
         flush(&mut view, &mut thinking);
-        thinking = Some((key, line));
+        thinking = Some(Thinking {
+            key,
+            line,
+            text: delta,
+        });
     }
     flush(&mut view, &mut thinking);
     view
