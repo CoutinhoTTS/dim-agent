@@ -1121,7 +1121,8 @@ Enter on a disabled or otherwise non-invocable row neither sends nor changes its
 ### Actions
 
 The client has a closed set of action kinds. Except for the Skills keys above, the table gives each kind's key. The hint
-lists the area's kinds plus the selected entry's kinds, in the table's order.
+lists the area's kinds plus the selected entry's kinds, in the table's order; Skills shows
+`Enter use` before `Tab toggle` when use is available.
 
 An action that names one entry carries the entry's id and the source its row reports. Two entries
 of one id in different sources are two rows, each selected and acted on on its own, and the
@@ -1270,9 +1271,10 @@ Writes follow [Execution settings](#execution-settings):
                           Update::Management ◄───────┴ group, entries, states, actions, issues
 Panel  ◄───────────────────{ area, view }◄──────────┘
    │
-   ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
-   │                                                                                (the view again)
-   └─ Ctrl+E ──► the external editor ──► Command { area, Save { id?, expectedRevision, document } }
+   ├─ Enter ──► UseSkill ──► editable task draft (no request sent)
+   └─ Tab ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+
+/hooks panel ── Ctrl+E ──► external editor ──► Command { area, Save { id?, expectedRevision, document } }
                                           ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► the same adapter, over its own connection

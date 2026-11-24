@@ -664,7 +664,7 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 ### 动作
 
-客户端有一组封闭的动作种类。除上面说明的 Skills 面板按键外，各动作使用下表中的键。键提示按表格顺序列出该领域提供的种类，加上所选条目提供的种类。
+客户端有一组封闭的动作种类。除上面说明的 Skills 面板按键外，各动作使用下表中的键。键提示按表格顺序列出该领域提供的种类，加上所选条目提供的种类；所选 Skill 可用时，`Enter use` 排在 `Tab toggle` 前面。
 
 针对单个条目的动作同时携带条目 id 和其所在行报告的来源。同一个 id 出现在不同来源时是两行，各自可以被选中和操作；适配器按动作携带的来源执行，不在目录里按 id 找来源。所有者不报告来源的领域不带来源，其 id 本身唯一。
 
@@ -731,9 +731,10 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
                           Update::Management ◄───────┴ 分组、条目、状态、动作、issues
 面板  ◄───────────────────{ area, view }◄──────────┘
    │
-   ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
-   │                                                                                （再次给出视图）
-   └─ Ctrl+E ──► 外部编辑器 ──► Command { area, Save { id?, expectedRevision, document } }
+   ├─ Enter ──► UseSkill ──► 可编辑的任务草稿（不发送请求）
+   └─ Tab ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+
+/hooks 面板 ── Ctrl+E ──► 外部编辑器 ──► Command { area, Save { id?, expectedRevision, document } }
                                 ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► 同一个适配器，用自己的连接

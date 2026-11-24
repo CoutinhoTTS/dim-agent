@@ -12,12 +12,11 @@
 //! │   deploy      enabled                         │
 //! │   Issues                                      │
 //! │     /w/.agents/skills/old/SKILL.md: no name   │
-//! ╰───── Enter toggle · Ctrl+R reload · Esc close ┘
+//! ╰─ Enter use · Tab toggle · Ctrl+R reload · Esc close ─╯
 //! ```
 //!
-//! The entry's actions decide the keys it offers: the hint names only those,
-//! and Enter, Space, Ctrl+E, Ctrl+N, Ctrl+R, Ctrl+T, Ctrl+X and Tab keep one
-//! meaning in every area. A remove asks in the hint before it sends; an
+//! The hint shows the available actions. In Skills, Enter inserts the selected
+//! enabled Skill into the draft and Tab toggles it. A remove asks before it sends; an
 //! inspect shows the adapter's detail in place of the list.
 
 use std::cell::Cell;

@@ -1616,7 +1616,8 @@ Both surfaces compose their text in the interface language ([`/language`](#termi
 The session starts in the language the interface chose and switches on every `/language` save,
 so a switch shows from the next reply. A subcommand uses the saved language, else the system's.
 
-The keys are one per action kind in every area, and each keeps one meaning: `Enter` or `Space`
+In Skills, `Enter` inserts the enabled Skill into the task draft without sending, `Tab` toggles
+the selected entry, and `Space` does not toggle it. In other areas, `Enter` or `Space`
 toggles, `Ctrl+E` opens a document in the external editor, `Ctrl+R` re-reads the area or asks its
 owner to rescan, `Ctrl+N` adds, `Ctrl+X` removes, `Ctrl+T` runs, `Tab` inspects, and `Esc`
 closes. A kind is offered only where the area's method table and the owner's view have one, so

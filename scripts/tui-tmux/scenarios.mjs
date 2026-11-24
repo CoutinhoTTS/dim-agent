@@ -1069,8 +1069,15 @@ const scenarios = [
         terminal.key('Enter');
         await terminal.waitFor('Enter use');
         terminal.key('Enter');
-        terminal.send('check the draft');
-        await terminal.waitFor('/skill:review-demo check the draft');
+        terminal.key('Home');
+        terminal.send('check the draft ');
+        await terminal.waitFor('check the draft /skill:review-demo');
+        terminal.key('C-o');
+        await terminal.waitFor('/new');
+        terminal.key('Escape');
+        await terminal.waitFor('check the draft /skill:review-demo');
+        terminal.send('after restore');
+        await terminal.waitFor('check the draft /skill:review-demo after restore');
         assert.equal(turnRequests(tui.model).length, 1);
         terminal.key(finish);
         await terminal.waitFor('Which draft?');
@@ -1079,7 +1086,7 @@ const scenarios = [
       await terminal.waitFor('Review your answers');
       terminal.key('Enter');
       await waitForRequest(tui.model, (request) => request.messages?.some((m) => m.role === 'tool' && JSON.stringify(m.content).includes('Second')));
-      await waitForRequest(tui.model, (request) => request.messages?.some((m) => m.role === 'user' && JSON.stringify(m.content).includes('check the draft')));
+      await waitForRequest(tui.model, (request) => request.messages?.some((m) => m.role === 'user' && JSON.stringify(m.content).includes('check the draft /skill:review-demo after restore')));
       await terminal.waitFor(ANSWER);
       terminal.send('/new');
       terminal.key('Enter');

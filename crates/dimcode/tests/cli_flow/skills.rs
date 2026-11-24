@@ -465,7 +465,7 @@ fn tui_skills_panel_reads_again_after_a_failed_read() {
     daemon.join().unwrap();
 }
 
-/// `/skills` opens the panel on the catalog and Enter toggles the selected
+/// `/skills` opens the panel on the catalog and Tab toggles the selected
 /// entry; `/reload-skills` rescans without a panel and reports what it found.
 #[test]
 fn tui_skills_panel_lists_toggles_and_reloads() {
