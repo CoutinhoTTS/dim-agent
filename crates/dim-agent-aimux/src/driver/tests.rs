@@ -702,6 +702,61 @@ async fn a_header_report_written_after_its_allowance_is_late_after_the_tick() {
     );
 }
 
+/// A 401 written after the header allowance is late as well: read before the
+/// timer fires, it ends the wait as missing headers, the failure the deadline
+/// arm gives the same report, and it does not keep its status.
+#[tokio::test(start_paused = true)]
+async fn a_late_error_report_fails_as_a_network_failure() {
+    let (fetch, reply) = scripted();
+    let driver = driver(fetch);
+    // Half a tick puts the allowance between two ticks, so the timer fires up
+    // to one tick after it.
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiChat),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    // The exchange is polled 0.2 ms after the allowance, before its timer.
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT + Duration::from_micros(200)).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::UNAUTHORIZED,
+            headers: headers("application/json"),
+            body: ScriptedBody::default(),
+        })
+        .unwrap();
+    assert!(
+        poll_once(invoke.as_mut()).is_pending(),
+        "the exchange must stop after the report"
+    );
+    tokio::time::advance(Duration::from_micros(100)).await;
+    let error = match poll_until_idle(invoke.as_mut()) {
+        Some(Err(error)) => error,
+        Some(Ok(_)) => panic!("a reply must not start from a late error report"),
+        None => panic!("a report written after the allowance must fail before the timer fires"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(model.status, None);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("no response headers arrived within 300 seconds of sending the request")
+    );
+}
+
 /// A report written exactly at the allowance is on time in either arm: the
 /// comparison includes the instant, and the reply starts from it.
 #[tokio::test(start_paused = true)]
