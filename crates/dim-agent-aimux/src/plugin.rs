@@ -235,7 +235,7 @@ impl ResolveModelConnection for ConfiguredConnection {
                 connection: ModelConnection::Http(HttpModelConnection {
                     protocol: model.kind,
                     base_url: model.base_url.clone(),
-                    network: Default::default(),
+                    network: model.network.clone(),
                     headers: model.headers.clone(),
                     bearer: if matches!(
                         model.kind,

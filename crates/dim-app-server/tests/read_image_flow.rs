@@ -218,6 +218,7 @@ async fn accumulated_user_and_read_images_follow_model_routing() {
                 kind: ModelProtocol::OpenaiCompatible,
                 api_key_env: None,
                 base_url,
+                network: Default::default(),
                 headers: Default::default(),
                 compatible: None,
                 models: [&vision, &text]

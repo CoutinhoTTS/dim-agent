@@ -1,6 +1,9 @@
 mod content;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use aimux_core::{
     AbortSignal, AiMuxError, ApiCallErrorOrigin, ErrorCause,
@@ -24,6 +27,25 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::request::ToolNames;
+
+/// How long a request waits for each step of the reply before the connection
+/// counts as lost.
+///
+/// Five minutes matches the allowance other harnesses give a slow model step.
+/// It bounds three waits: from sending the request until the response headers
+/// arrive (the request body and any redirects count against it), from the
+/// headers until the stream starts (a provider that peeks reads one stream
+/// event before it returns; the OpenAI Responses SDK reads response metadata
+/// first), and from one stream part to the next. The header wait ends, and the
+/// second wait begins, at the instant the transport produces the headers, not
+/// at the driver's next poll. Each wait gets the full allowance, so a slow
+/// reply is never cut, however long it takes, while a half-open connection
+/// fails as a network failure instead of holding the turn until an external
+/// deadline; that failure is retried in place while the attempt committed
+/// nothing. It also bounds reading the body of a non-2xx response, which is a
+/// short diagnostic: that read gets the allowance once in total, because an
+/// idle bound would let a trickle of bytes extend it.
+pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) fn convert(
     result: StreamResult,
@@ -80,6 +102,12 @@ pub(crate) fn convert(
                     }
                     _ = cancel.cancelled() => {
                         break Some(Err(HostError::Cancelled("Model request cancelled".into())));
+                    }
+                    _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                        break Some(Err(idle_failure(format!(
+                            "the stream delivered nothing for {} seconds",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        ))));
                     }
                     next = stream.next() => next,
                 }
@@ -525,6 +553,35 @@ fn empty_reply() -> HostError {
         ModelFailureKind::MalformedResponse,
         "the response had no text and no tool call",
     )
+}
+
+/// The failure of a request that waited [`STREAM_IDLE_TIMEOUT`] without the
+/// reply starting or continuing.
+///
+/// A connection that stays silent this long is treated as a lost transport, not
+/// as a malformed reply: the request was never answered, so the retry policy
+/// retries it like any other network failure while the attempt committed
+/// nothing, and nothing published is replayed.
+pub(crate) fn idle_failure(reason: String) -> HostError {
+    HostError::Failed {
+        message: ModelFailureKind::Network.line(Some(&reason)),
+        budget: None,
+        kind: HostErrorKind::Transport,
+        model: Some(Box::new(ModelFailureFacts {
+            kind: ModelFailureKind::Network,
+            reason: Some(reason),
+            status: None,
+            provider_code: None,
+            request_id: None,
+            cause: Vec::new(),
+            retry_after: None,
+            attempts: 1,
+            waited: Duration::ZERO,
+            retry_after_stop: None,
+            retry_forbidden: false,
+        })),
+        presentation: None,
+    }
 }
 
 fn content_filter_failure() -> HostError {

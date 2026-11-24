@@ -1,4 +1,4 @@
-use dim_agent_capabilities::host::HostError;
+use dim_agent_capabilities::host::{HostError, ModelNetwork};
 use dim_agent_runtime::ModelId;
 use dim_agent_types::ModelConfig;
 use serde::Deserialize;
@@ -42,6 +42,10 @@ pub struct ProviderConfig {
     pub kind: ProviderKind,
     pub api_key_env: Option<String>,
     pub base_url: String,
+    /// The connection's transport facts: the proxy every request goes through,
+    /// and the total timeout one request may spend, its response body included.
+    #[serde(default)]
+    pub network: ModelNetwork,
     #[serde(default)]
     pub headers: HashMap<String, String>,
     pub compatible: Option<CompatibleConfig>,

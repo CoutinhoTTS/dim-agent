@@ -1,6 +1,8 @@
 use crate::config::{ModelConfigFile, ProviderKind};
 use dim_agent_capabilities::context_model::{output_allowance, window_facts};
-use dim_agent_capabilities::host::{ContextModel, HostError, HostFuture, ResolveContextModel};
+use dim_agent_capabilities::host::{
+    ContextModel, HostError, HostFuture, ModelNetwork, ResolveContextModel,
+};
 use dim_agent_runtime::ModelId;
 use dim_agent_types::{ModelCapabilities, ModelCapabilitySnapshot, ModelConfig, ModelRequest};
 use std::collections::HashMap;
@@ -13,6 +15,7 @@ pub(crate) struct Model {
     pub api_key_env: Option<String>,
     pub defaults: ModelConfig,
     pub kind: ProviderKind,
+    pub network: ModelNetwork,
     pub preset: Option<String>,
     pub context_window: u64,
     pub max_output_tokens: u64,
@@ -47,6 +50,7 @@ impl AimuxModels {
                     "Provider IDs must be nonempty and unique",
                 ));
             }
+            validate_network(&provider.network, &provider.id)?;
             let url = url::Url::parse(&provider.base_url)
                 .map_err(|_| HostError::failed(format!("Invalid baseUrl for {}", provider.id)))?;
             if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -143,6 +147,7 @@ impl AimuxModels {
                         api_key_env: provider.api_key_env.clone(),
                         defaults,
                         kind: provider.kind,
+                        network: provider.network.clone(),
                         preset: preset.clone(),
                         context_window,
                         max_output_tokens,
@@ -217,6 +222,36 @@ impl AimuxModels {
                 HostError::failed(format!("Model is not configured: {provider}/{model}"))
             })
     }
+}
+
+/// The development file states the same connection facts a product record
+/// does, with the same rules: an HTTP or HTTPS root proxy URL, and a positive
+/// safe-integer timeout. A value the transport would refuse fails here, next to
+/// the provider that states it.
+fn validate_network(network: &ModelNetwork, provider: &str) -> Result<(), HostError> {
+    if let Some(proxy) = &network.proxy {
+        let root = url::Url::parse(proxy).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && matches!(url.path(), "" | "/")
+        });
+        if !root {
+            return Err(HostError::failed(format!(
+                "Invalid proxy for {provider}: an HTTP or HTTPS root URL is required"
+            )));
+        }
+    }
+    if network
+        .timeout_ms
+        .is_some_and(|value| value == 0 || value > dim_agent_types::JS_MAX_SAFE_INTEGER)
+    {
+        return Err(HostError::failed(format!(
+            "Invalid network timeout for {provider}: a positive safe integer is required"
+        )));
+    }
+    Ok(())
 }
 
 /// The model-file profile's window facts: the entry the request names, by
