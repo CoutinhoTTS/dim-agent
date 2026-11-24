@@ -300,9 +300,18 @@ impl ShellSession {
                 task.output_path.clone(),
             )
         };
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         let deadline = tokio::time::Instant::now() + Duration::from_millis(queued.timeout_ms);
         let ended = tokio::select! {
-            _ = notify.notified() => true,
+            _ = queued.cancel.cancelled() => {
+                return Some(Err("command cancelled while waiting for the shell".into()));
+            }
+            _ = self.lifecycle.cancelled() => {
+                return Some(Err("shell session closed while waiting for the shell".into()));
+            }
+            _ = &mut notified => true,
             _ = tokio::time::sleep_until(deadline) => false,
         };
         let inner = self.inner.lock().await;
@@ -348,7 +357,9 @@ impl ShellSession {
                 .as_mut()
                 .filter(|task| task.task_id == task_id)
             {
-                task.delivered = page.next_cursor.unwrap_or(task.delivered as u64) as usize;
+                task.delivered =
+                    page.next_cursor
+                        .unwrap_or(task.delivered as u64 + page.bytes) as usize;
             }
         }
         text.push_str(&format!(
@@ -547,11 +558,14 @@ impl ShellSession {
                             cursor: event_cursor,
                             wait_ms: 100,
                             limit: 64 * 1024,
-                        }) => if let Ok(page) = page {
-                            for event in page.events {
-                                this.handle_event(event).await;
+                        }) => match page {
+                            Ok(page) => {
+                                for event in page.events {
+                                    this.handle_event(event).await;
+                                }
+                                event_cursor = page.next_cursor;
                             }
-                            event_cursor = page.next_cursor;
+                            Err(_) => break,
                         },
                         result = &mut wait => {
                             let end = result.ok();
