@@ -194,8 +194,9 @@ The user/PR owner approved for this PR: delete `output(eventCursor)`, the `Outpu
 event fields, `ShellEvent`, `ShellState`, `OutputRequest.waitMs/eventCursor` and
 `ackEventCursor`. No in-repo consumer exists; generated TypeScript drops the fields; the
 alpha plugin API break is accepted for #1295. Replacement: terminal records plus `wait`,
-`output`, `tail`, `retainOutput`; the owner reader is the only lossless consumer. No
-fallback queue and no ack cursor.
+`output`, `tail`, `retainOutput`; the owner reader is the only lossless consumer. There is no
+public fallback queue and no ack cursor. The owner keeps a crate-private line queue only for
+`ShellSession`; it is an implementation detail, not a public contract.
 ## 4. Flows
 ### 4.1 ShellSession: state and exact owner calls
 Stored: `shell: Option<TaskId>`, `generation`, `dialect`, `shell_exe`, `queue`,
