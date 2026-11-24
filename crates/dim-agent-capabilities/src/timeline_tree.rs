@@ -3633,19 +3633,19 @@ impl LineView {
     }
 }
 /// `<dim-branch-line>`, written by TimelineTree at the start of every child.
-const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; a block carrying `default` is the note a move writes. Both are state about the line, not requests."#;
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="P" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; a block carrying `default` is the note a move writes. Both are state about the line, not requests."#;
 
 /// `<dim-branch-lines>`, the roster BranchLine writes under [`roster_key`] on
 /// a line that opened lines.
-const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: the lines you opened, under the key `branch:roster` and apart from your own identity under `branch:line`: the runtime lists the tool lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="O">: the lines you opened, under the key `branch:roster` and apart from your own identity under `branch:line`: the runtime lists the tool lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 
-/// The roster's closing sentence, coordination text for `main`
+/// The roster's closing sentence, coordination text for an opener
 /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
 /// replaceable at [`BranchToolConfig::roster_closing`].
 const ROSTER_CLOSING: &str = "They message you when they find something, need you, or end. Use the branch tool to message or read them, and the `wait` tool to wait for them; end the wait when your lines have nothing left to tell you.";
 
 /// `<dim-branch-message>`, `<dim-branch-idle>` and `<dim-branch-ended>`.
-const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
+const BRANCH_MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="P">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
 
 /// `<dim-branch-parent>`, written by BranchLine on a line whose parent moved.
 const PARENT_ENTRY: &str = r#"<dim-branch-parent branch="P" head="H" after="A">: on a line, the runtime reports that the line it was cut from has moved past where this line last read it, and where the next read starts. A later block of this name replaces the earlier one; it is state about that line, not a request."#;
@@ -3728,7 +3728,7 @@ impl DynPlugin for BranchLinePlugin {
                 own: identity.branch_id.clone(),
                 tree,
                 timeline: timeline.clone(),
-                roster_closing: self.config.roster_closing.clone(),
+                config: self.config.clone(),
                 view: Mutex::new(LineView::default()),
                 wanted: Mutex::new(std::collections::VecDeque::new()),
                 changed: tokio::sync::Notify::new(),
@@ -3806,8 +3806,9 @@ pub struct BranchLine {
     /// The line's own Timeline, which a load writes through before the tree
     /// has registered the line.
     timeline: Arc<Timeline>,
-    /// The roster's closing sentence in place of [`ROSTER_CLOSING`].
-    roster_closing: Option<Arc<str>>,
+    /// The factory configuration of the texts this part writes: the roster's
+    /// closing sentence and the status notes' guidance blocks.
+    config: BranchToolConfig,
     view: Mutex<LineView>,
     wanted: Mutex<std::collections::VecDeque<Decision>>,
     changed: tokio::sync::Notify,
@@ -4782,7 +4783,10 @@ impl BranchLine {
                 &[("branch", &self.own)],
                 &format!(
                     "Lines you opened that are still open. Each is you, working in parallel from the point you opened it; it can read your work after that point, and you can read its.\n{listed}\n{}",
-                    self.roster_closing.as_deref().unwrap_or(ROSTER_CLOSING)
+                    self.config
+                        .roster_closing
+                        .as_deref()
+                        .unwrap_or(ROSTER_CLOSING)
                 ),
             ),
             false,
@@ -5015,8 +5019,7 @@ impl BranchLine {
             _ => String::new(),
         };
         let idle_notice = self.view.lock().unwrap().idle_notice;
-        Ok(Some(status_note(
-            &self.own,
+        Ok(Some(self.status_note(
             parent,
             &source,
             &purpose,
@@ -5024,6 +5027,72 @@ impl BranchLine {
             is_default,
             other,
         )))
+    }
+    /// The status note a move writes on this line: the line's birth identity
+    /// under the same key, restated byte for byte, then the sentences the move
+    /// changes and the guidance block a candidate replaces (design §5,
+    /// §12.1). An empty block writes no `How you work here:` heading. A line
+    /// the user opened and a tool line get their own rule.
+    fn status_note(
+        &self,
+        parent: &str,
+        source: &BranchSource,
+        purpose: &str,
+        idle_notice: IdleNotice,
+        default: bool,
+        other: &str,
+    ) -> String {
+        let line = self.own.as_str();
+        let (kind, birth) = match source {
+            BranchSource::Tool { .. } => ("tool", tool_line_body(line, parent, purpose)),
+            _ => ("user", user_line_body(line, parent)),
+        };
+        let (change, block) = if default {
+            match kind {
+                "tool" => (
+                    format!(
+                        "This line is now the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to {parent}; you cannot call end on yourself. Line {other} stays open and keeps the lines it opened."
+                    ),
+                    self.config.default_note.as_deref().unwrap_or(""),
+                ),
+                _ => (
+                    format!(
+                        "The user has now made this line the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you cannot call end on yourself; the user ends this line. Line {other} stays open and keeps the lines it opened."
+                    ),
+                    self.config.user_default_note.as_deref().unwrap_or(""),
+                ),
+            }
+        } else if kind == "tool" {
+            (
+                format!(
+                    "The session's default branch moved from this line to line {other}. This line stays open, reports to {parent} as before and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT}"
+                ),
+                self.config.former_default_note.as_deref().unwrap_or(""),
+            )
+        } else {
+            (
+                format!(
+                    "The session's default branch moved from this line to line {other}. This line stays open and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT}"
+                ),
+                self.config.former_default_note.as_deref().unwrap_or(""),
+            )
+        };
+        let guidance = block.replace("{parent}", parent).replace("{other}", other);
+        let body = if guidance.is_empty() {
+            format!("{birth}\n\n{change}")
+        } else {
+            format!("{birth}\n\n{change}\n\nHow you work here:\n{guidance}")
+        };
+        let mut attrs = vec![
+            ("branch", line),
+            ("parent", parent),
+            ("source", kind),
+            ("default", if default { "true" } else { "false" }),
+        ];
+        if idle_notice == IdleNotice::None {
+            attrs.push((QUIET_IDLE_ATTRIBUTE, "none"));
+        }
+        crate::context_block::element("dim-branch-line", &attrs, &body)
     }
     /// Records `block` as this line's latest `branch:line` block and answers
     /// the role it states, where a missing `default` attribute means not
@@ -6099,50 +6168,6 @@ fn user_line_body(line: &str, parent: &str) -> String {
     )
 }
 
-/// The status note a move writes on a conversation line: the line's birth
-/// identity under the same key, restated byte for byte, then the sentences the
-/// move changes (design §5, §12.1). A line the user opened and a tool line get
-/// their own rule. The policy sentences come later; these are the protocol's.
-fn status_note(
-    line: &str,
-    parent: &str,
-    source: &BranchSource,
-    purpose: &str,
-    idle_notice: IdleNotice,
-    default: bool,
-    other: &str,
-) -> String {
-    let (kind, birth) = match source {
-        BranchSource::Tool { .. } => ("tool", tool_line_body(line, parent, purpose)),
-        _ => ("user", user_line_body(line, parent)),
-    };
-    let change = if default {
-        match kind {
-            "tool" => format!(
-                "This line is now the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to {parent}; you cannot call end on yourself. Line {other} stays open and keeps the lines it opened."
-            ),
-            _ => format!(
-                "The user has now made this line the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you cannot call end on yourself; the user ends this line. Line {other} stays open and keeps the lines it opened."
-            ),
-        }
-    } else {
-        format!(
-            "Line {other} is now the session's default branch. This line stays open, reports to {parent} as before and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again."
-        )
-    };
-    let body = format!("{birth}\n\n{change}");
-    let mut attrs = vec![
-        ("branch", line),
-        ("parent", parent),
-        ("source", kind),
-        ("default", if default { "true" } else { "false" }),
-    ];
-    if idle_notice == IdleNotice::None {
-        attrs.push((QUIET_IDLE_ATTRIBUTE, "none"));
-    }
-    crate::context_block::element("dim-branch-line", &attrs, &body)
-}
-
 /// The `branch` tool's refusal of `create` on a line that is neither the root
 /// nor the default branch (design §4, §11).
 const NOT_OPENER_TEXT: &str = "Only the root and the default branch open lines. Tell one of them if more parallel work is needed.";
@@ -6157,10 +6182,11 @@ const LIMIT_REACHED_TEXT: &str = "This Session holds its limit of open lines. Co
 /// The `branch` tool's description: its policy sentences are the coordination
 /// text for `main` ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
 /// replaceable at [`BranchToolConfig`].
-const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed by reading each other's work and messaging what the other must act on. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it; read a line's work instead of waiting for a report.\n- create (the root and the current default branch only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Send a decision, a blocker, or a conflict, not a progress report the receiver can read. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show a page of the activity of the line you were cut from, or of a line you opened, also after it ended. With no after, a read continues after your last read of that line: from your cut for the line you were cut from, and from its first event for a line you opened. Pass after to read from another point. Do not page through a whole line.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nA line messages and reads the line it was cut from and the lines it opened. The end action ends the calling line only.";
+const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed by reading each other's work and messaging what the other must act on. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it; read a line's work instead of waiting for a report.\n- create (the root and the current default branch only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Send a decision, a blocker, or a conflict, not a progress report the receiver can read. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show a page of the activity of the line you were cut from, or of a line you opened, also after it ended. With no after, a read continues after your last read of that line: from your cut for the line you were cut from, and from its first event for a line you opened. Pass after to read from another point. Do not page through a whole line.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nA line messages and reads the line it was cut from and the lines it opened. The end action ends the calling line and every line below it.";
 
 /// Factory configuration of the branch tool ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
-/// The product sets none of it, so the built-in text is in force.
+/// The product sets none of it: the built-in description, roster closing and
+/// cap are in force, and a note member left unset writes no guidance block.
 #[derive(Clone, Default)]
 pub struct BranchToolConfig {
     /// The tool description in place of [`BRANCH_TOOL_DESCRIPTION`]. A
@@ -6171,6 +6197,17 @@ pub struct BranchToolConfig {
     /// BranchLine, the part that writes the roster
     /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
     pub roster_closing: Option<Arc<str>>,
+    /// The `How you work here:` bullets of the note a move writes on a tool
+    /// line it makes the default branch ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
+    /// `{parent}` and `{other}` stand for the line ids the note names, and an
+    /// unset or empty value writes no block.
+    pub default_note: Option<Arc<str>>,
+    /// The `How you work here:` bullets of the note a move writes on a line the
+    /// user opened that it makes the default branch (design §12.4).
+    pub user_default_note: Option<Arc<str>>,
+    /// The `How you work here:` bullets of the note a move writes on the former
+    /// default branch of either source (design §12.4).
+    pub former_default_note: Option<Arc<str>>,
     /// The Session's cap on open tool lines in place of the built-in four
     /// ([timeline branches §6.1](../../../docs/design/timeline-branches.md#61-resources-and-limits)).
     pub max_open_lines: Option<usize>,

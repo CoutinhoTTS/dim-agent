@@ -5,18 +5,23 @@
 //!
 //! ```text
 //! cargo run --locked -p xtask -- scenario-eval --scenarios DIR --text ID
-//!     --candidate FILE [--text ID --candidate FILE]... --model PROVIDER/MODEL
-//!     --judge PROVIDER/MODEL --runs N --out DIR [--jobs N]
-//!     [--model-config FILE]
+//!     --baseline FILE --candidate FILE [--text ID --baseline FILE
+//!     --candidate FILE]... --model PROVIDER/MODEL --judge PROVIDER/MODEL
+//!     --runs N --out DIR [--jobs N] [--model-config FILE]
 //! ```
 //!
-//! Both arms run the shipped assembly: `current` with the product's own texts
-//! and `candidate` with each candidate file in place of the text its `--text`
-//! id names. Every `--text ID --candidate FILE` pair replaces one text, a
-//! pair reads in either order, a text named twice is an error, and the report
-//! gives each candidate text's own token cost. The runs are interleaved: for
-//! each run index and scenario the `current` run is scheduled before the
-//! `candidate` one, so a drift in
+//! Both arms run the same assembly with each text named by a `--text` id put
+//! in place of the assembly's: `current` with the baseline file and
+//! `candidate` with the candidate file. A pair names both files, so an
+//! evaluation compares two texts it was given and never the candidate with the
+//! copy the checkout ships; a pair whose baseline and candidate hold the same
+//! bytes is refused, as is one with a file missing. A pair reads in either
+//! order, a text named twice is an error, and the report gives each candidate
+//! text's own token cost. The report and `runs.jsonl` also record the
+//! configured texts each arm was given, as each text's id, length and
+//! fingerprint. The runs are
+//! interleaved: for each run index and scenario the `current` run is scheduled
+//! before the `candidate` one, so a drift in
 //! the endpoint lands on both arms alike, and the records come out in that
 //! order whatever order the runs complete in. `--jobs N` (default 1) runs N
 //! runs at once; each run keeps its own workspace copy, Dim home, local
@@ -303,7 +308,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     process::Stdio,
@@ -719,8 +724,20 @@ const TEXTS: &[(&str, TextMember)] = &[
         TextMember::Rust(|overrides, text| overrides.branch_description = Some(text)),
     ),
     (
+        "timeline-tree/default-note",
+        TextMember::Rust(|overrides, text| overrides.default_note = Some(text)),
+    ),
+    (
+        "timeline-tree/former-default-note",
+        TextMember::Rust(|overrides, text| overrides.former_default_note = Some(text)),
+    ),
+    (
         "timeline-tree/roster-closing",
         TextMember::Rust(|overrides, text| overrides.roster_closing = Some(text)),
+    ),
+    (
+        "timeline-tree/user-default-note",
+        TextMember::Rust(|overrides, text| overrides.user_default_note = Some(text)),
     ),
     (
         "goal/objective",
@@ -782,7 +799,7 @@ async fn evaluate(options: &Options) -> Result<String> {
         }
     }
     let candidate = overrides(&options.texts)?;
-    let current = Overrides::default();
+    let baseline = overrides(&options.baseline)?;
     let scenarios = read_scenarios(&options.scenarios)?;
     // A live evaluation is isolated: the run's server must come from a
     // model configuration, which also names the credential its calls use.
@@ -809,7 +826,7 @@ async fn evaluate(options: &Options) -> Result<String> {
         .map(|(index, &(arm, scenario, run))| {
             let mut measured = instrument.clone();
             let overrides = match arm {
-                "current" => &current,
+                "current" => &baseline,
                 _ => &candidate,
             };
             let native = &native;
@@ -880,6 +897,7 @@ async fn rejudge(
         .map_err(|error| format!("--rejudge {}: {error}", source.display()))?;
     let saved = read_saved_runs(&source)?;
     let selected = select_saved(&saved, &options.select)?;
+    one_saved_texts_per_arm(&selected, "--rejudge")?;
     let scenarios = read_scenarios(&options.scenarios)?;
     let mut plan = Vec::with_capacity(selected.len());
     for run in selected {
@@ -924,6 +942,7 @@ async fn pooled(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Resul
         directories.push((source, read.len()));
         records.extend(read);
     }
+    one_texts_per_arm(&records, "--pool")?;
     let cancel = CancellationToken::new();
     let server = served(options, observe).await?;
     let resolved = async {
@@ -1019,6 +1038,71 @@ fn read_pooled_runs(source: &Path, scenarios: &[Scenario]) -> Result<Vec<RunReco
         .collect()
 }
 
+/// A report states one configured set of texts for each arm, so the runs of
+/// one arm must all name the same set or all name none: a report that stated
+/// one set for runs whose texts only some of them recorded would be wrong.
+fn one_texts_per_arm(records: &[RunRecord], flag: &str) -> Result<()> {
+    for arm in ["current", "candidate"] {
+        one_text_set(
+            flag,
+            arm,
+            records
+                .iter()
+                .filter(|record| record.arm == arm)
+                .map(|record| record.texts.as_slice()),
+        )?;
+    }
+    Ok(())
+}
+
+/// The same rule over a rejudge source's saved runs, checked before any judge
+/// call.
+fn one_saved_texts_per_arm(runs: &[&SavedRun], flag: &str) -> Result<()> {
+    for arm in ["current", "candidate"] {
+        one_text_set(
+            flag,
+            arm,
+            runs.iter()
+                .filter(|run| run.arm == arm)
+                .map(|run| run.texts.as_slice()),
+        )?;
+    }
+    Ok(())
+}
+
+fn one_text_set<'a>(
+    flag: &str,
+    arm: &str,
+    runs: impl Iterator<Item = &'a [ConfiguredText]>,
+) -> Result<()> {
+    let mut recorded: Option<&'a [ConfiguredText]> = None;
+    let mut unrecorded = false;
+    for texts in runs {
+        if texts.is_empty() {
+            unrecorded = true;
+            continue;
+        }
+        if recorded.is_some_and(|recorded| recorded != texts) {
+            return Err(format!(
+                "{flag}: the {arm} runs recorded different texts; a report states one set per \
+                 arm, so pool evaluations that were given the same texts or report them \
+                 separately"
+            )
+            .into());
+        }
+        recorded.get_or_insert(texts);
+    }
+    if unrecorded && recorded.is_some() {
+        return Err(format!(
+            "{flag}: the {arm} runs mix records that name their configured texts with records \
+             written before the runner recorded them; a report states one set per arm, so report \
+             the runs that name their texts and the older runs separately"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// One pooled run as the report reads it: each probe keeps the kind its
 /// source recorded, checked against the scenario's, so a probe that changed
 /// kind since is refused rather than reinterpreted, and a record naming a
@@ -1082,6 +1166,7 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
         arm: arm_name(&run.arm)?,
         scenario: run.scenario,
         run: run.run,
+        texts: run.texts,
         session: run.session,
         stop: stop_name(&run.stop)?,
         turns: run.turns,
@@ -1180,6 +1265,7 @@ async fn rejudge_one(
         arm: arm_name(&saved.arm)?,
         scenario: saved.scenario.clone(),
         run: saved.run,
+        texts: saved.texts.clone(),
         session: saved.session.clone(),
         stop,
         turns: saved.turns,
@@ -1229,6 +1315,10 @@ struct SavedRun {
     judge_reasks: u32,
     #[serde(default)]
     judge_calls: Vec<JudgeCall>,
+    /// The texts the arm was given; empty in a record written before the
+    /// runner recorded them.
+    #[serde(default)]
+    texts: Vec<ConfiguredText>,
     /// `None` in a record written before the runner wrote this fact.
     #[serde(default)]
     temperature_dropped: Option<bool>,
@@ -1341,6 +1431,8 @@ fn stop_name(stop: &str) -> Result<&'static str> {
         "switch_target_not_reached" => Ok("switch_target_not_reached"),
         "switch_target_ended" => Ok("switch_target_ended"),
         "switch_target_unknown" => Ok("switch_target_unknown"),
+        "switch_note_missing" => Ok("switch_note_missing"),
+        "switch_incomplete" => Ok("switch_incomplete"),
         "error" => Ok("error"),
         other => Err(format!("the saved run has an unknown stop {other}").into()),
     }
@@ -1429,6 +1521,10 @@ struct BrokenRun {
 
 struct Options {
     scenarios: PathBuf,
+    /// The `--text ID --baseline FILE` pairs, in the order given: the text each
+    /// candidate replaces, put in place of the assembly's in the `current`
+    /// arm.
+    baseline: Vec<(String, Arc<str>)>,
     /// The `--text ID --candidate FILE` pairs, in the order given.
     texts: Vec<(String, Arc<str>)>,
     model: ModelId,
@@ -1512,10 +1608,12 @@ impl Options {
     /// absolute, as `session.create` requires of the cwd.
     fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Self> {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
-                     --text ID --candidate FILE [--text ID --candidate FILE]... \
+                     --text ID --baseline FILE --candidate FILE [--text ID \
+                     --baseline FILE --candidate FILE]... \
                      --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs N \
                      --out DIR [--jobs N] [--model-config FILE] \
-                     [--defaults FILE]; a text named twice is an error, and a \
+                     [--defaults FILE]; every text names the baseline it replaces \
+                     and its candidate, a text named twice is an error, and a \
                      run whose view does not fit the judge's own declared \
                      window is unjudged, so a model configuration narrowed for \
                      the scenarios declares the judge under its own provider \
@@ -1530,12 +1628,16 @@ impl Options {
         // names another default configuration file.
         let mut args = args.into_iter();
         let (mut scenarios, mut out) = (None, None);
-        let (mut text, mut candidate, mut model, mut judge) = (None, None, None, None);
+        let (mut model, mut judge) = (None, None);
         let (mut runs, mut jobs, mut model_config, mut defaults) = (None, None, None, None);
         let mut rejudge = None;
         let mut select: Vec<String> = Vec::new();
         let mut pool: Vec<PathBuf> = Vec::new();
+        let mut baseline: Vec<(String, Arc<str>)> = Vec::new();
         let mut texts: Vec<(String, Arc<str>)> = Vec::new();
+        // The pair whose files are being read: each `--text ID` opens one and
+        // the two roles fill it, in either order.
+        let mut pending = PendingText::default();
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
             match flag.as_str() {
@@ -1553,23 +1655,43 @@ impl Options {
                 }
                 "--pool" => pool.push(PathBuf::from(value)),
                 "--text" => {
-                    if let Some(pending) = &text {
-                        return Err(format!("--text {pending} has no --candidate").into());
+                    if let Some(open) = &pending.id {
+                        return Err(
+                            format!("--text {open} has no --baseline and no --candidate").into(),
+                        );
                     }
-                    if texts.iter().any(|(given, _)| *given == value) {
+                    if baseline.iter().any(|(given, _)| *given == value)
+                        || texts.iter().any(|(given, _)| *given == value)
+                    {
                         return Err(format!("--text {value} is named twice").into());
                     }
-                    match candidate.take() {
-                        Some(prompt) => texts.push((value, prompt)),
-                        None => text = Some(value),
-                    }
+                    pending.id = Some(value);
                 }
-                "--candidate" => {
-                    let prompt = candidate_prompt(Path::new(&value))?;
-                    match text.take() {
-                        Some(id) => texts.push((id, prompt)),
-                        None if candidate.is_none() => candidate = Some(prompt),
-                        None => return Err("--candidate has no --text".into()),
+                "--baseline" | "--candidate" => {
+                    let is_baseline = flag == "--baseline";
+                    let filled = if is_baseline {
+                        pending.baseline.is_some()
+                    } else {
+                        pending.candidate.is_some()
+                    };
+                    if pending.id.is_none()
+                        && (pending.baseline.is_some() || pending.candidate.is_some())
+                    {
+                        return Err(format!("{flag} has no --text").into());
+                    }
+                    if filled {
+                        return Err(format!("{flag} is given twice for one --text").into());
+                    }
+                    let text = candidate_prompt(Path::new(&value), &flag)?;
+                    if is_baseline {
+                        pending.baseline = Some(text);
+                    } else {
+                        pending.candidate = Some(text);
+                    }
+                    if pending.baseline.is_some() && pending.candidate.is_some() {
+                        let id = pending.id.take().expect("a filled pair names its text");
+                        baseline.push((id.clone(), pending.baseline.take().expect("filled")));
+                        texts.push((id, pending.candidate.take().expect("filled")));
                     }
                 }
                 "--model" => model = Some(target(&value)?),
@@ -1583,11 +1705,35 @@ impl Options {
                 _ => return Err(usage.into()),
             }
         }
-        if let Some(text) = &text {
-            return Err(format!("--text {text} has no --candidate").into());
+        if let Some(open) = pending.id {
+            let missing = if pending.baseline.is_none() {
+                "--baseline"
+            } else {
+                "--candidate"
+            };
+            return Err(format!("--text {open} has no {missing}").into());
         }
-        if candidate.is_some() {
-            return Err("--candidate has no --text".into());
+        for (role, flag) in [
+            (&pending.baseline, "--baseline"),
+            (&pending.candidate, "--candidate"),
+        ] {
+            if role.is_some() {
+                return Err(format!("{flag} has no --text").into());
+            }
+        }
+        for (id, candidate) in &texts {
+            let replaced = &baseline
+                .iter()
+                .find(|(given, _)| given == id)
+                .expect("every pair carries its baseline")
+                .1;
+            if replaced == candidate {
+                return Err(format!(
+                    "--text {id}: the baseline and the candidate are the same text, so the \
+                     evaluation would compare the text with itself"
+                )
+                .into());
+            }
         }
         if texts.is_empty() && rejudge.is_none() && pool.is_empty() {
             return Err(usage.into());
@@ -1613,7 +1759,7 @@ impl Options {
         if finished && (!texts.is_empty() || runs.is_some() || defaults.is_some()) {
             return Err(
                 "--rejudge and --pool read finished evaluations' saved runs: --text, \
-                 --candidate, --runs and --defaults belong to a new evaluation"
+                 --baseline, --candidate, --runs and --defaults belong to a new evaluation"
                     .into(),
             );
         }
@@ -1636,6 +1782,7 @@ impl Options {
             .map_err(|error| format!("--out {}: {error}", out.display()))?;
         Ok(Self {
             scenarios,
+            baseline,
             texts,
             model,
             judge,
@@ -1664,6 +1811,30 @@ impl Options {
             pool,
         })
     }
+
+    /// The texts one arm puts in place of the assembly's, in the order the
+    /// evaluation was given them: `current` is each pair's baseline and
+    /// `candidate` its candidate.
+    fn arm_texts(&self, arm: &str) -> Vec<ConfiguredText> {
+        let texts = if arm == "current" {
+            &self.baseline
+        } else {
+            &self.texts
+        };
+        texts
+            .iter()
+            .map(|(id, text)| ConfiguredText::of(id, text))
+            .collect()
+    }
+}
+
+/// One `--text ID` pair while its files are read: each `--text ID` opens the
+/// pair and `--baseline` and `--candidate` fill it, in either order.
+#[derive(Default)]
+struct PendingText {
+    id: Option<String>,
+    baseline: Option<Arc<str>>,
+    candidate: Option<Arc<str>>,
 }
 
 /// A path from the environment: the TypeScript plugin rows run in Node,
@@ -1780,11 +1951,11 @@ fn refuse_output_inside_sources(
     Ok(())
 }
 
-fn candidate_prompt(path: &Path) -> Result<Arc<str>> {
+fn candidate_prompt(path: &Path, flag: &str) -> Result<Arc<str>> {
     let bytes =
-        std::fs::read(path).map_err(|error| format!("--candidate {}: {error}", path.display()))?;
+        std::fs::read(path).map_err(|error| format!("{flag} {}: {error}", path.display()))?;
     let text = String::from_utf8(bytes)
-        .map_err(|_| format!("--candidate {}: not UTF-8 text", path.display()))?;
+        .map_err(|_| format!("{flag} {}: not UTF-8 text", path.display()))?;
     Ok(Arc::from(text))
 }
 
@@ -1883,6 +2054,13 @@ struct ScenarioFile {
     /// The mid-run move of the default branch, when the scenario runs one.
     #[serde(default)]
     switch: Option<Switch>,
+    /// The mid-run moves of the default branch, in order, when the scenario
+    /// runs more than one: the first waits for its target line's first
+    /// `turn/start` like `switch`, and each later one moves right after the
+    /// one before it. `switch` stays the one-move spelling the committed
+    /// scenarios use.
+    #[serde(default)]
+    moves: Vec<Switch>,
     budget: Budget,
     probes: Vec<Probe>,
 }
@@ -1904,6 +2082,12 @@ pub(crate) struct Switch {
     /// switch.
     #[serde(default)]
     pub(crate) branch_id: Option<String>,
+    /// An input sent to the line this move moved away from, after the move
+    /// and the next input. The note a move writes goes in as `append` input,
+    /// and an append input never starts a turn, so an idle line that lost the
+    /// default branch needs this input to answer at all.
+    #[serde(default)]
+    pub(crate) former_message: Option<String>,
 }
 
 /// The line a [`Switch`] moves to, by role or by id.
@@ -1915,11 +2099,13 @@ pub(crate) enum SwitchTarget {
 }
 
 /// The role a [`SwitchTarget`] names. A tool line is a line the branch tool
-/// opened; the latest one is the line most recently opened that way.
+/// opened; the latest one is the line most recently opened that way. A user
+/// line is the line the scenario's last `session.branch_create` call opened.
 #[derive(Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SwitchRole {
     LatestToolLine,
+    UserLine,
 }
 
 /// How many further moves a switch makes while the target line is not
@@ -1927,46 +2113,118 @@ pub(crate) enum SwitchRole {
 /// turn before the line is marked ready.
 const UNKNOWN_BRANCH_RETRIES: u32 = 3;
 
+/// The tool line a `branch/create` notice opened: the branch tool's line, which
+/// [`SwitchRole::LatestToolLine`] names. Any other notice answers `None`.
+fn tool_line(event: &Value) -> Option<&str> {
+    if event["type"] != "branch" || event["name"] != "create" {
+        return None;
+    }
+    if event["data"]["source"]["kind"] != "tool" {
+        return None;
+    }
+    event["data"]["branch"].as_str()
+}
+
 /// A [`Switch`] as the run drives it: the target the role currently names,
 /// kept current while the switch is pending and that target has not started.
 struct PendingSwitch {
     switch: Switch,
     line: Option<String>,
     /// The target line's first `turn/start` has been seen: the move and the
-    /// next input happen now, or on a retry while the line is not ready.
+    /// next input happen now, or on a retry while the line is not ready. A
+    /// chained move is due once the input before it has been consumed.
     triggered: bool,
     /// The further attempts left while the move answers `unknown_branch`.
     retries_left: u32,
+    /// `session.branch_set_default` answered: the follow-ups this move sends
+    /// wait for the notes it writes on the lines that answer them.
+    moved: bool,
+    /// The line the move left once it answered.
+    former: Option<String>,
+    /// The note the move wrote on the target line, and on the line it left.
+    target_note: Option<NoteSeen>,
+    former_note: Option<NoteSeen>,
+    /// A line the move owes a note ended before it wrote one: the line can
+    /// answer no follow-up.
+    ended: Option<(String, String)>,
+    /// The input the move before this one sent, and the line that took it: a
+    /// chained move fires once that line consumed it.
+    previous: Option<(String, String)>,
 }
 impl PendingSwitch {
-    fn new(switch: Switch) -> Self {
+    /// `chained` switches do not wait for their target's first `turn/start`:
+    /// a second move runs on a line that may have started its first turn
+    /// before the run reached it. Such a move fires once the input the move
+    /// before it sent has been consumed, so the note the previous move wrote
+    /// on its target cannot be retired before that target answers.
+    fn new(switch: Switch, user_line: Option<&str>, chained: bool) -> Self {
         let line = match &switch.to {
             SwitchTarget::Id(id) => Some(id.clone()),
-            SwitchTarget::Role(_) => None,
+            SwitchTarget::Role(SwitchRole::UserLine) => user_line.map(str::to_owned),
+            SwitchTarget::Role(SwitchRole::LatestToolLine) => None,
         };
         Self {
             switch,
             line,
-            triggered: false,
+            triggered: chained,
             retries_left: UNKNOWN_BRANCH_RETRIES,
+            moved: false,
+            former: None,
+            target_note: None,
+            former_note: None,
+            ended: None,
+            previous: None,
         }
     }
 
-    /// Reads one notice: a tool `branch/create` renames the role's target, and
-    /// the target's first `turn/start` is when the move and the next input
-    /// happen. Once that turn has started the target is fixed: a line opened
-    /// afterwards has its own purpose, and the move and the input after it
-    /// stay with the line that started.
+    /// Reads one notice: a tool `branch/create` renames the role's target, the
+    /// target's first `turn/start` is when a single move and the next input
+    /// happen, a `branch:line` message is a note the move wrote, and a chained
+    /// move moves on when the input before it has been consumed. Once that
+    /// turn has started the target is fixed: a line opened afterwards has its
+    /// own purpose, and the move and the input after it stay with the line
+    /// that started.
     fn notice(&mut self, branch: &str, event: &Value) {
-        if self.triggered {
+        if event["type"] == "branch" && matches!(event["name"].as_str(), Some("end" | "ended")) {
+            if Some(branch) == self.line.as_deref() || self.former.as_deref() == Some(branch) {
+                self.ended = Some((
+                    branch.to_owned(),
+                    format!("line {branch} ended before its move note was written"),
+                ));
+            }
+            if self
+                .previous
+                .as_ref()
+                .is_some_and(|(line, _)| line == branch)
+            {
+                self.previous = None;
+                self.triggered = true;
+            }
             return;
         }
-        if event["type"] == "branch" && event["name"] == "create" {
-            if matches!(
-                &self.switch.to,
-                SwitchTarget::Role(SwitchRole::LatestToolLine)
-            ) && event["data"]["source"]["kind"] == "tool"
-                && let Some(line) = event["data"]["branch"].as_str()
+        if event["type"] == "input"
+            && event["name"] == "consumed"
+            && let Some((_, input)) = &self.previous
+            && event["data"]["input_id"].as_str() == Some(input.as_str())
+        {
+            self.previous = None;
+            self.triggered = true;
+            return;
+        }
+        if let Some(note) = branch_line_note(event, branch) {
+            if Some(branch) == self.line.as_deref() {
+                self.target_note = Some(note);
+            } else if self.former.as_deref() == Some(branch) {
+                self.former_note = Some(note);
+            }
+            return;
+        }
+        if let Some(line) = tool_line(event) {
+            if (!self.triggered || self.line.is_none())
+                && matches!(
+                    &self.switch.to,
+                    SwitchTarget::Role(SwitchRole::LatestToolLine)
+                )
             {
                 self.line = Some(line.to_owned());
             }
@@ -1979,7 +2237,131 @@ impl PendingSwitch {
             self.triggered = true;
         }
     }
+
+    /// Activates a chained move: it fires once the input the move before it
+    /// sent is consumed, so that move's target answers with its note in
+    /// effect. A move to the latest tool line takes the line the run has
+    /// recorded; one without a line keeps waiting for a `branch/create`
+    /// notice, as a single move does. A Session that named no input (the
+    /// move's answer carried no id) leaves the move due at once.
+    fn activated(&mut self, latest_tool_line: Option<&str>, previous: Option<(String, String)>) {
+        self.triggered = previous.is_none();
+        self.previous = previous;
+        if self.line.is_none()
+            && matches!(
+                &self.switch.to,
+                SwitchTarget::Role(SwitchRole::LatestToolLine)
+            )
+        {
+            self.line = latest_tool_line.map(str::to_owned);
+        }
+    }
+
+    /// The notes this move's follow-ups need: one for each line that answers
+    /// one, when that line takes the move's role and is not the root, which
+    /// writes no note (design §12.1).
+    fn notes(&self, target: &str, former: &str) -> Vec<(String, bool, String)> {
+        let mut notes = Vec::new();
+        let message_line = self.switch.branch_id.as_deref().unwrap_or(target);
+        if message_line == target && target != "main" {
+            notes.push((target.to_owned(), true, former.to_owned()));
+        } else if message_line == former && former != "main" {
+            notes.push((former.to_owned(), false, target.to_owned()));
+        }
+        if self.switch.former_message.is_some() && former != "main" {
+            notes.push((former.to_owned(), false, target.to_owned()));
+        }
+        notes
+    }
+
+    /// Whether the note the move wrote on `line` is in: the role it states and
+    /// the participant it names.
+    fn saw_note(&self, line: &str, default: bool, other: &str) -> bool {
+        let note = if Some(line) == self.line.as_deref() {
+            &self.target_note
+        } else if self.former.as_deref() == Some(line) {
+            &self.former_note
+        } else {
+            return false;
+        };
+        note.as_ref().is_some_and(|note| {
+            note.default == default && note.text.contains(&note_marker(default, other))
+        })
+    }
 }
+
+/// A move's status note as a line published it: whether the line became the
+/// default, and the note's text, which names the other participant.
+struct NoteSeen {
+    default: bool,
+    text: String,
+}
+
+/// The sentence a move's note states for role `default` and participant
+/// `other`: the fixed words around the line id (design §12.1).
+fn note_marker(default: bool, other: &str) -> String {
+    if default {
+        format!("switched from line {other}.")
+    } else {
+        format!("moved from this line to line {other}.")
+    }
+}
+
+/// The status note a `branch:line` message carries for `branch`: the role it
+/// states and its text. A message without that block, or for another line,
+/// answers `None` (design §5, §12.1).
+fn branch_line_note(event: &Value, branch: &str) -> Option<NoteSeen> {
+    if event["type"] != "input" || event["name"] != "message" {
+        return None;
+    }
+    for block in event["data"]["blocks"].as_array()? {
+        if block["key"] != "branch:line" {
+            continue;
+        }
+        let text = block["text"].as_str()?;
+        let tag = text.split_once('>')?.0;
+        if note_attribute(tag, "branch") != Some(branch) {
+            continue;
+        }
+        let default = match note_attribute(tag, "default") {
+            Some("true") => true,
+            Some("false") => false,
+            _ => continue,
+        };
+        return Some(NoteSeen {
+            default,
+            text: text.to_owned(),
+        });
+    }
+    None
+}
+
+/// One attribute of a `<dim-branch-line ...>` tag.
+fn note_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    tag.split(' ').find_map(|attribute| {
+        let (key, value) = attribute.split_once("=\"")?;
+        (key == name).then(|| value.strip_suffix('"')).flatten()
+    })
+}
+
+/// One follow-up a move sent and the note its line must have written before
+/// the request that consumes it: the line, the input the Session wrote, and
+/// the note's role and other participant.
+struct SwitchNote {
+    line: String,
+    input: String,
+    default: bool,
+    other: String,
+}
+
+/// The run's switch follow-ups and the notes they must follow: a move waits
+/// for each note before it submits the input its line answers, and the run is
+/// not judged when a request consumed an input without its note.
+#[derive(Default)]
+struct SwitchNotes {
+    expected: Vec<SwitchNote>,
+}
+
 /// One source a scenario declares through the `eventHub` service, and
 /// optionally subscribes its Session's `main` branch to (EventHub design A.1,
 /// A.3). Without `subscribe` the source starts unsubscribed, for a scenario
@@ -2112,6 +2494,9 @@ pub(crate) struct Scenario {
     /// The mid-run move of the default branch, when the scenario runs one.
     #[serde(default)]
     pub(crate) switch: Option<Switch>,
+    /// The mid-run moves after `switch`, in order.
+    #[serde(default)]
+    pub(crate) moves: Vec<Switch>,
     pub(crate) budget: Budget,
     probes: Vec<Probe>,
 }
@@ -2176,7 +2561,7 @@ fn into_scenario(
             }
         }
     }
-    if let Some(switch) = &raw.switch {
+    for switch in raw.switch.iter().chain(&raw.moves) {
         if switch.message.trim().is_empty() {
             return Err("a switch needs the input to send after the move".into());
         }
@@ -2192,6 +2577,28 @@ fn into_scenario(
         {
             return Err("a switch names an empty branch for its input".into());
         }
+        if switch
+            .former_message
+            .as_deref()
+            .is_some_and(|message| message.trim().is_empty())
+        {
+            return Err("a switch's former-default input is empty".into());
+        }
+    }
+    if !raw
+        .calls
+        .iter()
+        .any(|call| call.method == "session.branch_create")
+        && raw
+            .switch
+            .iter()
+            .chain(&raw.moves)
+            .any(|switch| matches!(switch.to, SwitchTarget::Role(SwitchRole::UserLine)))
+    {
+        return Err(
+            "a switch to the user line needs a session.branch_create call before the message"
+                .into(),
+        );
     }
     for call in &raw.calls {
         if call.method.trim().is_empty() {
@@ -2311,6 +2718,7 @@ fn into_scenario(
         events: raw.events,
         steers: raw.steers,
         switch: raw.switch,
+        moves: raw.moves,
         budget: raw.budget,
         probes: raw.probes,
     })
@@ -2323,9 +2731,15 @@ struct RunRecord {
     arm: &'static str,
     scenario: String,
     run: usize,
+    /// The texts the arm was given, in the order the evaluation was given
+    /// them: each is a configured input in place of the text its id names. A
+    /// record states what the arm was configured with, not that every text was
+    /// emitted.
+    texts: Vec<ConfiguredText>,
     session: Option<String>,
     /// `idle`, `turns`, `seconds`, `switch_target_not_reached`,
-    /// `switch_target_ended`, `switch_target_unknown` or `error`.
+    /// `switch_target_ended`, `switch_target_unknown`, `switch_note_missing`,
+    /// `switch_incomplete` or `error`.
     stop: &'static str,
     turns: u32,
     window: Option<f64>,
@@ -2381,6 +2795,38 @@ impl RunRecord {
     fn judged(&self) -> bool {
         !self.failed && self.judge_outcome == JudgeOutcome::Judged
     }
+}
+
+/// One text an arm was given: the id naming the text it replaced, the text's
+/// length in bytes, and a fingerprint of its bytes, so a report states which
+/// configured text each arm ran without carrying the text itself.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfiguredText {
+    id: String,
+    bytes: usize,
+    fingerprint: String,
+}
+impl ConfiguredText {
+    fn of(id: &str, text: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            bytes: text.len(),
+            fingerprint: fingerprint(text),
+        }
+    }
+}
+
+/// A text's fingerprint: FNV-1a 64 over its bytes, in lowercase hex. It tells
+/// the texts an evaluation compares apart in its records and report; it is not
+/// a security digest.
+fn fingerprint(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -3262,6 +3708,9 @@ fn overrides_value(overrides: &Overrides) -> Value {
         plugin_configs,
         branch_description,
         roster_closing,
+        default_note,
+        user_default_note,
+        former_default_note,
         goal_objective,
         goal_continuation,
         eventhub_entry,
@@ -3276,6 +3725,9 @@ fn overrides_value(overrides: &Overrides) -> Value {
         "pluginConfigs": plugin_configs,
         "branchDescription": branch_description.as_ref().map(ToString::to_string),
         "rosterClosing": roster_closing.as_ref().map(ToString::to_string),
+        "defaultNote": default_note.as_ref().map(ToString::to_string),
+        "userDefaultNote": user_default_note.as_ref().map(ToString::to_string),
+        "formerDefaultNote": former_default_note.as_ref().map(ToString::to_string),
         "goalObjective": goal_objective.as_ref().map(ToString::to_string),
         "goalContinuation": goal_continuation.as_ref().map(ToString::to_string),
         "schedulerDescription": scheduler_description.as_ref().map(ToString::to_string),
@@ -3300,6 +3752,9 @@ fn child_overrides(value: &Value) -> Overrides {
             .unwrap_or_default(),
         branch_description: text("branchDescription"),
         roster_closing: text("rosterClosing"),
+        default_note: text("defaultNote"),
+        user_default_note: text("userDefaultNote"),
+        former_default_note: text("formerDefaultNote"),
         goal_objective: text("goalObjective"),
         goal_continuation: text("goalContinuation"),
         scheduler_description: text("schedulerDescription"),
@@ -3363,7 +3818,7 @@ async fn product_probe(
         .rpc("session.attach", json!({"sessionId": probe}))
         .await
         .map_err(|error| format!("session.attach failed: {error}"))?;
-    submit(client, &probe, "PRODUCT-TOOLS\n", None, None)
+    let _ = submit(client, &probe, "PRODUCT-TOOLS\n", None, None)
         .await
         .map_err(|error| error.to_string())?;
     loop {
@@ -3532,7 +3987,7 @@ async fn preflight_session(
         .rpc("session.attach", json!({"sessionId": session}))
         .await
         .map_err(|error| (Vec::new(), format!("session.attach failed: {error}")))?;
-    submit(client, &session, &message, None, None)
+    let _ = submit(client, &session, &message, None, None)
         .await
         .map_err(|error| (Vec::new(), error))?;
     // The tool results in arrival order: the scripted steps run one per
@@ -4033,7 +4488,7 @@ async fn run_once(
     let socket = run_socket(options, arm, scenario, run);
     private_directory(socket.parent().expect("a socket has a parent"))?;
     let socket = bindable_socket(&socket)?;
-    let (record, outcome) = isolate_run(
+    let (mut record, outcome) = isolate_run(
         options,
         arm,
         overrides,
@@ -4048,6 +4503,7 @@ async fn run_once(
         instrument,
     )
     .await?;
+    record.texts = options.arm_texts(arm);
     write_run_outputs(options, arm, scenario, run, &outcome)?;
     Ok(record)
 }
@@ -5141,6 +5597,8 @@ fn child_record(
         "switch_target_not_reached" => "switch_target_not_reached",
         "switch_target_ended" => "switch_target_ended",
         "switch_target_unknown" => "switch_target_unknown",
+        "switch_note_missing" => "switch_note_missing",
+        "switch_incomplete" => "switch_incomplete",
         _ => "error",
     };
     let error = match &outcome.harness {
@@ -5151,6 +5609,7 @@ fn child_record(
         arm,
         scenario: scenario.id.clone(),
         run,
+        texts: Vec::new(),
         session: outcome.session.clone(),
         stop,
         turns: outcome.turns,
@@ -5233,6 +5692,7 @@ impl Finished {
                 window: None,
                 decline_retries: 0,
                 switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
                 error: Some(error),
             },
             export: None,
@@ -5459,6 +5919,22 @@ async fn drive_once(
             });
         }
     };
+    // A scored follow-up must answer under the note its move wrote. A run
+    // whose request consumed the input without it is failed before the judge,
+    // so the policy comparison cannot score an answer that did not see the
+    // text being evaluated (Timeline branches §12.4).
+    if driven.error.is_none()
+        && let Some(error) = switch_notes_unseen(&export, &driven.switch_notes.expected)
+    {
+        driven.stop = "switch_note_missing";
+        driven.error = Some(error.clone());
+        return Ok(Finished {
+            driven,
+            export: Some(export),
+            view: None,
+            judging: Judging::not_asked(scenario, Some(error)),
+        });
+    }
     let (Some(host), Some(resolver)) = (
         server.service::<ModelHost>(),
         server.service::<ProviderConnectionResolver>(),
@@ -5527,13 +6003,17 @@ async fn drive_once(
 }
 
 /// Whether the run is a failed run (model-prompts §8.1): it failed on its
-/// own, an error, its wall-clock budget or a switch that could not happen,
-/// or its judging did not happen — a judge call failed, there was no export
-/// to judge, or no model host for the judge.
+/// own, an error, its wall-clock budget or a switch that could not happen or
+/// did not send its scored follow-ups, or its judging did not happen — a judge
+/// call failed, there was no export to judge, or no model host for the judge.
 fn failed(stop: &str, error: Option<&str>, judge_outcome: JudgeOutcome) -> bool {
     matches!(
         stop,
-        "seconds" | "switch_target_not_reached" | "switch_target_ended" | "switch_target_unknown"
+        "seconds"
+            | "switch_target_not_reached"
+            | "switch_target_ended"
+            | "switch_target_unknown"
+            | "switch_incomplete"
     ) || error.is_some()
         || matches!(
             judge_outcome,
@@ -5600,6 +6080,127 @@ fn settle_failed_turn(driven: &mut Driven, failed_turn: Option<String>) {
     {
         driven.stop = "error";
         driven.error = Some(error);
+    }
+}
+
+/// Why a scored switch follow-up did not see its note, or `None` when every
+/// consumed follow-up's request carries it: the request the line began after
+/// it consumed the input, and the note's exact text (Timeline branches §12.4).
+/// An input no request consumed is not checked: no answer of that line is
+/// scored.
+fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
+    /// One `input/message` of the export, the line it is on, and the note it
+    /// carries when it is one.
+    struct Message {
+        branch: String,
+        note: Option<NoteSeen>,
+    }
+    let mut messages: BTreeMap<String, Message> = BTreeMap::new();
+    let mut consumed: Vec<(String, u64, String)> = Vec::new();
+    let mut starts: Vec<(String, u64, String)> = Vec::new();
+    let mut calls: BTreeMap<(String, String), Value> = BTreeMap::new();
+    for line in export.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["kind"] != "event" {
+            continue;
+        }
+        let branch = record["branch_id"].as_str().unwrap_or_default().to_owned();
+        let event = &record["event"];
+        let sequence = event["sequence"].as_u64().unwrap_or_default();
+        let id = event["id"].as_str().unwrap_or_default().to_owned();
+        match (event["type"].as_str(), event["name"].as_str()) {
+            (Some("input"), Some("message")) => {
+                messages.insert(
+                    id,
+                    Message {
+                        note: branch_line_note(event, &branch),
+                        branch,
+                    },
+                );
+            }
+            (Some("input"), Some("consumed")) => {
+                if let Some(input) = event["data"]["input_id"].as_str() {
+                    consumed.push((branch, sequence, input.to_owned()));
+                }
+            }
+            (Some("step"), Some("model-start")) => {
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    starts.push((branch, sequence, request.to_owned()));
+                }
+            }
+            (Some("model"), Some("call")) => {
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    calls.insert(
+                        (branch, request.to_owned()),
+                        event["data"]["request"].clone(),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+    for note in notes {
+        let Some(message) = messages.get(&note.input) else {
+            return Some(format!(
+                "the switch input {} on line {} is not in the export",
+                note.input, note.line
+            ));
+        };
+        let Some(consumed_at) = consumed
+            .iter()
+            .filter(|(branch, _, input)| branch == &message.branch && input == &note.input)
+            .map(|(_, sequence, _)| *sequence)
+            .min()
+        else {
+            continue;
+        };
+        let Some((_, _, request)) = starts
+            .iter()
+            .filter(|(branch, sequence, _)| branch == &message.branch && *sequence > consumed_at)
+            .min_by_key(|(_, sequence, _)| *sequence)
+        else {
+            return Some(format!(
+                "line {} consumed the switch input {} but started no request after it",
+                note.line, note.input
+            ));
+        };
+        let Some(call) = calls.get(&(message.branch.clone(), request.clone())) else {
+            return Some(format!(
+                "line {} consumed the switch input {} but its request never reached the model",
+                note.line, note.input
+            ));
+        };
+        let marker = note_marker(note.default, &note.other);
+        let texts: Vec<&str> = messages
+            .values()
+            .filter(|message| message.branch == note.line)
+            .filter_map(|message| message.note.as_ref())
+            .filter(|seen| seen.default == note.default && seen.text.contains(&marker))
+            .map(|seen| seen.text.as_str())
+            .collect();
+        if !texts
+            .iter()
+            .any(|text| request_carries(&call["messages"], text))
+        {
+            return Some(format!(
+                "the request that consumed the switch input on line {} does not carry the note it must answer under",
+                note.line
+            ));
+        }
+    }
+    None
+}
+
+/// Whether any string in `value` carries `needle`: a request is JSON, so a
+/// text with quotes in it is compared through the parsed value.
+fn request_carries(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(needle),
+        Value::Array(items) => items.iter().any(|item| request_carries(item, needle)),
+        Value::Object(map) => map.values().any(|item| request_carries(item, needle)),
+        _ => false,
     }
 }
 
@@ -5675,6 +6276,9 @@ struct Driven {
     /// How many times the runner moved again after the target line answered
     /// `unknown_branch`.
     switch_retries: u32,
+    /// The switch follow-ups the run sent and the notes each line's request
+    /// must carry; the run is not judged when one is missing.
+    switch_notes: SwitchNotes,
     error: Option<String>,
 }
 
@@ -5714,6 +6318,7 @@ async fn drive(
             window: None,
             decline_retries: 0,
             switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
             error: Some(error),
         };
     }
@@ -5739,6 +6344,7 @@ async fn drive(
                 window: None,
                 decline_retries: 0,
                 switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
                 error: Some(format!("session.create failed: {error}")),
             };
         }
@@ -5752,6 +6358,7 @@ async fn drive(
         window: None,
         decline_retries: 0,
         switch_retries: 0,
+        switch_notes: SwitchNotes::default(),
         error: None,
     };
     if let Err(error) = client
@@ -5790,20 +6397,31 @@ async fn drive(
             return driven;
         }
     }
+    // The line the scenario's last `session.branch_create` call opened: a
+    // switch names it by role, and the reply is where its id is known before
+    // the run starts.
+    let mut user_line: Option<String> = None;
     for (index, call) in scenario.calls.iter().enumerate() {
         let mut params = match &call.params {
             Value::Object(params) => params.clone(),
             _ => serde_json::Map::new(),
         };
         params.insert("sessionId".to_owned(), json!(session));
-        if let Err(error) = client.rpc(&call.method, Value::Object(params)).await {
-            driven.stop = "error";
-            driven.error = Some(format!(
-                "the calls step {} ({}) failed: {error}",
-                index + 1,
-                call.method
-            ));
-            return driven;
+        match client.rpc(&call.method, Value::Object(params)).await {
+            Ok(reply) => {
+                if call.method == "session.branch_create" {
+                    user_line = reply["branch"]["branchId"].as_str().map(str::to_owned);
+                }
+            }
+            Err(error) => {
+                driven.stop = "error";
+                driven.error = Some(format!(
+                    "the calls step {} ({}) failed: {error}",
+                    index + 1,
+                    call.method
+                ));
+                return driven;
+            }
         }
     }
     for source in &scenario.sources {
@@ -5841,7 +6459,36 @@ async fn drive(
         .cloned()
         .map(|steer| (steer, false))
         .collect();
-    let mut switch = scenario.switch.clone().map(PendingSwitch::new);
+    // The moves still to make, in order, and the default branch they move
+    // away from. A chained move fires right after the one before it.
+    let mut switches: VecDeque<PendingSwitch> = scenario
+        .switch
+        .iter()
+        .chain(&scenario.moves)
+        .enumerate()
+        .map(|(index, switch)| PendingSwitch::new(switch.clone(), user_line.as_deref(), index > 0))
+        .collect();
+    if switches.iter().any(|pending| {
+        matches!(pending.switch.to, SwitchTarget::Role(SwitchRole::UserLine))
+            && pending.line.is_none()
+    }) {
+        driven.stop = "error";
+        driven.error = Some(
+            "the switch to the user line has no line: the scenario's session.branch_create call answered no branch id"
+                .into(),
+        );
+        return driven;
+    }
+    let mut default = "main".to_owned();
+    // The latest tool line the run has seen opened. The role
+    // `latest_tool_line` names it, and a move activated after the line opened
+    // uses it: a `branch/create` reaches only the move that is front when it
+    // arrives.
+    let mut latest_tool_line: Option<String> = None;
+    // The follow-ups the moves sent and the notes their lines must carry: a
+    // move waits for its notes before it sends them, and the run is not judged
+    // when a request consumed one without its note.
+    let mut switch_notes = SwitchNotes::default();
     let mut last_event = Instant::now();
     // The events still to publish, and whether each was.
     let mut events: Vec<(EventSpec, bool)> = scenario
@@ -5903,10 +6550,17 @@ async fn drive(
         // The move and the input after it are bounded by the same absolute
         // deadline the budget check below applies: a reply that never comes
         // must not hold the run past its wall clock (model-prompts §8.1).
-        let line = switch.as_ref().and_then(|pending| pending.line.clone());
+        let line = switches.front().and_then(|pending| pending.line.clone());
         let fired = match tokio::time::timeout(
             time_left(started, &scenario.budget),
-            fire_switch(client, &session, &mut switch),
+            fire_switch(
+                client,
+                &session,
+                &mut switches,
+                &mut default,
+                latest_tool_line.as_deref(),
+                Some(&mut switch_notes),
+            ),
         )
         .await
         {
@@ -5964,7 +6618,7 @@ async fn drive(
         // first in this pass, so a subscription the model made in its last
         // turn has already started the clock and keeps the run open here
         // (EventHub design A.4).
-        let pending = switch.is_some()
+        let pending = !switches.is_empty()
             || steers.iter().any(|(_, fired)| !fired)
             || events.iter().any(|(event, fired)| {
                 !fired
@@ -5977,6 +6631,20 @@ async fn drive(
                 tokio::time::Instant::now()
                     + cleanup_budget(settings.stall_cleanup, settings.cleanup_budget_ms),
             );
+            // A pending switch the run stopped waiting on names itself, as the
+            // move's own deadline does: its note or its input did not come.
+            if let Some(pending) = switches.front() {
+                driven.error = Some(match &pending.line {
+                    Some(line) => format!(
+                        "the switch to line {line} did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                    None => format!(
+                        "the switch did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                });
+            }
             break;
         }
         if driven.turns >= scenario.budget.turns {
@@ -6009,6 +6677,9 @@ async fn drive(
                         {
                             branches.insert(branch.to_owned());
                         }
+                        if let Some(line) = tool_line(&event) {
+                            latest_tool_line = Some(line.to_owned());
+                        }
                         // A steer is taken inside the turn it reaches, so no
                         // turn starts for it: either event means the input is
                         // no longer outstanding.
@@ -6031,7 +6702,7 @@ async fn drive(
                                 return driven;
                             }
                         }
-                        if let Some(pending) = switch.as_mut() {
+                        if let Some(pending) = switches.front_mut() {
                             pending.notice(&branch, &event);
                         }
                         match fire_triggered(client, &session, &mut steers, &event).await {
@@ -6159,20 +6830,51 @@ async fn drive(
             }
         }
     }
-    if let Some(pending) = &switch {
-        let reason = match (&pending.line, pending.triggered) {
-            (Some(line), true) => format!(
-                "the move to line {line} did not complete before the run stopped on {}",
+    // A switch still at the front when the loop ended never completed. A move
+    // that never happened keeps its own outcome, so a scenario that could not
+    // switch is not read as a run that reached its budget. A move that
+    // happened without sending its scored follow-ups is incomplete: no request
+    // answered under the text the evaluation compares, so the run is failed
+    // instead of scored as a complete scenario. A run that stopped on its wall
+    // clock already named the switch it stopped waiting on and keeps that
+    // ending.
+    if let Some(pending) = switches.front()
+        && !(pending.moved && driven.stop == "seconds" && driven.error.is_some())
+    {
+        let reason = if pending.moved {
+            let line = pending
+                .line
+                .as_deref()
+                .expect("a moved switch names its line");
+            format!(
+                "the move to line {line} happened but its scored follow-up was not sent before the run stopped on {}",
                 driven.stop
-            ),
-            (Some(line), false) => format!(
-                "the switch never fired: line {line}'s first turn did not start before the run stopped on {}",
-                driven.stop
-            ),
-            (None, _) => format!(
-                "the switch never fired: no tool line was opened before the run stopped on {}",
-                driven.stop
-            ),
+            )
+        } else {
+            match (&pending.line, pending.triggered) {
+                _ if pending.previous.is_some() => match &pending.line {
+                    Some(line) => format!(
+                        "the chained move to line {line} did not fire: the input before it was not consumed before the run stopped on {}",
+                        driven.stop
+                    ),
+                    None => format!(
+                        "the chained move did not fire: its target was not opened and the input before it was not consumed before the run stopped on {}",
+                        driven.stop
+                    ),
+                },
+                (Some(line), true) => format!(
+                    "the move to line {line} did not complete before the run stopped on {}",
+                    driven.stop
+                ),
+                (Some(line), false) => format!(
+                    "the switch never fired: line {line}'s first turn did not start before the run stopped on {}",
+                    driven.stop
+                ),
+                (None, _) => format!(
+                    "the switch never fired: the line its role names was never opened before the run stopped on {}",
+                    driven.stop
+                ),
+            }
         };
         if driven.stop == "error" {
             driven.error = Some(match driven.error.take() {
@@ -6180,10 +6882,15 @@ async fn drive(
                 None => reason,
             });
         } else {
-            driven.stop = "switch_target_not_reached";
+            driven.stop = if pending.moved {
+                "switch_incomplete"
+            } else {
+                "switch_target_not_reached"
+            };
             driven.error = Some(reason);
         }
     }
+    driven.switch_notes = switch_notes;
     driven
 }
 
@@ -7029,18 +7736,21 @@ fn submit_params(
     params
 }
 
+/// Sends one input and answers the id the Session wrote it under, when the
+/// reply names the event: a switch records it to check the note the line's
+/// request must carry.
 async fn submit(
     client: &mut impl SwitchClient,
     session: &str,
     text: &str,
     mode: Option<InputMode>,
     branch: Option<&str>,
-) -> std::result::Result<(), String> {
-    client
+) -> std::result::Result<Option<String>, String> {
+    let reply = client
         .rpc("session.submit", submit_params(session, text, mode, branch))
         .await
-        .map(|_| ())
-        .map_err(|error| format!("session.submit failed: {error}"))
+        .map_err(|error| format!("session.submit failed: {error}"))?;
+    Ok(reply["event"]["id"].as_str().map(str::to_owned))
 }
 
 /// The one RPC a switch and its next input make; the tests' fake records the
@@ -7086,25 +7796,34 @@ fn unknown_branch(error: &dim_client::Error) -> bool {
             .is_some_and(|error| error.message.starts_with("unknown branch:"))
 }
 
-/// Runs the scenario's switch once the target line has started its first turn:
-/// the Session's default branch moves first, then the next input is submitted,
-/// naming a line only when the scenario does. A switch fires once; a later
-/// call leaves it unfired.
+/// Runs the next move once it is due: the Session's default branch moves
+/// first, and then the inputs the move sends: the one on the new default,
+/// naming a line only when the scenario does, and the one meant for the line
+/// it moved away from. With `notes`, those inputs wait for the notes the move
+/// writes on the lines that answer them, and each input is recorded with its
+/// note for the run's check before the judge. A move fires once and leaves the
+/// queue; the move after it fires on a later call once its input has been
+/// consumed, and is activated here with the tool line the run has seen opened.
 async fn fire_switch(
     client: &mut impl SwitchClient,
     session: &str,
-    switch: &mut Option<PendingSwitch>,
+    switches: &mut VecDeque<PendingSwitch>,
+    default: &mut String,
+    latest_tool_line: Option<&str>,
+    notes: Option<&mut SwitchNotes>,
 ) -> std::result::Result<SwitchFire, String> {
-    let Some(pending) = switch.as_mut() else {
+    let Some(pending) = switches.front_mut() else {
         return Ok(SwitchFire::NotFired);
     };
+    if pending.moved {
+        return send_switch_follow_ups(client, session, switches, latest_tool_line, notes).await;
+    }
     if !pending.triggered {
         return Ok(SwitchFire::NotFired);
     }
-    let line = pending
-        .line
-        .clone()
-        .expect("a triggered switch names its line");
+    let Some(line) = pending.line.clone() else {
+        return Ok(SwitchFire::NotFired);
+    };
     if let Err(error) = client
         .rpc(
             "session.branch_set_default",
@@ -7113,7 +7832,7 @@ async fn fire_switch(
         .await
     {
         if let Some("branch_ended" | "branch_target_protected") = dim_client::app_error(&error) {
-            switch.take();
+            switches.pop_front();
             return Ok(SwitchFire::TargetEnded {
                 line: line.clone(),
                 error: error.to_string(),
@@ -7124,7 +7843,7 @@ async fn fire_switch(
                 pending.retries_left -= 1;
                 return Ok(SwitchFire::Retry);
             }
-            switch.take();
+            switches.pop_front();
             return Ok(SwitchFire::TargetUnknown {
                 line: line.clone(),
                 error: error.to_string(),
@@ -7132,8 +7851,52 @@ async fn fire_switch(
         }
         return Err(format!("the switch to {line} failed: {error}"));
     }
-    let pending = switch.take().expect("the switch is pending");
-    submit(
+    let pending = switches.front_mut().expect("the switch is pending");
+    let former = std::mem::replace(default, line);
+    pending.moved = true;
+    pending.former = Some(former);
+    send_switch_follow_ups(client, session, switches, latest_tool_line, notes).await
+}
+
+/// Sends a moved switch's follow-ups once the notes they must follow are in,
+/// and records each input with the note its line answers under. A line the
+/// move owes a note that ended first fails the run's switch instead.
+async fn send_switch_follow_ups(
+    client: &mut impl SwitchClient,
+    session: &str,
+    switches: &mut VecDeque<PendingSwitch>,
+    latest_tool_line: Option<&str>,
+    mut notes: Option<&mut SwitchNotes>,
+) -> std::result::Result<SwitchFire, String> {
+    let Some(pending) = switches.front() else {
+        return Ok(SwitchFire::NotFired);
+    };
+    let target = pending.line.clone().expect("a moved switch names its line");
+    let former = pending.former.clone().expect("a moved switch left a line");
+    let wanted = pending.notes(&target, &former);
+    if notes.is_some() {
+        if let Some((line, error)) = &pending.ended
+            && wanted.iter().any(|(awaited, _, _)| awaited == line)
+        {
+            let line = line.clone();
+            let error = error.clone();
+            switches.pop_front();
+            return Ok(SwitchFire::TargetEnded { line, error });
+        }
+        if !wanted
+            .iter()
+            .all(|(line, default, other)| pending.saw_note(line, *default, other))
+        {
+            return Ok(SwitchFire::NotFired);
+        }
+    }
+    let pending = switches.pop_front().expect("the switch is pending");
+    let message_line = pending
+        .switch
+        .branch_id
+        .clone()
+        .unwrap_or_else(|| target.clone());
+    let receipt = submit(
         client,
         session,
         &pending.switch.message,
@@ -7141,6 +7904,40 @@ async fn fire_switch(
         pending.switch.branch_id.as_deref(),
     )
     .await?;
+    if let Some(gate) = notes.as_mut() {
+        let input = receipt.clone().ok_or_else(|| {
+            format!("session.submit answered no input id for the switch to {target}")
+        })?;
+        for (line, default, other) in &wanted {
+            if *line == message_line {
+                gate.expected.push(SwitchNote {
+                    line: line.clone(),
+                    input: input.clone(),
+                    default: *default,
+                    other: other.clone(),
+                });
+            }
+        }
+    }
+    if let Some(message) = pending.switch.former_message.as_deref() {
+        let receipt = submit(client, session, message, None, Some(former.as_str())).await?;
+        if let Some(gate) = notes.as_mut()
+            && former != "main"
+        {
+            let input = receipt.ok_or_else(|| {
+                format!("session.submit answered no input id for the switch to {target}")
+            })?;
+            gate.expected.push(SwitchNote {
+                line: former.clone(),
+                input,
+                default: false,
+                other: target.clone(),
+            });
+        }
+    }
+    if let Some(next) = switches.front_mut() {
+        next.activated(latest_tool_line, receipt.map(|input| (message_line, input)));
+    }
     Ok(SwitchFire::Fired)
 }
 
@@ -7158,7 +7955,7 @@ async fn fire_due(
             .is_some_and(|after| started.elapsed().as_secs_f64() >= after);
         if due && !*fired {
             *fired = true;
-            submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            let _ = submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
             sent = true;
         }
     }
@@ -7185,7 +7982,7 @@ async fn fire_triggered(
             .is_some_and(|trigger| data.contains(trigger.as_str()));
         if triggered && !*fired {
             *fired = true;
-            submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            let _ = submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
             sent = true;
         }
     }
@@ -7974,8 +8771,9 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         )
     });
     let mut text = String::from("| | |\n| --- | --- |\n");
-    // A report built from saved runs names its sources instead: no saved run
-    // records the texts under test.
+    // A report built from saved runs names its sources instead: a pool or a
+    // re-judge is given no --text, and the arm rows below state the texts the
+    // saved records carry.
     if instrument.sources.is_none() {
         let texts: Vec<String> = instrument
             .texts
@@ -7983,6 +8781,34 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             .map(|text| format!("`{text}`"))
             .collect();
         text += &format!("| text | {} |\n", texts.join(", "));
+    }
+    // Each evaluation's runs carry the configured texts it was given. A pool
+    // and a rejudge refuse runs of one arm that mix recorded and unrecorded
+    // texts, so the first record that names them states the arm's set.
+    let configured = |arm: &str| {
+        records
+            .iter()
+            .find(|record| record.arm == arm && !record.texts.is_empty())
+            .map(|record| record.texts.as_slice())
+    };
+    for arm in ["current", "candidate"] {
+        if !records.iter().any(|record| record.arm == arm) {
+            continue;
+        }
+        let Some(texts) = configured(arm) else {
+            text += &format!("| {arm} configured texts | not recorded |\n");
+            continue;
+        };
+        let listed: Vec<String> = texts
+            .iter()
+            .map(|text| {
+                format!(
+                    "`{}`: {} bytes, fingerprint {}",
+                    text.id, text.bytes, text.fingerprint
+                )
+            })
+            .collect();
+        text += &format!("| {arm} configured texts | {} |\n", listed.join("; "));
     }
     text += &format!(
         "| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n",
@@ -8214,6 +9040,7 @@ mod tests {
             events: Vec::new(),
             steers: Vec::new(),
             switch: None,
+            moves: Vec::new(),
             budget: Budget {
                 turns: 4,
                 seconds: 60.,
@@ -8232,6 +9059,7 @@ mod tests {
             arm,
             scenario: scenario.id.clone(),
             run: 0,
+            texts: Vec::new(),
             session: None,
             stop: "idle",
             turns: 1,
@@ -8485,11 +9313,16 @@ mod tests {
             json!({"type": "branch", "name": "create",
                    "data": {"branch": branch, "source": {"kind": kind}}})
         };
-        let mut pending = PendingSwitch::new(Switch {
-            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
-            message: "next".into(),
-            branch_id: None,
-        });
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
         pending.notice("main", &turn_start);
         assert!(!pending.triggered, "main's turn starts no switch");
         pending.notice("main", &create("2", "tool"));
@@ -8499,11 +9332,16 @@ mod tests {
         pending.notice("2", &turn_start);
         assert!(pending.triggered, "the target's first turn start is");
         assert_eq!(pending.line.as_deref(), Some("2"));
-        let mut pending = PendingSwitch::new(Switch {
-            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
-            message: "next".into(),
-            branch_id: None,
-        });
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
         pending.notice("main", &create("2", "tool"));
         pending.notice("3", &turn_start);
         assert!(!pending.triggered, "another line's turn starts no switch");
@@ -8513,13 +9351,396 @@ mod tests {
             !pending.triggered,
             "a line the user opened is not a tool line"
         );
-        let mut pending = PendingSwitch::new(Switch {
-            to: SwitchTarget::Id("4".into()),
-            message: "next".into(),
-            branch_id: None,
-        });
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("4".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
         pending.notice("4", &turn_start);
         assert!(pending.triggered);
+    }
+
+    /// A scenario's moves can end on the line its `session.branch_create` call
+    /// opened, and a move can carry the input for the line it moved away from:
+    /// the role and that input parse, and a user-line move without the call is
+    /// refused before any run (design §12.3).
+    #[test]
+    fn a_move_names_the_user_line_and_the_input_for_the_former_default() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-user-line-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        let parse = |moves: Value, calls: Value| {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "first",
+                "calls": calls,
+                "moves": moves,
+                "budget": {"turns": 3, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "it ran"}]
+            }))
+            .unwrap();
+            into_scenario("case".into(), directory.clone(), file)
+        };
+        let create = json!([{"method": "session.branch_create",
+                             "params": {"parentBranchId": "main", "at": 0,
+                                        "prompt": "the user's line"}}]);
+        let scenario = parse(
+            json!([
+                {"to": {"role": "latest_tool_line"}, "message": "second"},
+                {"to": {"role": "user_line"}, "message": "third",
+                 "formerMessage": "report to the user"}
+            ]),
+            create.clone(),
+        )
+        .unwrap();
+        assert_eq!(scenario.moves.len(), 2);
+        assert!(matches!(
+            scenario.moves[1].to,
+            SwitchTarget::Role(SwitchRole::UserLine)
+        ));
+        assert_eq!(
+            scenario.moves[1].former_message.as_deref(),
+            Some("report to the user")
+        );
+        assert!(
+            scenario.switch.is_none(),
+            "a scenario with several moves states them under moves"
+        );
+        let Err(error) = parse(
+            json!([{"to": {"role": "user_line"}, "message": "second"}]),
+            json!([]),
+        ) else {
+            panic!("a user-line move without the call is refused");
+        };
+        assert!(error.contains("session.branch_create"), "{error}");
+        let Err(error) = parse(
+            json!([{"to": {"id": "3"}, "message": "second",
+                    "formerMessage": " "}]),
+            create,
+        ) else {
+            panic!("an empty former-default input is refused");
+        };
+        assert!(error.contains("former-default input is empty"), "{error}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A second move fires right after the first, and a move that names a
+    /// former-default input sends it to the line it moved away from: the note
+    /// a move writes goes in as `append` input, which never starts a turn, so
+    /// that input is the only thing that brings the former default line's
+    /// answer (model-prompts §9.8).
+    #[tokio::test]
+    async fn a_second_move_fires_after_the_first_and_wakes_the_former_default() {
+        let create = |line: &str| {
+            json!({"type": "branch", "name": "create",
+                   "data": {"branch": line, "source": {"kind": "tool"}}})
+        };
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let mut first = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        first.notice("main", &create("2"));
+        first.notice("2", &turn_start);
+        let second = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::UserLine),
+                message: "to the user line".into(),
+                branch_id: None,
+                former_message: Some("to the former default".into()),
+            },
+            Some("3"),
+            true,
+        );
+        assert!(
+            second.triggered,
+            "a chained move fires after the move before it"
+        );
+        let mut switches: VecDeque<PendingSwitch> = [first, second].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder::default();
+        for move_number in [1, 2] {
+            assert!(
+                matches!(
+                    fire_switch(
+                        &mut client,
+                        "session",
+                        &mut switches,
+                        &mut default,
+                        None,
+                        None
+                    )
+                    .await,
+                    Ok(SwitchFire::Fired)
+                ),
+                "move {move_number}"
+            );
+        }
+        assert!(matches!(
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switches,
+                &mut default,
+                None,
+                None
+            )
+            .await,
+            Ok(SwitchFire::NotFired)
+        ));
+        let calls: Vec<&str> = client
+            .calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "session.branch_set_default",
+                "session.submit",
+                "session.branch_set_default",
+                "session.submit",
+                "session.submit"
+            ],
+            "each move runs before its input, and the former default's input follows the move"
+        );
+        assert_eq!(client.calls[0].1["branchId"], "2");
+        assert_eq!(client.calls[2].1["branchId"], "3");
+        assert_eq!(client.calls[3].1["text"], "to the user line");
+        assert!(
+            client.calls[3].1.get("branchId").is_none(),
+            "the next input lands on the new default branch"
+        );
+        assert_eq!(client.calls[4].1["text"], "to the former default");
+        assert_eq!(
+            client.calls[4].1["branchId"], "2",
+            "the former-default input names the line the move moved away from"
+        );
+        assert_eq!(default, "3", "the last move holds the default branch");
+    }
+
+    /// A move's acknowledgment does not send its follow-up: the line answers
+    /// the input only after it wrote the note, so an idle line cannot answer a
+    /// follow-up before its note lands (Timeline branches §12.4).
+    #[tokio::test]
+    async fn a_follow_up_waits_for_the_note_after_the_moves_acknowledgment() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        pending.notice("2", &turn_start);
+        let mut switches: VecDeque<PendingSwitch> = [pending].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder {
+            inputs: ["i1".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        let mut notes = SwitchNotes::default();
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    Some(&mut notes)
+                )
+                .await,
+                Ok(SwitchFire::NotFired)
+            ),
+            "the move's answer alone sends nothing"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default"],
+            "the follow-up waits for the note the move wrote"
+        );
+        let pending = switches.front_mut().expect("the move waits for its note");
+        pending.notice("2", &move_note("2", true, "main"));
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    Some(&mut notes)
+                )
+                .await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the note releases the follow-up"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default", "session.submit"],
+            "the move runs before its input"
+        );
+        assert_eq!(default, "2", "the move holds the new default");
+        assert_eq!(notes.expected.len(), 1, "one input, one note");
+        assert_eq!(notes.expected[0].line, "2");
+        assert_eq!(notes.expected[0].input, "i1");
+        assert!(notes.expected[0].default);
+        assert_eq!(notes.expected[0].other, "main");
+    }
+
+    /// A chained move waits for the input the move before it sent: the first
+    /// move's target answers with its note in effect before the next move can
+    /// retire it (Timeline branches §12.4).
+    #[tokio::test]
+    async fn a_chained_move_waits_for_the_input_before_it() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let first = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        let second = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("3".into()),
+                message: "to the user line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            true,
+        );
+        let mut switches: VecDeque<PendingSwitch> = [first, second].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder {
+            inputs: ["i1".to_owned(), "i2".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        switches
+            .front_mut()
+            .expect("the first move is pending")
+            .notice("2", &turn_start);
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the first move fires"
+        );
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
+                Ok(SwitchFire::NotFired)
+            ),
+            "the chained move waits for the input before it"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default", "session.submit"],
+            "the second move sends nothing before the first input is consumed"
+        );
+        let pending = switches.front_mut().expect("the second move is pending");
+        pending.notice("2", &consumed("i1"));
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the consumed input releases the chained move"
+        );
+        assert_eq!(default, "3", "the chained move holds the new default");
+    }
+
+    /// The judge is not asked about a request that consumed a switch's input
+    /// without the note the move wrote: the check reads the export's
+    /// consumption and the request that began after it (Timeline branches
+    /// §12.4).
+    #[test]
+    fn a_request_that_consumed_a_follow_up_without_its_note_is_unseen() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |request: &str| {
+            [
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"request_id": "r1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "m1", "sequence": 5, "type": "model", "name": "call",
+                                 "data": {"request_id": "r1",
+                                          "request": {"messages": [{"role": "user", "content": request}]}}}}),
+            ]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        assert!(
+            switch_notes_unseen(&export(note), &notes).is_none(),
+            "the request carries the note"
+        );
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes)
+            .expect("the request without the note is unseen");
+        assert!(unseen.contains("line 2"), "{unseen}");
     }
 
     /// A switch that has started its target stays with it: a tool line opened
@@ -8532,12 +9753,18 @@ mod tests {
                    "data": {"branch": line, "source": {"kind": "tool"}}})
         };
         let turn_start = json!({"type": "turn", "name": "start", "data": {}});
-        let mut switch = Some(PendingSwitch::new(Switch {
-            to: SwitchTarget::Role(SwitchRole::LatestToolLine),
-            message: "next".into(),
-            branch_id: None,
-        }));
-        let pending = switch.as_mut().expect("the switch is pending");
+        let mut switch: VecDeque<PendingSwitch> = vec![PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        )]
+        .into();
+        let pending = switch.front_mut().expect("the switch is pending");
         pending.notice("main", &create("A"));
         pending.notice("A", &turn_start);
         assert!(pending.triggered);
@@ -8546,10 +9773,18 @@ mod tests {
             ..SwitchRecorder::default()
         };
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
             Ok(SwitchFire::Retry)
         ));
-        let pending = switch.as_mut().expect("the retry keeps the switch");
+        let pending = switch.front_mut().expect("the retry keeps the switch");
         pending.notice("main", &create("B"));
         assert_eq!(
             pending.line.as_deref(),
@@ -8557,7 +9792,15 @@ mod tests {
             "the line that started keeps the move"
         );
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
             Ok(SwitchFire::Fired)
         ));
         let calls: Vec<&str> = client
@@ -8587,6 +9830,17 @@ mod tests {
     struct SwitchRecorder {
         calls: Vec<(String, Value)>,
         refusals: Vec<dim_client::RpcError>,
+        /// The input ids its `session.submit` answers carry, in order; a call
+        /// past the list answers an empty result.
+        inputs: VecDeque<String>,
+    }
+    impl SwitchRecorder {
+        fn methods(&self) -> Vec<&str> {
+            self.calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect()
+        }
     }
     impl SwitchClient for SwitchRecorder {
         async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
@@ -8594,20 +9848,52 @@ mod tests {
             if method == "session.branch_set_default" && !self.refusals.is_empty() {
                 return Err(self.refusals.remove(0).into());
             }
+            if method == "session.submit"
+                && let Some(input) = self.inputs.pop_front()
+            {
+                return Ok(json!({"event": {"id": input}}));
+            }
             Ok(json!({}))
         }
     }
 
-    /// A switch whose target has started its first turn, ready to move.
-    fn triggered_switch() -> Option<PendingSwitch> {
-        let mut pending = PendingSwitch::new(Switch {
-            to: SwitchTarget::Id("2".into()),
-            message: "next".into(),
-            branch_id: None,
-        });
+    /// The `branch:line` message a move writes on `line`: the role it gives
+    /// the line and the participant it names (design §12.1).
+    fn move_note(line: &str, default: bool, other: &str) -> Value {
+        let marker = if default {
+            format!("This line is now the session's default branch, switched from line {other}.")
+        } else {
+            format!("The session's default branch moved from this line to line {other}.")
+        };
+        let text = format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"{}\">\n{marker}\n</dim-branch-line>",
+            if default { "true" } else { "false" }
+        );
+        json!({"type": "input", "name": "message", "id": format!("note-{line}"), "sequence": 1,
+               "data": {"blocks": [{"type": "raw", "key": "branch:line", "text": text}]}})
+    }
+
+    /// The `input/consumed` notice of `input` on a line.
+    fn consumed(input: &str) -> Value {
+        json!({"type": "input", "name": "consumed", "id": format!("consumed-{input}"),
+               "sequence": 2, "data": {"input_id": input}})
+    }
+
+    /// A move whose target has started its first turn, ready to move.
+    fn triggered_switch() -> VecDeque<PendingSwitch> {
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
         pending.notice("2", &json!({"type": "turn", "name": "start", "data": {}}));
         assert!(pending.triggered);
-        Some(pending)
+        vec![pending].into()
     }
 
     /// The tree's `unknown_branch` as the Session protocol answers it: the
@@ -8628,7 +9914,15 @@ mod tests {
         let mut client = SwitchRecorder::default();
         let mut switch = triggered_switch();
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
             Ok(SwitchFire::Fired)
         ));
         let calls: Vec<&str> = client
@@ -8648,7 +9942,15 @@ mod tests {
             "the next input lands on the new default branch"
         );
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
             Ok(SwitchFire::NotFired)
         ));
         assert_eq!(client.calls.len(), 2, "a switch fires once");
@@ -8666,7 +9968,16 @@ mod tests {
             ..SwitchRecorder::default()
         };
         let mut switch = triggered_switch();
-        let error = match fire_switch(&mut client, "session", &mut switch).await {
+        let error = match fire_switch(
+            &mut client,
+            "session",
+            &mut switch,
+            &mut "main".into(),
+            None,
+            None,
+        )
+        .await
+        {
             Err(error) => error,
             Ok(outcome) => panic!("the move was refused, not {outcome:?}"),
         };
@@ -8690,12 +10001,28 @@ mod tests {
         };
         let mut switch = triggered_switch();
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
             Ok(SwitchFire::Retry)
         ));
-        assert!(switch.is_some(), "the switch stays pending for the retry");
+        assert!(!switch.is_empty(), "the switch stays pending for the retry");
         assert!(matches!(
-            fire_switch(&mut client, "session", &mut switch).await,
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
             Ok(SwitchFire::Fired)
         ));
         let calls: Vec<&str> = client
@@ -8713,7 +10040,7 @@ mod tests {
             "the retry moves before it sends the next input"
         );
         assert_eq!(client.calls[2].1["text"], "next");
-        assert!(switch.is_none());
+        assert!(switch.is_empty());
     }
 
     /// A line that never becomes ready is its own outcome after the retry
@@ -8730,21 +10057,38 @@ mod tests {
         for retry in 0..UNKNOWN_BRANCH_RETRIES {
             assert!(
                 matches!(
-                    fire_switch(&mut client, "session", &mut switch).await,
+                    fire_switch(
+                        &mut client,
+                        "session",
+                        &mut switch,
+                        &mut "main".into(),
+                        None,
+                        None
+                    )
+                    .await,
                     Ok(SwitchFire::Retry)
                 ),
                 "retry {retry}"
             );
-            assert!(switch.is_some(), "retry {retry}: still pending");
+            assert!(!switch.is_empty(), "retry {retry}: still pending");
         }
-        match fire_switch(&mut client, "session", &mut switch).await {
+        match fire_switch(
+            &mut client,
+            "session",
+            &mut switch,
+            &mut "main".into(),
+            None,
+            None,
+        )
+        .await
+        {
             Ok(SwitchFire::TargetUnknown { line, error }) => {
                 assert_eq!(line, "2");
                 assert!(error.contains("unknown branch"), "{error}");
             }
             outcome => panic!("the unready target is its own outcome, not {outcome:?}"),
         }
-        assert!(switch.is_none());
+        assert!(switch.is_empty());
         assert_eq!(
             client.calls.len(),
             UNKNOWN_BRANCH_RETRIES as usize + 1,
@@ -8778,7 +10122,16 @@ mod tests {
                 ..SwitchRecorder::default()
             };
             let mut switch = triggered_switch();
-            match fire_switch(&mut client, "session", &mut switch).await {
+            match fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None,
+            )
+            .await
+            {
                 Ok(SwitchFire::TargetEnded { line, error }) => {
                     assert_eq!(line, "2");
                     assert!(error.contains(code), "{code}: {error}");
@@ -8832,8 +10185,9 @@ mod tests {
                 "sibling-relay",
                 "switch-continue-directly",
                 "switch-then-open-lines",
+                "user-line-becomes-default",
             ],
-            "the committed branch set is the fifteen scenarios"
+            "the committed branch set is the sixteen scenarios"
         );
         assert_eq!(
             compact
@@ -9059,6 +10413,61 @@ mod tests {
             Some("candidate description")
         );
         assert!(overrides.branch_description.is_none());
+    }
+
+    /// Each status note's `How you work here:` block is injected through its
+    /// own factory member (timeline branches §12.4, model-prompts §8.1):
+    /// `--text timeline-tree/default-note`, `user-default-note` and
+    /// `former-default-note` land on the `Overrides` fields
+    /// [`app_server::serve_home`] hands `BranchToolConfig`, never on a product
+    /// string patched for the evaluation, and the serve child carries them.
+    #[test]
+    fn the_status_note_blocks_are_factory_members() {
+        let overrides = overrides_in(
+            TEXTS,
+            &[
+                (
+                    "timeline-tree/default-note".to_owned(),
+                    Arc::from("candidate default note"),
+                ),
+                (
+                    "timeline-tree/user-default-note".to_owned(),
+                    Arc::from("candidate user note"),
+                ),
+                (
+                    "timeline-tree/former-default-note".to_owned(),
+                    Arc::from("candidate former note"),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            overrides.default_note.as_deref(),
+            Some("candidate default note")
+        );
+        assert_eq!(
+            overrides.user_default_note.as_deref(),
+            Some("candidate user note")
+        );
+        assert_eq!(
+            overrides.former_default_note.as_deref(),
+            Some("candidate former note")
+        );
+        assert!(overrides.branch_description.is_none());
+        assert!(overrides.roster_closing.is_none());
+        let carried = child_overrides(&overrides_value(&overrides));
+        assert_eq!(
+            carried.default_note.as_deref(),
+            Some("candidate default note")
+        );
+        assert_eq!(
+            carried.user_default_note.as_deref(),
+            Some("candidate user note")
+        );
+        assert_eq!(
+            carried.former_default_note.as_deref(),
+            Some("candidate former note")
+        );
     }
 
     /// The base prompt is injected through PromptSources' own factory member
@@ -9361,12 +10770,16 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let out = directory.join("out");
         let args = [
             "--scenarios",
             "scenarios",
             "--text",
             "context-compaction/summary",
+            "--baseline",
+            baseline.to_str().unwrap(),
             "--candidate",
             candidate.to_str().unwrap(),
             "--model",
@@ -9601,16 +11014,22 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let parsed = Options::parse_from(
             [
                 "--scenarios",
                 "scenarios",
                 "--text",
                 "goal/objective",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--text",
                 "goal/objective",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--model",
@@ -9632,9 +11051,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// A `--text ID --candidate FILE` pair reads in either order: the
-    /// candidate given first pairs with the text that follows it
-    /// (model-prompts §8.1).
+    /// A `--text ID` pair reads in either order: a file given before the text
+    /// pairs with the text that follows it (model-prompts §8.1).
     #[test]
     fn a_pair_reads_in_either_order() {
         let directory =
@@ -9642,17 +11060,16 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let out = directory.join("out");
         let file = candidate.to_str().unwrap();
-        let parse = |flags: [&str; 4]| {
-            Options::parse_from(
+        let base = baseline.to_str().unwrap();
+        let parse = |flags: &[&str]| {
+            let mut args: Vec<String> = ["--scenarios", "scenarios"].map(str::to_owned).to_vec();
+            args.extend(flags.iter().map(|value| (*value).to_owned()));
+            args.extend(
                 [
-                    "--scenarios",
-                    "scenarios",
-                    flags[0],
-                    flags[1],
-                    flags[2],
-                    flags[3],
                     "--model",
                     "gateway/model",
                     "--judge",
@@ -9663,17 +11080,116 @@ mod tests {
                     out.to_str().unwrap(),
                 ]
                 .map(str::to_owned),
-            )
+            );
+            Options::parse_from(args)
         };
         for flags in [
-            ["--text", "goal/objective", "--candidate", file],
-            ["--candidate", file, "--text", "goal/objective"],
+            [
+                "--text",
+                "goal/objective",
+                "--baseline",
+                base,
+                "--candidate",
+                file,
+            ],
+            [
+                "--text",
+                "goal/objective",
+                "--candidate",
+                file,
+                "--baseline",
+                base,
+            ],
+            [
+                "--baseline",
+                base,
+                "--text",
+                "goal/objective",
+                "--candidate",
+                file,
+            ],
+            [
+                "--candidate",
+                file,
+                "--text",
+                "goal/objective",
+                "--baseline",
+                base,
+            ],
         ] {
-            let options = parse(flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
+            let options = parse(&flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
             assert_eq!(options.texts.len(), 1, "{flags:?}");
+            assert_eq!(options.baseline.len(), 1, "{flags:?}");
             assert_eq!(options.texts[0].0, "goal/objective", "{flags:?}");
             assert_eq!(&*options.texts[0].1, "candidate", "{flags:?}");
+            assert_eq!(&*options.baseline[0].1, "baseline", "{flags:?}");
         }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A text is compared with the text it replaces, never with the copy the
+    /// checkout ships: `--text ID` names the baseline beside the candidate,
+    /// and a pair without one, or one whose baseline is its candidate, is
+    /// refused before any run (model-prompts §8.1).
+    #[test]
+    fn a_pair_without_its_baseline_is_refused() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-baseline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join("candidate.md");
+        std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
+        let same = directory.join("same.md");
+        std::fs::write(&same, "baseline").unwrap();
+        let out = directory.join("out");
+        let parse = |flags: &[&str]| {
+            let mut args: Vec<String> = [
+                "--scenarios",
+                "scenarios",
+                "--model",
+                "gateway/model",
+                "--judge",
+                "gateway/model",
+                "--runs",
+                "1",
+                "--out",
+                out.to_str().unwrap(),
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            args.extend(flags.iter().map(|value| (*value).to_owned()));
+            Options::parse_from(args)
+        };
+        let error = match parse(&[
+            "--text",
+            "goal/objective",
+            "--candidate",
+            candidate.to_str().unwrap(),
+        ]) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a candidate without the baseline it replaces is refused"),
+        };
+        assert!(
+            error.contains("--text goal/objective has no --baseline"),
+            "the refusal names the missing text: {error}"
+        );
+        let error = match parse(&[
+            "--text",
+            "goal/objective",
+            "--baseline",
+            baseline.to_str().unwrap(),
+            "--candidate",
+            same.to_str().unwrap(),
+        ]) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a pair whose baseline is its candidate is refused"),
+        };
+        assert!(
+            error.contains("the baseline and the candidate are the same text"),
+            "the refusal says the comparison is the text with itself: {error}"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -10129,6 +11645,7 @@ mod tests {
                 window: None,
                 decline_retries: 0,
                 switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
                 error: None,
             }
         }
@@ -11019,6 +12536,12 @@ mod tests {
             !report.contains("| text |"),
             "no saved run records the texts under test: {report}"
         );
+        for arm in ["current", "candidate"] {
+            assert!(
+                report.contains(&format!("| {arm} configured texts | not recorded |")),
+                "{arm}: runs that recorded no text are reported as unrecorded: {report}"
+            );
+        }
         assert!(
             report.contains("| decline retries | 3 across all runs; not recorded for 2 runs |"),
             "a saved run written before the runner counted declines is not read as none: {report}"
@@ -11174,6 +12697,12 @@ mod tests {
             !report.contains("| text |"),
             "no saved run records the texts under test: {report}"
         );
+        for arm in ["current", "candidate"] {
+            assert!(
+                report.contains(&format!("| {arm} configured texts | not recorded |")),
+                "{arm}: runs that recorded no text are reported as unrecorded: {report}"
+            );
+        }
         assert_eq!(
             std::fs::read_to_string(first.join("runs.jsonl")).unwrap(),
             first_jsonl,
@@ -11191,6 +12720,257 @@ mod tests {
             "every run of both sources is kept: {records:?}"
         );
         assert!(out.join("scenario.md").exists());
+    }
+
+    /// A pool states the configured texts its runs recorded, and refuses an
+    /// arm whose runs recorded different ones: a report that stated one set
+    /// for runs that compared several would be wrong.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pool_refuses_runs_that_recorded_different_texts() {
+        const BASELINE: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const CANDIDATE: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        const OTHER: &str = "OTHER BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "pool-texts",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let source = |name: &str, baseline: &str| {
+            let directory = fixture.directory.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            let texts = |text: &str| {
+                json!([{"id": "timeline-tree/branch-description", "bytes": text.len(),
+                        "fingerprint": fingerprint(text)}])
+            };
+            let runs = [
+                json!({"arm": "current", "scenario": "case", "run": 0, "session": null,
+                       "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                       "failed": false, "judgeOutcome": "judged", "error": null,
+                       "judgeError": null, "judgeReasks": 0, "texts": texts(baseline),
+                       "probes": [{"id": "ran", "kind": "must_show",
+                                   "verdict": "present", "quote": null}]}),
+                json!({"arm": "candidate", "scenario": "case", "run": 0, "session": null,
+                       "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                       "failed": false, "judgeOutcome": "judged", "error": null,
+                       "judgeError": null, "judgeReasks": 0, "texts": texts(CANDIDATE),
+                       "probes": [{"id": "ran", "kind": "must_show",
+                                   "verdict": "present", "quote": null}]}),
+            ];
+            let jsonl: String = runs.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let (first, second) = (source("first", BASELINE), source("second", BASELINE));
+        let mut options = fixture.options(fixture.directory.join("pooled"));
+        options.pool = vec![first.clone(), second];
+        let report = fixture.pooled(&options).await.unwrap();
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            assert!(
+                report.contains(&format!(
+                    "| {arm} configured texts | `timeline-tree/branch-description`: {} bytes, \
+                     fingerprint {} |",
+                    text.len(),
+                    fingerprint(text)
+                )),
+                "{arm}: a pool states the configured texts its runs recorded: {report}"
+            );
+        }
+        let other = source("other", OTHER);
+        let mut options = fixture.options(fixture.directory.join("pooled-again"));
+        options.pool = vec![first, other];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the current runs recorded different texts"),
+            "{error}"
+        );
+        assert!(error.contains("report them separately"), "{error}");
+    }
+
+    /// A pool refuses runs of one arm whose texts only some of them recorded:
+    /// a record written before the runner recorded texts would otherwise be
+    /// counted and labeled as one comparison with a recorded run. An
+    /// all-legacy pool stays supported as unrecorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pool_refuses_mixed_text_provenance() {
+        const TEXT: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "pool-mixed",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let run = |arm: &str, texts: Option<Value>| {
+            let mut record = json!({"arm": arm, "scenario": "case", "run": 0,
+                   "session": null, "stop": "idle", "turns": 2, "window": 24000.0,
+                   "durationMs": 1.0, "failed": false, "judgeOutcome": "judged",
+                   "error": null, "judgeError": null, "judgeReasks": 0,
+                   "probes": [{"id": "ran", "kind": "must_show",
+                               "verdict": "present", "quote": null}]});
+            if let Some(texts) = texts {
+                record["texts"] = texts;
+            }
+            record
+        };
+        let recorded = || {
+            json!([{"id": "timeline-tree/branch-description", "bytes": TEXT.len(),
+                    "fingerprint": fingerprint(TEXT)}])
+        };
+        let source = |name: &str, current: Value, candidate: Value| {
+            let directory = fixture.directory.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            let jsonl: String = [current, candidate]
+                .into_iter()
+                .map(|record| format!("{record}\n"))
+                .collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let legacy = source("legacy", run("current", None), run("candidate", None));
+        let named = source(
+            "named",
+            run("current", Some(recorded())),
+            run("candidate", Some(recorded())),
+        );
+        let mut options = fixture.options(fixture.directory.join("mixed"));
+        options.pool = vec![legacy, named];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the current runs mix records that name their configured texts"),
+            "{error}"
+        );
+        assert!(
+            error.contains("report the runs that name their texts and the older runs separately"),
+            "{error}"
+        );
+        // The candidate arm is checked on its own: both sources' current runs
+        // recorded none, while one candidate run names its text.
+        let legacy_current = source(
+            "legacy-current",
+            run("current", None),
+            run("candidate", None),
+        );
+        let named_candidate = source(
+            "named-candidate",
+            run("current", None),
+            run("candidate", Some(recorded())),
+        );
+        let mut options = fixture.options(fixture.directory.join("mixed-candidate"));
+        options.pool = vec![legacy_current, named_candidate];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the candidate runs mix records that name their configured texts"),
+            "{error}"
+        );
+    }
+
+    /// A re-judge refuses saved runs of one arm whose texts only some of them
+    /// recorded, before any judge call: a re-judged record written before the
+    /// runner recorded texts would otherwise be counted and labeled as one
+    /// comparison with a recorded run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rejudge_refuses_mixed_text_provenance() {
+        const TEXT: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "rejudge-mixed",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let recorded = || {
+            json!([{"id": "timeline-tree/branch-description", "bytes": TEXT.len(),
+                    "fingerprint": fingerprint(TEXT)}])
+        };
+        let run = |arm: &str, run: usize, texts: Option<Value>| {
+            let mut record = json!({"arm": arm, "scenario": "case", "run": run,
+                   "session": null, "stop": "idle", "turns": 2, "window": 24000.0,
+                   "durationMs": 1.0, "failed": false, "judgeOutcome": "judged",
+                   "error": null, "judgeError": null, "judgeReasks": 0,
+                   "probes": [{"id": "ran", "kind": "must_show",
+                               "verdict": "present", "quote": null}]});
+            if let Some(texts) = texts {
+                record["texts"] = texts;
+            }
+            record
+        };
+        let source = |name: &str, runs: &[Value]| {
+            let directory = fixture.directory.join(name);
+            for arm in ["current", "candidate"] {
+                let views = directory.join("outputs").join(arm).join("case");
+                std::fs::create_dir_all(&views).unwrap();
+                for run in 0..2 {
+                    std::fs::write(
+                        views.join(format!("run-{run}.judge-view.jsonl")),
+                        "SAVED VIEW",
+                    )
+                    .unwrap();
+                }
+            }
+            let jsonl: String = runs.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let mixed_current = source(
+            "mixed-current",
+            &[
+                run("current", 0, None),
+                run("current", 1, Some(recorded())),
+                run("candidate", 0, Some(recorded())),
+                run("candidate", 1, Some(recorded())),
+            ],
+        );
+        let mut options = fixture.options(fixture.directory.join("rejudged-current"));
+        options.rejudge = Some(mixed_current);
+        let error = fixture.rejudge(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "--rejudge: the current runs mix records that name their configured texts"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("report the runs that name their texts and the older runs separately"),
+            "{error}"
+        );
+        // The candidate arm is checked on its own: its runs mix while the
+        // current arm recorded none.
+        let mixed_candidate = source(
+            "mixed-candidate",
+            &[
+                run("current", 0, None),
+                run("current", 1, None),
+                run("candidate", 0, None),
+                run("candidate", 1, Some(recorded())),
+            ],
+        );
+        let mut options = fixture.options(fixture.directory.join("rejudged-candidate"));
+        options.rejudge = Some(mixed_candidate);
+        let error = fixture.rejudge(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "--rejudge: the candidate runs mix records that name their configured texts"
+            ),
+            "{error}"
+        );
+        assert!(
+            fixture.judge().is_empty(),
+            "a mixed set is refused before any judge call"
+        );
     }
 
     /// A report over saved runs counts the declines their records carry and
@@ -11481,6 +13261,10 @@ mod tests {
 
     /// The candidate text every fixture's candidate arm carries.
     const CANDIDATE: &str = "CANDIDATE SUMMARY PROMPT. Summarize the transcript briefly.";
+    /// The baseline text every fixture's current arm carries. It opens with
+    /// the shipped prompt's first words, which the fixture's summarizer
+    /// answers, and is not the candidate.
+    const BASELINE: &str = "You summarize a coding session. BASELINE SUMMARY PROMPT.";
     /// The text the workspace file `notes.txt` holds; a run's request carries
     /// it only once the `read` tool has returned it.
     const FILE_TEXT: &str = "The notes file says the read tool carried this line back.";
@@ -11715,6 +13499,7 @@ mod tests {
         fn options(&self, out: PathBuf) -> Options {
             Options {
                 scenarios: self.scenarios.clone(),
+                baseline: pairs(&[("context-compaction/summary", BASELINE)]),
                 texts: pairs(&[("context-compaction/summary", CANDIDATE)]),
                 model: self.target(),
                 judge: self.target(),
@@ -12001,6 +13786,13 @@ mod tests {
         // tool's description.
         const BRANCH: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
         let mut options = fixture.judge_options(fixture.directory.join("out"));
+        options.baseline = pairs(&[
+            ("context-compaction/summary", BASELINE),
+            (
+                "timeline-tree/branch-description",
+                "BASELINE BRANCH TOOL DESCRIPTION",
+            ),
+        ]);
         options.texts = pairs(&[
             ("context-compaction/summary", CANDIDATE),
             ("timeline-tree/branch-description", BRANCH),
@@ -12075,6 +13867,109 @@ mod tests {
             assert!(
                 rendered["event"]["data"]["request"]["messages"].is_array(),
                 "{arm}: the request after the history change carries the whole list: {rendered}"
+            );
+        }
+    }
+
+    /// A text's fingerprint is FNV-1a 64 over its bytes, in lowercase hex: the
+    /// canonical test vectors pin it, so a report's fingerprints stay
+    /// comparable across runs.
+    #[test]
+    fn a_texts_fingerprint_is_fnv1a_64() {
+        assert_eq!(fingerprint(""), "cbf29ce484222325");
+        assert_eq!(fingerprint("a"), "af63dc4c8601ec8c");
+        assert_eq!(fingerprint("foobar"), "85944171f73967e8");
+    }
+
+    /// Each arm is given the text its pair names, and the run's record and
+    /// the report state which: the current arm's requests carry the baseline,
+    /// the candidate arm's the candidate, and each record names both by length
+    /// and fingerprint. An evaluation on a head that already carries the
+    /// candidate therefore compares two texts it was given, not the candidate
+    /// with itself (model-prompts §8.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn each_arm_records_the_configured_text_its_pair_names() {
+        const BASELINE: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const CANDIDATE: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "arm-texts",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 2, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.baseline = pairs(&[("timeline-tree/branch-description", BASELINE)]);
+        options.texts = pairs(&[("timeline-tree/branch-description", CANDIDATE)]);
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        let configured = |arm: &str| {
+            records
+                .iter()
+                .find(|record| record["arm"] == arm)
+                .unwrap_or_else(|| panic!("a {arm} run"))["texts"]
+                .clone()
+        };
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            let texts = configured(arm);
+            let texts = texts.as_array().unwrap_or_else(|| panic!("{arm}: {texts}"));
+            assert_eq!(texts.len(), 1, "{arm}: {texts:?}");
+            assert_eq!(texts[0]["id"], "timeline-tree/branch-description", "{arm}");
+            assert_eq!(texts[0]["bytes"], text.len(), "{arm}: {texts:?}");
+            assert_eq!(
+                texts[0]["fingerprint"],
+                fingerprint(text),
+                "{arm}: the record names the configured text"
+            );
+        }
+        assert_ne!(
+            configured("current")[0]["fingerprint"],
+            configured("candidate")[0]["fingerprint"],
+            "the arms were given different texts"
+        );
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            assert!(
+                report.contains(&format!(
+                    "| {arm} configured texts | `timeline-tree/branch-description`: {} bytes, \
+                     fingerprint {} |",
+                    text.len(),
+                    fingerprint(text)
+                )),
+                "{arm}: the report names the configured text: {report}"
+            );
+        }
+        let described = |arm: &str| -> Vec<String> {
+            fixture
+                .arm(arm)
+                .iter()
+                .filter_map(|request| {
+                    let request: Value = serde_json::from_str(request).ok()?;
+                    request["tools"].as_array()?.iter().find_map(|tool| {
+                        (tool["function"]["name"] == "branch")
+                            .then(|| tool["function"]["description"].as_str().map(str::to_owned))
+                            .flatten()
+                    })
+                })
+                .collect()
+        };
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            let descriptions = described(arm);
+            assert!(
+                !descriptions.is_empty(),
+                "{arm}: the requests declare the branch tool"
+            );
+            assert!(
+                descriptions.iter().all(|description| description == text),
+                "{arm}: the branch tool description is the pair's text: {descriptions:?}"
             );
         }
     }
@@ -12459,6 +14354,8 @@ mod tests {
         .await;
         let candidate = fixture.directory.join("candidate.md");
         std::fs::write(&candidate, CANDIDATE).unwrap();
+        let baseline = fixture.directory.join("baseline.md");
+        std::fs::write(&baseline, BASELINE).unwrap();
         let out = fixture.directory.join("out");
         let relative = relative_to_working_directory(&out);
         let mut options = Options::parse_from(
@@ -12467,6 +14364,8 @@ mod tests {
                 fixture.scenarios.to_str().unwrap(),
                 "--text",
                 "context-compaction/summary",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--model",
@@ -12656,11 +14555,25 @@ mod tests {
         /// The target line `2` starts and ends its first turn and the move
         /// answers, and the input after the move never does.
         SwitchSubmitStalls,
+        /// The target line `2` starts and ends its first turn while the move
+        /// waits for the note it owes it: the move answers, the line writes
+        /// its note afterwards, and the run's turn budget ends it before the
+        /// note releases the follow-up.
+        SwitchNoteAfterTheLastTurn,
         /// The target line `2` starts and ends its first turn, the move to it
         /// never answers, and the Session's close never answers either: a run
         /// that stopped on its wall clock must still return, with cleanup
         /// bounded.
         SwitchMoveAndCloseStall,
+        /// The first move names the explicit line `7`, and the tool line `2`
+        /// opens while that move waits for its target's first turn. No other
+        /// line opens afterwards, so the later move to the latest tool line
+        /// can only run on `2`.
+        ChainedToolLineBeforeActivation,
+        /// The first move names the explicit line `7` and fires before any
+        /// tool line exists; `2` opens after that move's input, and its first
+        /// turn fires the later move to the latest tool line.
+        ChainedToolLineAfterActivation,
         /// The setup's context window read answers `context_usage_unavailable`,
         /// so the check is deferred, and the deferred read answers
         /// `session_reloading`: a failure that is not the deferral itself.
@@ -12678,6 +14591,8 @@ mod tests {
         settled_at: AtomicUsize,
         idles: AtomicUsize,
         usages: AtomicUsize,
+        /// The `branchId` of every `session.branch_set_default`, in order.
+        moves: Mutex<Vec<String>>,
         attached: tokio::sync::Notify,
         closes: AtomicUsize,
     }
@@ -12724,6 +14639,17 @@ mod tests {
         /// One `session.event` notice of `event` on `main`.
         fn notice(event: Value) -> Vec<u8> {
             notice_on("main", event)
+        }
+        /// One `branch/create` notice of tool line `branch` at `sequence`.
+        fn created(sequence: u64, branch: &str) -> Value {
+            json!({"type": "branch", "name": "create", "id": format!("e{sequence}"),
+                   "sequence": sequence,
+                   "data": {"branch": branch, "source": {"kind": "tool"}}})
+        }
+        /// One `turn` notice at `sequence`.
+        fn turn(sequence: u64, name: &str) -> Value {
+            json!({"type": "turn", "name": name, "id": format!("e{sequence}"),
+                   "sequence": sequence, "data": {}})
         }
         /// The refusal a client gets while the call has no waiter.
         fn not_pending() -> Value {
@@ -12791,6 +14717,8 @@ mod tests {
             // The `session.submit` calls read so far: the stalling scripts
             // hold the one after the move.
             let mut submits = 0;
+            // The default branch the chained scripts' moves leave.
+            let mut default = "main".to_owned();
             let mut first: Option<Instant> = None;
             // The line is busy until the peer writes the call's result, the
             // way a running turn is: `session.idle` stays unanswered and the
@@ -12822,6 +14750,14 @@ mod tests {
                 let Some(line) = line.unwrap() else { break };
                 let request: Value = serde_json::from_str(&line).unwrap();
                 let method = request["method"].as_str().unwrap_or_default();
+                if method == "session.branch_set_default" {
+                    recorded.moves.lock().unwrap().push(
+                        request["params"]["branchId"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                }
                 if method == "session.attach" {
                     recorded.attached.notify_one();
                 }
@@ -12942,7 +14878,10 @@ mod tests {
                         PeerScript::SwitchMoveRetries => None,
                         PeerScript::SwitchMoveStalls
                         | PeerScript::SwitchSubmitStalls
+                        | PeerScript::SwitchNoteAfterTheLastTurn
                         | PeerScript::SwitchMoveAndCloseStall => None,
+                        PeerScript::ChainedToolLineBeforeActivation
+                        | PeerScript::ChainedToolLineAfterActivation => None,
                         PeerScript::DeferredUsageFails => None,
                     };
                     if let Some((request, sequence)) = closed {
@@ -13000,9 +14939,56 @@ mod tests {
                         json!({"error": {"code": -32000, "message": "unknown branch: 2",
                                          "data": {"appError": "session_invalid_input"}}})
                     }
+                    "session.submit" => {
+                        json!({"result": {"event": {"id": format!("input-{submits}")}}})
+                    }
                     _ => json!({"result": {}}),
                 };
                 write.write_all(&frame(&request, body)).await.unwrap();
+                // The line a chained script moves to writes its note after the
+                // move's acknowledgment: the run waits for that note before it
+                // sends the input the line answers.
+                if method == "session.branch_set_default"
+                    && matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                            | PeerScript::SwitchNoteAfterTheLastTurn
+                    )
+                {
+                    let target = request["params"]["branchId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let note = json!({
+                        "type": "input", "name": "message", "id": format!("note-{target}"),
+                        "sequence": 6,
+                        "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                            "text": format!(
+                                "<dim-branch-line branch=\"{target}\" parent=\"main\" source=\"tool\" default=\"true\">\nThis line is now the session's default branch, switched from line {default}.\n</dim-branch-line>"
+                            )}]}
+                    });
+                    write.write_all(&notice_on(&target, note)).await.unwrap();
+                    default = target;
+                }
+                // A chained script consumes the input it answered: the move
+                // after it fires once its line has taken that input.
+                if method == "session.submit"
+                    && matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                    )
+                {
+                    let consumed = json!({
+                        "type": "input", "name": "consumed", "id": format!("consumed-{submits}"),
+                        "sequence": 7, "data": {"input_id": format!("input-{submits}")}
+                    });
+                    write
+                        .write_all(&notice_on(&default, consumed))
+                        .await
+                        .unwrap();
+                }
                 if method == "session.submit" {
                     write
                         .write_all(&notice(
@@ -13010,6 +14996,36 @@ mod tests {
                         ))
                         .await
                         .unwrap();
+                    if matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                    ) {
+                        let before = matches!(script, PeerScript::ChainedToolLineBeforeActivation);
+                        let written = match (before, submits) {
+                            // The tool line opens while the first move waits
+                            // for its own target's first turn; the line that
+                            // starts afterwards fires that move.
+                            (true, 1) => vec![("2", created(2, "2")), ("7", turn(3, "start"))],
+                            // The first move's input: its target's turn starts,
+                            // and its end stops the run on the turn budget.
+                            (true, 2) => vec![("7", turn(4, "start")), ("7", turn(5, "end"))],
+                            // The first move fires before any tool line exists.
+                            (false, 1) => vec![("7", turn(2, "start"))],
+                            // The tool line opens after that, and its first
+                            // turn starts before the run stops.
+                            (false, 2) => vec![
+                                ("2", created(3, "2")),
+                                ("2", turn(4, "start")),
+                                ("2", turn(5, "end")),
+                            ],
+                            _ => Vec::new(),
+                        };
+                        for (branch, event) in written {
+                            write.write_all(&notice_on(branch, event)).await.unwrap();
+                        }
+                        continue;
+                    }
                     // The held line asks nothing: the run's only work is the
                     // turn the peer holds open. A switch that never fires
                     // likewise asks nothing: its turn starts and ends.
@@ -13036,6 +15052,7 @@ mod tests {
                         PeerScript::SwitchMoveRetries
                             | PeerScript::SwitchMoveStalls
                             | PeerScript::SwitchSubmitStalls
+                            | PeerScript::SwitchNoteAfterTheLastTurn
                             | PeerScript::SwitchMoveAndCloseStall
                     ) {
                         for (name, sequence) in [("start", 1), ("end", 2)] {
@@ -13162,6 +15179,7 @@ mod tests {
             to: SwitchTarget::Id("2".into()),
             message: "next".into(),
             branch_id: None,
+            former_message: None,
         });
         let driven = drive(
             &mut client,
@@ -13210,6 +15228,7 @@ mod tests {
             to: SwitchTarget::Id("2".into()),
             message: "next".into(),
             branch_id: None,
+            former_message: None,
         });
         let driven = drive(
             &mut client,
@@ -13248,6 +15267,178 @@ mod tests {
         );
     }
 
+    /// A run that stops on its turn budget while a move waits for its note is
+    /// not scored: the move happened, but the input that must answer under
+    /// the note was never sent, so the run is incomplete instead of ending on
+    /// `turns` with no error (Timeline branches §12.4).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_run_that_reaches_the_turn_budget_before_the_note_is_not_scored() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-note-turn-budget-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::SwitchNoteAfterTheLastTurn).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+            former_message: None,
+        });
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(moves, ["2"], "the move happened before the run stopped");
+        assert_eq!(driven.turns, 1, "the run stopped on its turn budget");
+        assert_eq!(driven.stop, "switch_incomplete", "{:?}", driven.error);
+        let error = driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2") && error.contains("follow-up") && error.contains("turns"),
+            "{error}"
+        );
+        assert!(
+            driven.switch_notes.expected.is_empty(),
+            "the run sent no scored follow-up"
+        );
+        assert!(
+            failed(driven.stop, driven.error.as_deref(), JudgeOutcome::Judged),
+            "the incomplete switch is a failed run and enters no probe rate"
+        );
+    }
+
+    /// A chained move to the latest tool line uses the line the run has seen
+    /// opened, even when it opened while the move before it waited: a line
+    /// that exists when the move is activated is the one its role names, so
+    /// the move runs instead of waiting for a creation that never comes
+    /// (model-prompts §9.8).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chained_switch_uses_the_tool_line_the_run_has_seen() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-chained-{}", std::process::id()));
+        let (socket, reads) = scripted_peer(
+            &directory,
+            8_000,
+            PeerScript::ChainedToolLineBeforeActivation,
+        )
+        .await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.moves = vec![
+            Switch {
+                to: SwitchTarget::Id("7".into()),
+                message: "to the line that waited".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+        ];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            moves,
+            ["7", "2"],
+            "the chained move moves to the tool line the run had seen opened: {:?}",
+            driven.error
+        );
+        assert_ne!(
+            driven.stop, "switch_target_not_reached",
+            "the move's target existed: {:?}",
+            driven.error
+        );
+    }
+
+    /// A chained move to the latest tool line waits for a creation when the
+    /// run has seen none: the line that opens after the move is activated is
+    /// the one its role names, and its first turn fires the move
+    /// (model-prompts §9.8).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chained_switch_waits_for_the_tool_line_opened_after_it_was_activated() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-chained-later-{}",
+            std::process::id()
+        ));
+        let (socket, reads) = scripted_peer(
+            &directory,
+            8_000,
+            PeerScript::ChainedToolLineAfterActivation,
+        )
+        .await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.moves = vec![
+            Switch {
+                to: SwitchTarget::Id("7".into()),
+                message: "to the line that waited".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+        ];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            moves,
+            ["7", "2"],
+            "the chained move moves to the tool line opened after it was activated: {:?}",
+            driven.error
+        );
+        assert_ne!(
+            driven.stop, "switch_target_not_reached",
+            "the move's target existed: {:?}",
+            driven.error
+        );
+    }
+
     /// A switch call that never answers is bounded by the scenario's wall
     /// clock: the run records the timeout and returns instead of waiting on
     /// the connection, so its worker is released (model-prompts §8.1).
@@ -13272,6 +15463,7 @@ mod tests {
                 to: SwitchTarget::Id("2".into()),
                 message: "next".into(),
                 branch_id: None,
+                former_message: None,
             });
             let driven = tokio::time::timeout(
                 GUARD,
@@ -13341,6 +15533,7 @@ mod tests {
             to: SwitchTarget::Id("2".into()),
             message: "next".into(),
             branch_id: None,
+            former_message: None,
         });
         let cancel = CancellationToken::new();
         let model = peer_model();
@@ -14909,6 +17102,7 @@ mod tests {
         let options = Options {
             out: out.clone(),
             scenarios: PathBuf::new(),
+            baseline: Vec::new(),
             texts: Vec::new(),
             model: model(),
             judge: model(),
@@ -16570,6 +18764,213 @@ mod tests {
             !offered.iter().any(|tool| tool == "plugin"),
             "the member declares no plugin tool: {offered:?}"
         );
+    }
+
+    /// The two note policies the user-line move turns on reach the model, on
+    /// the committed scenario: its `session.branch_create` call opens a user
+    /// line, main opens a tool line, and the move goes from main to the tool
+    /// line and then to the user line, after which the tool line and the user
+    /// line each receive an input. The current arm's requests carry no
+    /// guidance block, and the candidate arm carries each note with its
+    /// `{other}` placeholder replaced by the line id (Timeline branches §12.4,
+    /// model-prompts §9.8).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_user_line_switch_carries_both_notes_into_the_requests() {
+        const DESCRIPTION: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        const BASELINE_DESCRIPTION: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const DEFAULT_NOTE: &str =
+            "- CANDIDATE default guidance for {parent}, switched from {other}.";
+        const USER_NOTE: &str = "- CANDIDATE user-line guidance for {other}.";
+        const FORMER_NOTE: &str = "- CANDIDATE former-default guidance for {other}.";
+        let case =
+            repository().join("xtask/scenario-eval/timeline-branches/user-line-becomes-default");
+        let scenario: Value =
+            serde_json::from_slice(&std::fs::read(case.join("scenario.json")).unwrap()).unwrap();
+        let workspace: Vec<(String, String)> = workspace_files(&case)
+            .into_iter()
+            .map(|(path, text)| {
+                (
+                    path.strip_prefix("workspace")
+                        .expect("a file under workspace")
+                        .to_string_lossy()
+                        .into_owned(),
+                    text,
+                )
+            })
+            .collect();
+        let workspace: Vec<(&str, &str)> = workspace
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        // The follow-ups the scenario sends: the tool line's input, then the
+        // user line's input and the former default's input.
+        let moves = scenario["moves"].as_array().cloned().unwrap_or_default();
+        let tool_input = moves[0]["message"].as_str().unwrap().to_owned();
+        let user_input = moves[1]["message"].as_str().unwrap().to_owned();
+        let former_input = moves[1]["formerMessage"].as_str().unwrap().to_owned();
+        let fixture = Fixture::with_window(
+            "user-line-notes",
+            user_line_notes,
+            scenario,
+            &workspace,
+            131_072,
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.baseline = pairs(&[
+            ("timeline-tree/branch-description", BASELINE_DESCRIPTION),
+            ("timeline-tree/default-note", ""),
+            ("timeline-tree/user-default-note", ""),
+            ("timeline-tree/former-default-note", ""),
+        ]);
+        options.texts = pairs(&[
+            ("timeline-tree/branch-description", DESCRIPTION),
+            ("timeline-tree/default-note", DEFAULT_NOTE),
+            ("timeline-tree/user-default-note", USER_NOTE),
+            ("timeline-tree/former-default-note", FORMER_NOTE),
+        ]);
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(
+                record["failed"], false,
+                "the scenario reaches idle on every line: {record}"
+            );
+        }
+        for arm in ["current", "candidate"] {
+            let directory = options.out.join("outputs").join(arm).join("case");
+            let export = std::fs::read_to_string(directory.join("run-0.timeline.jsonl")).unwrap();
+            let created = |kind: &str| -> String {
+                export
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .find(|line| {
+                        line["event"]["type"] == "branch"
+                            && line["event"]["name"] == "create"
+                            && line["event"]["data"]["source"]["kind"] == kind
+                    })
+                    .and_then(|line| line["event"]["data"]["branch"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| panic!("{arm}: a {kind} line was created"))
+            };
+            let tool = created("tool");
+            let user = created("user");
+            let requests = fixture.arm(arm);
+            let descriptions: Vec<String> = requests
+                .iter()
+                .filter_map(|request| {
+                    let request: Value = serde_json::from_str(request).ok()?;
+                    request["tools"].as_array()?.iter().find_map(|tool| {
+                        (tool["function"]["name"] == "branch")
+                            .then(|| tool["function"]["description"].as_str().map(str::to_owned))
+                            .flatten()
+                    })
+                })
+                .collect();
+            let expected_description = if arm == "current" {
+                BASELINE_DESCRIPTION
+            } else {
+                DESCRIPTION
+            };
+            assert!(
+                !descriptions.is_empty()
+                    && descriptions
+                        .iter()
+                        .all(|description| description == expected_description),
+                "{arm}: the branch tool description is the pair's text: {descriptions:?}"
+            );
+            if arm == "current" {
+                assert!(
+                    requests
+                        .iter()
+                        .all(|request| !carried(request, "How you work here:")),
+                    "the empty note baselines write no guidance block"
+                );
+                continue;
+            }
+            let default_note = format!(
+                "How you work here:\n{}",
+                DEFAULT_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", "main")
+            );
+            let user_note = format!(
+                "How you work here:\n{}",
+                USER_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", &tool)
+            );
+            let former_note = format!(
+                "How you work here:\n{}",
+                FORMER_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", &user)
+            );
+            // The request that consumed each follow-up is the first that
+            // carries it: it must carry the note the move wrote on that line,
+            // so the line's answer was made under the policy text.
+            let consuming = |input: &str| -> &String {
+                requests
+                    .iter()
+                    .find(|request| carried(request, input))
+                    .unwrap_or_else(|| panic!("{arm}: a request answers {input:?}"))
+            };
+            assert!(
+                carried(consuming(&tool_input), &default_note),
+                "the request that answers the tool line's follow-up carries the move's default note: {default_note}"
+            );
+            assert!(
+                carried(consuming(&user_input), &user_note),
+                "the request that answers the user line's follow-up carries its note with the tool line id: {user_note}"
+            );
+            assert!(
+                carried(consuming(&former_input), &former_note),
+                "the request that answers the former default's input carries its note with the user line id: {former_note}"
+            );
+            for attribute in [
+                format!(
+                    "<dim-branch-line branch=\"{user}\" parent=\"main\" source=\"user\" default=\"true\">"
+                ),
+                format!(
+                    "<dim-branch-line branch=\"{tool}\" parent=\"main\" source=\"tool\" default=\"false\">"
+                ),
+            ] {
+                assert!(
+                    requests.iter().any(|request| carried(request, &attribute)),
+                    "a request carries {attribute}"
+                );
+            }
+        }
+    }
+
+    /// The run model of the user-line scenario: main opens the tool line on
+    /// its first request, every line answers with text, and the judge gives
+    /// each probe its verdict. A request that carries the tool result or a
+    /// line's birth identity is not main's first: the tool's result says
+    /// `Line created:`, and a line's first input says `You are line `.
+    fn user_line_notes(text: &str) -> Option<Value> {
+        if text.contains("You check statements") {
+            return Some(content(
+                r#"[{"id":"user-line-carries-the-work","verdict":"present","quote":"turn/end"},
+                    {"id":"former-default-answers-and-coordinates","verdict":"present","quote":"turn/end"},
+                    {"id":"former-default-leaves-the-new-scope","verdict":"absent","quote":"nothing"},
+                    {"id":"user-line-does-not-end-itself","verdict":"absent","quote":"nothing"}]"#,
+            ));
+        }
+        if text.contains("Open one line to diagnose the early-expiry bug")
+            && !text.contains("Line created:")
+            && !text.contains("You are line ")
+        {
+            return Some(tool_call(
+                "branch",
+                r#"{"action":"create","prompt":"diagnose the early-expiry bug in token.py and write notes.md"}"#,
+            ));
+        }
+        Some(content("Done."))
     }
 }
 

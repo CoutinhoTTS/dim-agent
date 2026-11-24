@@ -4575,6 +4575,387 @@ async fn a_configured_roster_closing_reaches_the_roster() {
     soon(agent.close()).await.unwrap();
 }
 
+/// A note's `How you work here:` block is the factory member
+/// `BranchToolConfig::default_note`: a configured value reaches the note byte
+/// for byte, with the line ids its `{parent}` and `{other}` placeholders name,
+/// while the note's protocol sentences stay the code's (design §12.1, §12.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_configured_note_block_reaches_the_note() {
+    let block = "- Configured guidance for {parent}, switched from {other}.";
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(
+        &probe,
+        BranchToolConfig {
+            default_note: Some(block.into()),
+            ..Default::default()
+        },
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "the configured line").await;
+    switch(&session, &line).await;
+    let notes = owed_notes(&session, &line, 1).await;
+    let note = notes.last().expect("the line holds its note");
+    assert!(
+        note.contains("How you work here:\n- Configured guidance for main, switched from main."),
+        "{note}"
+    );
+    assert!(!note.contains('{'), "no placeholder is left: {note}");
+    assert!(
+        note.contains("you send no automatic idle notice to main"),
+        "the note's protocol sentences stay: {note}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// The note a move writes on a tool line that becomes the default branch: its
+/// birth identity, then the sentences the move changes, and no `How you work
+/// here:` block, because `BranchToolConfig` sets no note member. `{line}` and
+/// `{purpose}` stand where the code substitutes them.
+const PROTOCOL_ONLY_TOOL_NOTE: &str = r#"<dim-branch-line branch="{line}" parent="main" source="tool" default="true">
+You are line {line} of this session. Line main opened you at this point of its history to work in parallel with it. You are the same agent as main: everything above is your own history, and you continue from here on your own line. main keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to main, such as its list of open lines, are main's, not yours.
+
+Your purpose, as main wrote it:
+{purpose}
+
+How you work with main:
+- Work on this purpose only. You cannot open lines unless this line is the default branch of the session, and this block does not make it one: a status note would. If more parallel work is needed and you cannot open a line, tell main.
+- Read main with the branch tool (action read, branch "main") when what main did or decided since your cut changes your work; the parent block reports when main has moved. Message main only for what it must act on: a decision that changes its work, a blocker only the user can settle, a conflict with another line, or a change to your purpose. Use mode "steer" for what main must act on now, "append" for what main should see at its next step. Do not send main a progress report it can read, and do not page through main's whole stream: read the page that answers your question, then act.
+- You share the workspace with main and its other lines. Change only the files main gave you; before changing any other file, tell main which. If edit or write fails because the file was modified after it was last read, another line may have changed the file: read it again and tell main before you continue.
+- The user can talk to you directly. Answer the user, and ask with ask_user when only the user can decide.
+- When your purpose is done, or cannot be done, call the branch tool with action "end" and content saying what you found, did, changed and left undone. If you already told main that in a message, your end content carries only what is new. Read main once more before you end if the parent block says main has moved, so your last word still holds. That is your last action; main receives it.
+
+This line is now the session's default branch, switched from line main. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to main; you cannot call end on yourself. Line main stays open and keeps the lines it opened.
+</dim-branch-line>"#;
+
+/// The product configures no note member, so the note a move writes carries
+/// the protocol sentences and no `How you work here:` block, and the line's
+/// next request carries that note byte for byte (timeline branches §12.1,
+/// §12.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_default_configuration_writes_no_guidance_block() {
+    let purpose = "the purpose of B";
+    let config = BranchToolConfig::default();
+    assert!(
+        config.default_note.is_none()
+            && config.user_default_note.is_none()
+            && config.former_default_note.is_none(),
+        "the product configures no note member"
+    );
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, config))
+        .await
+        .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, purpose).await;
+    switch(&session, &line).await;
+    let notes = owed_notes(&session, &line, 1).await;
+    let note = notes.last().expect("the line holds its note");
+    let expected = PROTOCOL_ONLY_TOOL_NOTE
+        .replace("{line}", &line)
+        .replace("{purpose}", purpose);
+    assert_eq!(
+        note, &expected,
+        "the default writes the note without a guidance block"
+    );
+    assert!(
+        !note.contains("How you work here:"),
+        "no guidance block without a configured one: {note}"
+    );
+    soon(session.submit("next request".into(), InputMode::Queue, &line))
+        .await
+        .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let events = local_events(&session, &line).await;
+    let request = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(&data.request),
+            _ => None,
+        })
+        .expect("the line's next turn makes a request");
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| said(message).contains(&expected)),
+        "the rendered request carries the note the default writes"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
+/// The note a move writes on a line the user opened is the factory member
+/// `BranchToolConfig::user_default_note`: the product sets no member, so the
+/// note carries no `How you work here:` block, and a configured value reaches
+/// the line's next model request with its `{parent}` and `{other}` placeholders
+/// replaced (design §12.1, §12.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_lines_default_note_reaches_the_model_request() {
+    let block = "- Configured user guidance for {parent}, moved from {other}.";
+    for (configured, heading) in [(None, false), (Some(block), true)] {
+        let probe = Arc::new(Probe::default());
+        let agent = MinimalHost::start(&builder_with_branch_config(
+            &probe,
+            BranchToolConfig {
+                user_default_note: configured.map(Into::into),
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+        let session = soon(agent.create_session(SessionConfig::default()))
+            .await
+            .unwrap();
+        let cut = idle_cut(&session, "main").await;
+        let user = soon(session.branch(
+            "main".into(),
+            cut,
+            BranchOptions {
+                prompt: "review the docs".into(),
+                source: BranchSource::User {
+                    operation_id: "client".into(),
+                },
+            },
+        ))
+        .await
+        .unwrap();
+        quiet(&session, &user).await;
+        switch(&session, &user).await;
+        owed_notes(&session, &user, 1).await;
+        soon(session.submit("next request".into(), InputMode::Queue, &user))
+            .await
+            .unwrap();
+        soon(session.idle(&user)).await.unwrap();
+        let events = local_events(&session, &user).await;
+        let request = events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(&data.request),
+                _ => None,
+            })
+            .expect("the user line makes a request after the move");
+        let note = request
+            .messages
+            .iter()
+            .map(|message| said(message))
+            .find(|text| {
+                text.starts_with("<dim-branch-line ") && text.contains(" default=\"true\"")
+            })
+            .unwrap_or_else(|| panic!("the request carries the note: {request:?}"));
+        assert!(
+            note.starts_with(&format!(
+                "<dim-branch-line branch=\"{user}\" parent=\"main\" source=\"user\" default=\"true\">"
+            )),
+            "{note}"
+        );
+        assert!(
+            note.contains(
+                "The user has now made this line the session's default branch, switched from line main."
+            ),
+            "{note}"
+        );
+        if heading {
+            assert!(
+                note.contains(
+                    "\n\nHow you work here:\n- Configured user guidance for main, moved from main."
+                ),
+                "{note}"
+            );
+        } else {
+            assert!(
+                !note.contains("How you work here:"),
+                "no guidance block without a configured one: {note}"
+            );
+        }
+        soon(agent.close()).await.unwrap();
+    }
+}
+
+/// The note a move writes on the former default branch is the factory member
+/// `BranchToolConfig::former_default_note`, for a tool line too: the product
+/// sets no member, so the note carries no `How you work here:` block, and a
+/// configured value reaches the line's next model request with its `{parent}`
+/// and `{other}` placeholders replaced by the line that holds the default
+/// branch (design §12.1, §12.4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_former_default_tool_lines_note_reaches_the_model_request() {
+    let block = "- Configured former guidance for {parent}, moved to {other}.";
+    for (configured, heading) in [(None, false), (Some(block), true)] {
+        let probe = Arc::new(Probe::default());
+        let agent = MinimalHost::start(&builder_with_branch_config(
+            &probe,
+            BranchToolConfig {
+                former_default_note: configured.map(Into::into),
+                ..Default::default()
+            },
+        ))
+        .await
+        .unwrap();
+        let session = soon(agent.create_session(SessionConfig::default()))
+            .await
+            .unwrap();
+        let line = open_line(&session, "the parser race").await;
+        switch(&session, &line).await;
+        owed_notes(&session, &line, 1).await;
+        let cut = idle_cut(&session, "main").await;
+        let user = soon(session.branch(
+            "main".into(),
+            cut,
+            BranchOptions {
+                prompt: "the user line".into(),
+                source: BranchSource::User {
+                    operation_id: "client".into(),
+                },
+            },
+        ))
+        .await
+        .unwrap();
+        quiet(&session, &user).await;
+        switch(&session, &user).await;
+        owed_notes(&session, &line, 2).await;
+        soon(session.submit("report what you found".into(), InputMode::Queue, &line))
+            .await
+            .unwrap();
+        soon(session.idle(&line)).await.unwrap();
+        let events = local_events(&session, &line).await;
+        let request = events
+            .iter()
+            .rev()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(&data.request),
+                _ => None,
+            })
+            .expect("the former default line answers the input");
+        let note = request
+            .messages
+            .iter()
+            .map(|message| said(message))
+            .find(|text| {
+                text.starts_with("<dim-branch-line ") && text.contains(" default=\"false\"")
+            })
+            .unwrap_or_else(|| panic!("the request carries the note: {request:?}"));
+        assert!(
+            note.starts_with(&format!(
+                "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"false\">"
+            )),
+            "{note}"
+        );
+        assert!(
+            note.contains(&format!(
+                "The session's default branch moved from this line to line {user}."
+            )),
+            "{note}"
+        );
+        if heading {
+            assert!(
+                note.contains(&format!(
+                    "\n\nHow you work here:\n- Configured former guidance for main, moved to {user}."
+                )),
+                "{note}"
+            );
+        } else {
+            assert!(
+                !note.contains("How you work here:"),
+                "no guidance block without a configured one: {note}"
+            );
+            assert!(
+                note.ends_with("Only a line opened with create can end itself, and not while it or a line below it is the default branch.\n</dim-branch-line>"),
+                "the shipped note ends with the end guard, not with an instruction: {note}"
+            );
+        }
+        soon(agent.close()).await.unwrap();
+    }
+}
+
+/// The note a move writes goes in as `append` input, and an append input never
+/// starts a turn: the former default line, idle when the move happens, holds
+/// the note as its head without making a request for it, and the next input is
+/// what wakes it. The user-line scenario sends that input for this reason
+/// (design §5, model-prompts §9.8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_appended_note_does_not_wake_the_idle_former_default() {
+    let probe = Arc::new(Probe::default());
+    let agent = MinimalHost::start(&builder_with_branch_config(
+        &probe,
+        BranchToolConfig::default(),
+    ))
+    .await
+    .unwrap();
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = open_line(&session, "the parser race").await;
+    switch(&session, &line).await;
+    owed_notes(&session, &line, 1).await;
+    let cut = idle_cut(&session, "main").await;
+    let user = soon(session.branch(
+        "main".into(),
+        cut,
+        BranchOptions {
+            prompt: "the user line".into(),
+            source: BranchSource::User {
+                operation_id: "client".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    quiet(&session, &user).await;
+    switch(&session, &user).await;
+    owed_notes(&session, &line, 2).await;
+    quiet(&session, &line).await;
+    let events = local_events(&session, &line).await;
+    let note_at = events
+        .iter()
+        .rev()
+        .find(|event| {
+            blocks_with(std::slice::from_ref(event), "<dim-branch-line ")
+                .iter()
+                .any(|text| text.contains(" default=\"false\""))
+        })
+        .map(|event| event.sequence)
+        .expect("the line holds the former-default note");
+    assert!(
+        !events.iter().any(|event| {
+            event.sequence > note_at
+                && matches!(
+                    event.kind,
+                    EventKind::TurnStart(_) | EventKind::ModelCall(_)
+                )
+        }),
+        "the appended note starts no turn and makes no request"
+    );
+    soon(session.submit("report what you found".into(), InputMode::Queue, &line))
+        .await
+        .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let events = local_events(&session, &line).await;
+    let request = events
+        .iter()
+        .rev()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) if event.sequence > note_at => Some(&data.request),
+            _ => None,
+        })
+        .expect("the input wakes the line into a request");
+    assert!(
+        request
+            .messages
+            .iter()
+            .any(|message| said(message)
+                .contains("The session's default branch moved from this line")),
+        "the woken request carries the note: {request:?}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 /// #549: a description set at the declaring owner's factory configuration
 /// reaches the model request byte for byte, carried through ToolRegistry and
 /// ToolBinding by the shipped assembly.
@@ -4620,12 +5001,12 @@ async fn a_configured_description_reaches_the_request_declaration() {
 /// its guide entry is registered there, at the Session, and a line carries it
 /// even where no branch part is loaded. `<dim-branch-lines>` stays with
 /// BranchLine, which writes the roster.
-const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="main" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; a block carrying `default` is the note a move writes. Both are state about the line, not requests."#;
-const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="main">: the lines you opened, under the key `branch:roster` and apart from your own identity under `branch:line`: the runtime lists the tool lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
+const IDENTITY_ENTRY: &str = r#"<dim-branch-line branch="C" parent="P" source="tool">: which line of this session you are, placed by the runtime at the start of a line's own history. A later block of this name replaces the earlier one; a block carrying `default` is the note a move writes. Both are state about the line, not requests."#;
+const ROSTER_ENTRY: &str = r#"<dim-branch-lines branch="O">: the lines you opened, under the key `branch:roster` and apart from your own identity under `branch:line`: the runtime lists the tool lines you opened that are still open, each with the first line of its purpose. A later block of this name replaces the earlier one; it is state about the lines, not a request."#;
 /// #987: the parent block can arrive only on a line with a parent, so main's
 /// guide carries no entry for it.
 const PARENT_ENTRY: &str = r#"<dim-branch-parent branch="P" head="H" after="A">: on a line, the runtime reports that the line it was cut from has moved past where this line last read it, and where the next read starts. A later block of this name replaces the earlier one; it is state about that line, not a request."#;
-const MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="main">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
+const MESSAGE_ENTRY: &str = r#"<dim-branch-message from="C" to="P">: a message from another line of this session, in that line's own words and not the operator's. dim-branch-idle and dim-branch-ended are the runtime's reports about a line you opened: information, not requests."#;
 
 fn system_text(prompt: &SystemPrompt) -> String {
     match prompt {
@@ -4886,7 +5267,7 @@ async fn the_branch_tool_declares_its_actions_and_modes() {
         "- end: on a line opened with create, end your own line.",
         "Returns the line's id.",
         "It is your last action.",
-        "A line messages and reads the line it was cut from and the lines it opened. The end action ends the calling line only.",
+        "A line messages and reads the line it was cut from and the lines it opened. The end action ends the calling line and every line below it.",
     ] {
         assert!(
             branch.description.contains(sentence),
@@ -9898,6 +10279,10 @@ async fn a_default_branch_that_was_a_tool_line_stops_sending_its_idle_notice() {
     soon(agent.close()).await.unwrap();
 }
 
+/// A note a move writes survives the line's next compaction: the tool line the
+/// move makes the default branch, the tool line it displaced, a line the user
+/// opened, and the root, which gets no note and so keeps no block with a
+/// parent (design §5, §12.1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_switched_line_keeps_its_identity_after_a_compaction() {
     let mut builder = AgentBuilder::new(AgentConfig::default());
@@ -9906,7 +10291,7 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
             MemoryTimelineStore::default(),
         )))
         .session_value(Arc::new(HistoryRenderer::default()))
-        .process_value(Arc::new(ModelHost(Arc::new(EchoModel))))
+        .process_value(Arc::new(ModelHost(Arc::new(FlowModel))))
         .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
         .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
         .session_value(Arc::new(ContextModelHost(Some(Arc::new(Compact)))))
@@ -9921,19 +10306,13 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
+
+    // The tool line the first move makes the default branch, and the tool line
+    // the next move displaces it with.
     let line = open_line(&session, "the parser race").await;
-    soon(session.set_default_branch(
-        &line,
-        BranchSource::User {
-            operation_id: "switch".into(),
-        },
-    ))
-    .await
-    .unwrap();
-    for text in ["x".repeat(1500), "y".repeat(1500)] {
-        session.submit(text, InputMode::Queue, &line).await.unwrap();
-        patient(session.idle(&line)).await.unwrap();
-    }
+    let other = open_line(&session, "the renderer race").await;
+    switch(&session, &line).await;
+    compact_line(&session, &line).await;
     let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
         .expect("the note is the latest block of the key");
     assert!(
@@ -9955,6 +10334,99 @@ async fn a_switched_line_keeps_its_identity_after_a_compaction() {
         note.0
     );
     assert!(!note.1, "the note is live");
+
+    // The tool line the next move displaces.
+    switch(&session, &other).await;
+    owed_notes(&session, &line, 2).await;
+    compact_line(&session, &line).await;
+    let note = line_block(&chain_events(&session, &line, ..).await.unwrap())
+        .expect("the former default branch keeps the note");
+    assert!(
+        note.0.starts_with(&format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"false\">"
+        )),
+        "{}",
+        note.0
+    );
+    assert!(
+        note.0.contains("Your purpose, as main wrote it:"),
+        "{}",
+        note.0
+    );
+    assert!(note.0.contains("the parser race"), "{}", note.0);
+    assert!(
+        note.0
+            .contains(&format!("moved from this line to line {other}")),
+        "the note names the line that holds the role: {}",
+        note.0
+    );
+    assert!(
+        note.0.contains(
+            "Only a line opened with create can end itself, and not while it or a line below it is the default branch."
+        ),
+        "the note's own end rule: {}",
+        note.0
+    );
+    assert!(!note.1, "the note is live");
+
+    // A line the user opened, which the move makes the default branch.
+    let cut = idle_cut(&session, "main").await;
+    let opened = soon(session.branch(
+        "main".into(),
+        cut,
+        BranchOptions {
+            prompt: "the user line".into(),
+            source: BranchSource::User {
+                operation_id: "client".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&opened)).await.unwrap();
+    switch(&session, &opened).await;
+    owed_notes(&session, &opened, 1).await;
+    compact_line(&session, &opened).await;
+    let note = line_block(&chain_events(&session, &opened, ..).await.unwrap())
+        .expect("the user line keeps the note");
+    assert!(
+        note.0.starts_with(&format!(
+            "<dim-branch-line branch=\"{opened}\" parent=\"main\" source=\"user\" default=\"true\">"
+        )),
+        "{}",
+        note.0
+    );
+    assert!(
+        note.0.contains("opened by the user from line main"),
+        "{}",
+        note.0
+    );
+    assert!(
+        note.0.contains("the user ends this line"),
+        "the note's own end rule: {}",
+        note.0
+    );
+    assert!(!note.0.contains("Your purpose, as"), "{}", note.0);
+    assert!(!note.1, "the note is live");
+
+    // The root: a move back to it writes no note, so its compaction replays no
+    // identity block and the note it would carry names no parent.
+    switch(&session, "main").await;
+    compact_line(&session, "main").await;
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        baseline_message(&events, "branch:roster").is_some(),
+        "the root compacted and replayed its roster"
+    );
+    assert!(
+        baseline_message(&events, "branch:line").is_none(),
+        "the root gets no note: its identity key stays empty"
+    );
+    assert!(
+        line_block(&events).is_none(),
+        "the root holds no `branch:line` block"
+    );
+    assert_eq!(session.default_branch().unwrap(), "main");
     soon(agent.close()).await.unwrap();
 }
 
@@ -11405,7 +11877,9 @@ async fn a_clean_restart_writes_no_status_note() {
         .pop()
         .expect("B holds its notes");
     assert!(
-        latest.contains(&format!("Line {c} is now the session's default branch")),
+        latest.contains(&format!(
+            "The session's default branch moved from this line to line {c}"
+        )),
         "B's latest note names C before the restart: {latest}"
     );
     let id = session.id().to_owned();
@@ -11429,7 +11903,9 @@ async fn a_clean_restart_writes_no_status_note() {
         .pop()
         .expect("B holds its notes");
     assert!(
-        latest.contains(&format!("Line {c} is now the session's default branch")),
+        latest.contains(&format!(
+            "The session's default branch moved from this line to line {c}"
+        )),
         "B's latest note still names C: {latest}"
     );
     assert_eq!(
@@ -11880,7 +12356,7 @@ async fn a_move_that_stopped_between_its_fact_and_its_notes_is_completed_at_load
         (
             b.clone(),
             r#"default="false""#.to_owned(),
-            format!("Line {c} is now the session's default branch"),
+            format!("The session's default branch moved from this line to line {c}"),
         ),
         (
             c.clone(),
@@ -12176,7 +12652,9 @@ async fn a_move_committed_before_its_writer_starts_still_owes_its_note() {
     assert!(notes[0].contains("switched from line main"), "{}", notes[0]);
     assert!(notes[1].contains(r#"default="false""#), "{}", notes[1]);
     assert!(
-        notes[1].contains(&format!("Line {c} is now the session's default branch")),
+        notes[1].contains(&format!(
+            "The session's default branch moved from this line to line {c}"
+        )),
         "{}",
         notes[1]
     );
@@ -12195,7 +12673,9 @@ async fn a_move_committed_before_its_writer_starts_still_owes_its_note() {
     );
     assert!(at_c[1].contains(r#"default="false""#), "{}", at_c[1]);
     assert!(
-        at_c[1].contains(&format!("Line {b} is now the session's default branch")),
+        at_c[1].contains(&format!(
+            "The session's default branch moved from this line to line {b}"
+        )),
         "{}",
         at_c[1]
     );

@@ -18,8 +18,8 @@ eligibility and the cap in the lock that reserves the new line, so a switch or a
 create cannot slip between a check and the reservation; publication charges nothing a
 second time, and a creation that fails releases its slot.
 
-`end` ends the calling line and nothing else, so it guards the caller as well as the
-target: only a tool line ends itself, a plugin line follows its own protocol, and a line
+`end` ends the calling line and every line below it, so it guards the caller as well as
+the target: only a tool line ends itself, a plugin line follows its own protocol, and a line
 the user opened is ended by the user. A line that is the default branch, or that has a
 descendant which is, is refused, because ending a line ends every line below it.
 
