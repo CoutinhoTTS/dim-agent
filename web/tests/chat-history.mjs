@@ -2155,3 +2155,128 @@ test("a move keeps the live countdown of a request the turn read still reports r
   assert.equal(chat.views.session.defaultBranchId, "worker")
   assert.deepEqual(chat.views.session.retry, retry, "the countdown of a request the window's turn ended before stays")
 })
+
+test("a window's tool start keeps the running request's newer progress", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise, {
+    "session.turn.get": params => ({ ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r1", textCharacters: 7, thinkingCharacters: 0 } }),
+  })
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: "part 2", textOffset: 7, thinking: "", thinkingOffset: 0 } })
+  held.resolve(page([
+    event(1, { kind: "text", requestId: "r1", delta: "part 1 " }),
+    event(2, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "read_file" }),
+  ], 2))
+  await flush()
+  assert.deepEqual(chat.views.session.rows.filter(row => row.kind === "assistant").map(row => row.text), ["part 1 part 2"])
+})
+
+test("a loaded window's tool step keeps the running request's newer text", async t => {
+  const held = deferred()
+  const chat = session(t, ({ branchId }) => branchId === "main" ? page([], 0) : held.promise, {
+    "session.turn.get": params => params.branchId === "worker"
+      ? { ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r1", textCharacters: 7, thinkingCharacters: 0 } }
+      : { ...params, turn: undefined, output: undefined },
+  })
+  await flush()
+  chat.receive({ method: "session.state", sessionId: "session", branchId: "worker", running: true, stopping: false })
+  await flush()
+  chat.ensureLine("session", "worker")
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r1", text: "part 2", textOffset: 7, thinking: "", thinkingOffset: 0 } })
+  await flush()
+  held.resolve(page([
+    event(1, { kind: "text", requestId: "r1", delta: "part 1 " }),
+    event(2, { kind: "tool-use", requestId: "r1", callId: "call", name: "read_file", input: { path: "a" } }),
+  ], 2))
+  await flush()
+  const rows = chat.views.session.branches.worker.rows
+  assert.deepEqual(rows.filter(row => row.kind === "assistant").map(row => row.text), ["part 1 ", "part 2"])
+  assert.equal(rows.find(row => row.kind === "tool")?.pending, true, "the tool row stays between the two answers")
+})
+
+test("a window's tool start does not reopen a snapshot the request had already written", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise, {
+    "session.turn.get": params => ({ ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r1", textCharacters: 7, thinkingCharacters: 5 } }),
+  })
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", thinkingPartId: "e1", text: "part 1 ", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  held.resolve(page([
+    event(1, { kind: "thinking", requestId: "r1", delta: "weigh" }),
+    event(2, { kind: "text", requestId: "r1", delta: "part 1 " }),
+    event(3, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "read_file" }),
+  ], 3))
+  await flush()
+  const rows = chat.views.session.rows
+  assert.deepEqual(rows.map(row => row.kind), ["thinking", "assistant"], JSON.stringify(rows))
+  assert.equal(rows[1].text, "part 1 ")
+  assert.equal(rows[0].streaming, false)
+})
+
+test("a queued tool start settles a snapshot taken before it", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise, {
+    "session.turn.get": params => ({ ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r1", textCharacters: 0, thinkingCharacters: 0 } }),
+  })
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  receive(chat, "main", event(2, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "read_file" }))
+  held.resolve(page([event(1, { kind: "model-start", requestId: "r1" })], 1))
+  await flush()
+  assert.deepEqual(chat.views.session.rows, [], "the snapshot's uncommitted thought is not left behind")
+})
+
+test("a queued model end settles a snapshot taken before it", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise, {
+    "session.turn.get": params => ({ ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r1", textCharacters: 0, thinkingCharacters: 0 } }),
+  })
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  receive(chat, "main", event(2, { kind: "model-end", requestId: "r1" }))
+  held.resolve(page([event(1, { kind: "model-start", requestId: "r1" })], 1))
+  await flush()
+  assert.deepEqual(chat.views.session.rows, [], "the request ended before its thought was written")
+})
+
+test("a queued turn end settles a snapshot taken before it", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise, {
+    "session.turn.get": params => ({ ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r1", textCharacters: 0, thinkingCharacters: 0 } }),
+  })
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  receive(chat, "main", event(2, { kind: "turn-end", outcome: "completed" }))
+  held.resolve(page([event(1, { kind: "model-start", requestId: "r1" })], 1))
+  await flush()
+  assert.deepEqual(chat.views.session.rows, [], "the turn ended before the thought was written")
+})
+
+test("a window read in flight drops a snapshot of a request the turn ended", async t => {
+  let asked
+  const questions = deferred()
+  const chat = session(t, () => page([
+    event(1, { kind: "model-end", requestId: "r2" }),
+    event(2, { kind: "turn-end", outcome: "completed" }),
+  ], 2), {
+    "session.question.pending": params => {
+      if (params.branchId !== "main") return { ...params, asks: [], next: null }
+      asked = params
+      return questions.promise
+    },
+  })
+  await until(() => asked !== undefined)
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r2", text: "late tail", textOffset: 0, thinking: "", thinkingOffset: 0 } })
+  await flush()
+  questions.resolve({ ...asked, asks: [], next: null })
+  await flush()
+  assert.deepEqual(chat.views.session.rows.filter(row => row.kind === "assistant"), [])
+})
+
+test("a snapshot that arrives after the load does not reopen an ended request", async t => {
+  const chat = session(t, () => page([
+    event(1, { kind: "model-end", requestId: "r1" }),
+    event(2, { kind: "turn-end", outcome: "completed" }),
+  ], 2))
+  await flush()
+  assert.equal(chat.views.session.status, "ready")
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: "late tail", textOffset: 0, thinking: "", thinkingOffset: 0 } })
+  await flush()
+  assert.deepEqual(chat.views.session.rows.filter(row => row.kind === "assistant"), [])
+})

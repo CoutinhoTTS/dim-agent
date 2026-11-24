@@ -439,3 +439,32 @@ test("committed text keeps the terminal's incomplete claim through a new thought
   assert.equal(row.kind, "error")
   assert.ok(row.text.startsWith("The response above is incomplete. The provider reported a server error"), row.text)
 })
+
+test("a committed thought does not hold back the same notice's text", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "thinking", requestId: "r1", delta: "weigh" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "e1", text: "hello", textOffset: 0, thinking: "weigh", thinkingOffset: 0 })
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "weigh", "the committed thought is not shown twice")
+  assert.equal(projection.rows.find((row) => row.kind === "assistant")?.text, "hello", "the same notice's text is not held back by the thought")
+})
+
+test("a closed thought does not hold back the same notice's text", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "thinking", requestId: "r1", delta: "weigh" }))
+  projection.apply(event(2, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "read_file" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "e1", text: "hello", textOffset: 0, thinking: "weigh", thinkingOffset: 0 })
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 1, JSON.stringify(projection.rows))
+  assert.equal(projection.rows.find((row) => row.kind === "assistant")?.text, "hello", "the tool start does not swallow the text after it")
+})
+
+test("committed text does not hold back the same notice's thought", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "text", requestId: "r1", delta: "hi" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "next", text: "hi", textOffset: 0, thinking: "weigh", thinkingOffset: 0 })
+  assert.equal(projection.rows.find((row) => row.kind === "assistant")?.text, "hi")
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "weigh", "the same notice's thought is not held back by the text")
+})
