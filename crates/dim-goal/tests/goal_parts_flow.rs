@@ -896,6 +896,71 @@ async fn a_queue_committed_before_the_pause_append_holds_the_pause() {
     env.close().await;
 }
 
+/// An operator interrupt that folds in a turn-end pause's write window follows
+/// the ended turn: the interrupt's own pause states the fact, and the turn end
+/// states no pause of its own (#2119, Pursuit §4.1, C4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_end_pause_does_not_answer_a_later_interrupt() {
+    let env = Env::start_gated().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    let _set_end = env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    // The limit is reached, so this turn end decides a pause. Its record writer
+    // is held after it settled the decisions, before it composes.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        first.sequence,
+        None,
+    );
+    let second_end = env.tool_turn("main", &[&first]);
+    assert_eq!(
+        held.arrived().await,
+        second_end.sequence,
+        "the pause's record writer answers the turn end at {}",
+        second_end.sequence
+    );
+
+    // An operator interrupt commits in that window and folds before the writer
+    // reads its cutoff again.
+    let interrupt = env.interrupt("main");
+    env.dispatched("main", interrupt.sequence).await;
+    held.release();
+
+    // The interrupt states the pause; the ended turn states none.
+    let pause = env.wait_for("main", r#"status="paused""#).await;
+    assert!(
+        pause.marker.contains(r#"reason="interrupted""#),
+        "the interrupt at {} states the pause: {pause:#?}",
+        interrupt.sequence
+    );
+    let stale: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="state""#)
+                && block.marker.contains(r#"status="paused""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"after="{}""#, second_end.sequence))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the turn end at {} writes no pause once the interrupt at {} follows it, yet it wrote {stale:?}",
+        second_end.sequence,
+        interrupt.sequence
+    );
+    env.close().await;
+}
+
 /// A state record whose append fails is reported to its caller: the writer
 /// does not resume the decisions it settled, so the same pause is not decided
 /// again without a new fact (#2119).

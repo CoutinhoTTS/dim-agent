@@ -933,25 +933,47 @@ impl Fold {
     pub fn pending_change(&self) -> Option<u64> {
         (self.last_change > self.state_after).then_some(self.last_change)
     }
+    /// Whether the turn end `after` still decides at this fold: it is the
+    /// newest turn end, and no turn interrupt follows it. An interrupt after it
+    /// states that pause itself, and the end states nothing.
+    pub(crate) fn turn_end_stands(&self, after: u64) -> bool {
+        self.turn_end.as_ref().map(|end| end.sequence) == Some(after)
+            && self.interrupt_after(after).is_none()
+    }
+    /// The decision the turn end `after` still takes, with the boundary its
+    /// first decision applied: it stands ([`turn_end_stands`](Self::turn_end_stands)),
+    /// and [`decide_turn_end`] decides it. The decision and the record writer
+    /// that states it both read it here, so a pause is stated at the boundary
+    /// it was taken at.
+    pub(crate) fn turn_end_decision(
+        &self,
+        after: u64,
+        limit: Option<u64>,
+        progress: Option<Progress>,
+    ) -> Option<Decision> {
+        if !self.turn_end_stands(after) {
+            return None;
+        }
+        decide_turn_end(self, limit, progress)
+    }
     /// The pause the turn end at `after` still decides, and the reason the fold
-    /// gives it: no evaluator-first decision over it, and [`decide_turn_end`]
-    /// over the fold with the limit and the progress its decision read. A
-    /// driving input or a newer turn that folds while the record is written
-    /// leaves the pause to that turn (C4, C5); a driving input withdrawn in that
-    /// window returns the end to the evaluator, which the pause no longer
-    /// answers.
+    /// gives it: no evaluator-first decision over it, and
+    /// [`turn_end_decision`](Self::turn_end_decision) over the fold with the
+    /// limit and the progress its decision read. A driving input or a newer
+    /// turn that folds while the record is written leaves the pause to that
+    /// turn (C4, C5); a driving input withdrawn in that window returns the end
+    /// to the evaluator, which the pause no longer answers; an interrupt that
+    /// follows the end states that pause itself.
     pub(crate) fn pause_at_end(
         &self,
         after: u64,
         limit: Option<u64>,
         progress: Option<Progress>,
     ) -> Option<&'static str> {
-        if self.turn_end.as_ref().map(|end| end.sequence) != Some(after)
-            || decide_evaluation(self, after)
-        {
+        if decide_evaluation(self, after) {
             return None;
         }
-        match decide_turn_end(self, limit, progress) {
+        match self.turn_end_decision(after, limit, progress) {
             Some(Decision::Pause { reason }) => Some(reason),
             _ => None,
         }

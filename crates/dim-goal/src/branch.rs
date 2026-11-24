@@ -1836,9 +1836,7 @@ impl Owner {
         let progress = {
             let (end, open) = {
                 let state = self.state.lock().unwrap();
-                if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
-                    || state.fold.interrupt_after(after).is_some()
-                {
+                if !state.fold.turn_end_stands(after) {
                     return Ok(());
                 }
                 (state.fold.turn_end.clone(), state.fold.open_tasks())
@@ -1863,12 +1861,7 @@ impl Owner {
         let write = self.write_guard().await?;
         let decision = {
             let state = self.state.lock().unwrap();
-            if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
-                || state.fold.interrupt_after(after).is_some()
-            {
-                return Ok(());
-            }
-            fold::decide_turn_end(&state.fold, limit, progress)
+            state.fold.turn_end_decision(after, limit, progress)
         };
         let Some(decision) = decision else {
             return Ok(());
@@ -1894,14 +1887,9 @@ impl Owner {
                     if self.timeline.committed() != through {
                         continue;
                     }
-                    if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
-                        || state.fold.interrupt_after(after).is_some()
-                    {
-                        return Ok(());
-                    }
                     (
                         fold::decide_evaluation(&state.fold, after),
-                        fold::decide_turn_end(&state.fold, limit, progress),
+                        state.fold.turn_end_decision(after, limit, progress),
                     )
                 };
                 if evaluation {
