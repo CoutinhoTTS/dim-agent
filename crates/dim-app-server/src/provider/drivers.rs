@@ -122,3 +122,26 @@ pub(super) fn connection(
         preset,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A compatible connection names the vendor package whose rules it follows:
+    /// the managed Grok subscription is xAI itself, while the generic driver
+    /// and an unrelated endpoint name none.
+    #[test]
+    fn a_compatible_connection_names_the_vendor_package_its_driver_builds() {
+        let named = |driver| {
+            connection(
+                driver,
+                ModelProtocol::OpenaiCompatible,
+                "https://api.x.ai/v1",
+                HashMap::new(),
+            )
+            .preset
+        };
+        assert_eq!(named("xai-grok-build").as_deref(), Some("xai"));
+        assert_eq!(named("openai-compatible"), None);
+    }
+}
