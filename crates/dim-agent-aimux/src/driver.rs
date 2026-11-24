@@ -923,3 +923,6 @@ impl Stream for OwnedStream {
         result
     }
 }
+
+#[cfg(test)]
+mod tests;
