@@ -202,6 +202,16 @@ pub enum ShutdownReason {
     Forced,
 }
 
+/// Feature `testing`: a hold on one unregistered worktree removal after its
+/// content check and before the store's final Session check. It notifies
+/// `reached` once held and returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct UnregisteredRemovalHold {
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 /// Feature `testing`: a hold on one subscription's `follow` task. It notifies
 /// `waiting` once it is held, `cancelled` once retirement cancels it, and
 /// returns once `release` is notified.
@@ -344,6 +354,15 @@ impl RunningServer {
         self.root
             .get::<AgentIndex>()
             .map(|index| index.idle_admitted())
+    }
+    /// Holds the next unregistered worktree removal after its content check,
+    /// so a test can create a Session before the store's final check. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_unregistered_removal(&self) -> Option<Arc<UnregisteredRemovalHold>> {
+        self.root
+            .get::<worktrees::ManagedWorktrees>()
+            .map(|managed| managed.hold_next_unregistered_removal())
     }
     /// Holds the next subscription's `follow` task open until `release`, so a
     /// test can keep an attach or detach in flight at a known point. Feature

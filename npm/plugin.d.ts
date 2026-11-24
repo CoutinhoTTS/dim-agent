@@ -700,8 +700,10 @@ export interface Store {
   sessionsUnderWorkspace(request: { root: string }): Promise<{ sessionIds: string[] }>;
   removeWorktreeDirectory(request: WorktreeDirectory): Promise<{ removed: boolean }>;
   worktreeUsages(request: WorktreeDirectory): Promise<{ usages: { sessionId: string; subtree: string }[] }>;
-  /** Callback runs under the native ownership mutex: do not await createOwnedSession, fork, delete, removeWorktreeDirectory, removeWorktree or worktreeAssociations.associate from it. */
+  /** Callback runs under the native ownership mutex: do not await createOwnedSession, fork, delete, removeWorktreeDirectory, removeWorktree, removeUnregisteredDirectory or worktreeAssociations.associate from it. */
   removeWorktree(request: WorktreeDirectory, remove: (path: string) => Promise<void>): Promise<{ removed: boolean }>;
+  /** Removes an unregistered directory after the final workspace check; the callback runs under the native ownership mutex, which the removal holds until the callback finishes. */
+  removeUnregisteredDirectory(request: { root: string }, remove: (path: string) => Promise<void>): Promise<{ removed: boolean }>;
 }
 
 /** Session Timeline storage binding; resource-faces §5. Native append stays beside its state owner. */
