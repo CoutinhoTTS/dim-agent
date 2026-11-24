@@ -2035,27 +2035,33 @@ impl Owner {
                 if self.stopped() {
                     return Ok(());
                 }
-                let (end, turn_start) = {
+                let Some(end) = ({
                     let state = self.state.lock().unwrap();
                     if fold::decide_conclusion(&state.fold, sequence, &conclusion)
                         != Some(ConclusionAction::Continue)
                     {
                         return Ok(());
                     }
-                    (state.fold.turn_end.clone(), state.fold.turn_start)
-                };
-                let Some(end) = end else {
+                    state
+                        .fold
+                        .turn_end
+                        .clone()
+                        .filter(|end| end.sequence == evaluation)
+                }) else {
                     return Ok(());
                 };
+                let turn_start = end.turn_start;
                 // C7 measures the branch's own continuations; the evaluator
                 // judged this turn, so this path reads no progress (Pursuit §5).
-                // C4, C5: a Queue that commits while a continuation waits
-                // leaves this fold behind, so its recheck reads the fold at the
-                // latest committed cutoff and catches up to that Queue; a turn
-                // the Queue opened moves `turn_start`, and the append refuses a
-                // head that moved after the recheck. A pause is decided once, at
-                // the writer's cutoff, and does not claim a Queue that commits
-                // after it.
+                // C4, C5: the decision is bound to the judged turn end and to
+                // that turn's own start, so a Queue that opened a turn before or
+                // during the settings read cannot pass as the expected one. The
+                // recheck reads the fold at the latest committed cutoff and
+                // catches up to that Queue; a turn the Queue opened moves
+                // `turn_start`, a newer turn end replaces the judged one, and the
+                // append refuses a head that moved after the recheck. A pause is
+                // decided once, at the writer's cutoff, and does not claim a
+                // Queue that commits after it.
                 let write = self.write_guard().await?;
                 let decision = {
                     let state = self.state.lock().unwrap();
