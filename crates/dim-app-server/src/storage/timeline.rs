@@ -2109,14 +2109,18 @@ fn overlaps(one: &Path, other: &Path) -> bool {
 }
 
 /// The workspace a stored Session configuration names, read from the same text
-/// `session_catalog` records it from. Text that does not carry one has no
-/// workspace to check.
+/// `session_catalog` records it from. Text that does not carry one, or carries
+/// an empty one, has no workspace to check.
 fn config_cwd(config: &str) -> Option<PathBuf> {
-    serde_json::from_str::<serde_json::Value>(config)
+    let cwd = serde_json::from_str::<serde_json::Value>(config)
         .ok()?
         .get("cwd")?
-        .as_str()
-        .map(PathBuf::from)
+        .as_str()?
+        .to_owned();
+    if cwd.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(cwd))
 }
 
 /// The Session directory, the `sessionFiles` service and the
