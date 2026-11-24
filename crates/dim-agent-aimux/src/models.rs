@@ -248,7 +248,7 @@ fn validate_network(network: &ModelNetwork, provider: &str) -> Result<(), HostEr
         .is_some_and(|value| value == 0 || value > dim_agent_types::JS_MAX_SAFE_INTEGER)
     {
         return Err(HostError::failed(format!(
-            "Invalid network timeout for {provider}: a positive integer is required"
+            "Invalid network timeout for {provider}: a positive safe integer is required"
         )));
     }
     Ok(())

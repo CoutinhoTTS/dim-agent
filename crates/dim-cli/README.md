@@ -377,7 +377,7 @@ printf '%s\n' 'Explain this project' | target/debug/dimcode \
 
 The configuration references credentials by environment-variable name. The shared daemon inherits the environment when it starts; changing the client's environment does not update an existing daemon. Use a separate home for a different explicit model configuration. The client matches the server's explicit product/configured/mock profile and the SHA-256 of the exact configured file bytes; it rejects a mock daemon or a different configuration without deleting the endpoint or stopping that daemon. A configured real model uses production workspace tools, not mock tools.
 
-A provider may also state an optional `network` block: `proxy` is an HTTP or HTTPS root URL every request to that provider goes through, and `timeoutMs` is a positive integer for the total time one request may spend, its response body included. It carries the same connection facts a saved Provider record does, and an invalid value fails the load with the provider it belongs to.
+A provider may also state an optional `network` block: `proxy` is an HTTP or HTTPS root URL every request to that provider goes through, and `timeoutMs` is a positive safe integer for the total time one request may spend, its response body included. It carries the same connection facts a saved Provider record does, and an invalid value fails the load with the provider it belongs to.
 
 `--cwd PATH` selects the workspace: the client resolves it once as UTF-8, and a
 command that names the workspace in a request refuses a path that is not valid

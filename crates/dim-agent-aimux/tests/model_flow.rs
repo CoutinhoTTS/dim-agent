@@ -908,7 +908,7 @@ fn a_network_block_refuses_values_the_transport_cannot_use() {
             .expect_err("a timeout outside the safe integer range");
         assert_eq!(
             error.to_string(),
-            "Invalid network timeout for local: a positive integer is required",
+            "Invalid network timeout for local: a positive safe integer is required",
             "{network}"
         );
     }
