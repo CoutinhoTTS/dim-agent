@@ -773,10 +773,10 @@ impl ModelDriver for AimuxDriver {
                 capture.pending()
             });
             // Three waits carry the idle allowance: sending the request until
-            // the response headers, the headers until the first stream event,
-            // and one part until the next. `do_stream` ends only after the
-            // headers and the first event, so `ResponseWatch` reports the
-            // headers here and the deadline moves to the first event.
+            // the response headers, the headers until the first stream event
+            // (a provider may read one before it returns the stream), and one
+            // part until the next. `ResponseWatch` reports the headers here
+            // and the deadline moves to the first event.
             let result = {
                 let mut awaiting_headers = true;
                 let mut headers_arrived = false;
@@ -804,7 +804,7 @@ impl ModelDriver for AimuxDriver {
                         }
                         _ = &mut deadline, if bounded => {
                             abort.abort();
-                        let error = stream::idle_failure(if headers_arrived {
+                            let error = stream::idle_failure(if headers_arrived {
                                 format!(
                                     "the response headers arrived, but no stream event followed within {} seconds",
                                     stream::STREAM_IDLE_TIMEOUT.as_secs()
