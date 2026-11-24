@@ -104,6 +104,9 @@ mod collaboration;
 
 #[path = "transport_flow/catalog.rs"]
 mod catalog;
+
+#[path = "transport_flow/branch_context.rs"]
+mod branch_context;
 #[path = "transport_flow/configured_auxiliary.rs"]
 mod configured_auxiliary;
 #[path = "transport_flow/native_storage.rs"]
