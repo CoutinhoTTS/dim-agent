@@ -10060,7 +10060,7 @@ mod tests {
                              "data": {"turn_id": "t1", "request_id": "r1"}}}),
             json!({"kind": "event", "branch_id": "2",
                    "event": {"id": "i1", "sequence": 5, "type": "stop", "name": "interrupt",
-                             "data": {"reason": "budget: turns", "scope": "branch"}}}),
+                             "data": {"reason": "budget: turns", "scope": "turn"}}}),
             json!({"kind": "event", "branch_id": "2",
                    "event": {"id": "o1", "sequence": 6, "type": "step", "name": "model-output-end",
                              "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
@@ -10127,7 +10127,7 @@ mod tests {
                 5,
                 "i2",
                 ["stop", "interrupt"],
-                json!({"reason": "budget: turns", "scope": "branch"}),
+                json!({"reason": "budget: turns", "scope": "turn"}),
             ),
             // Line 3's follow-up ended before the model for another reason,
             // and the request the cap stopped on that line is a later one.
@@ -10176,7 +10176,7 @@ mod tests {
                 22,
                 "i3",
                 ["stop", "interrupt"],
-                json!({"reason": "budget: turns", "scope": "branch"}),
+                json!({"reason": "budget: turns", "scope": "turn"}),
             ),
         ]
         .iter()
@@ -10246,7 +10246,7 @@ mod tests {
                     6,
                     "i1",
                     ["stop", "interrupt"],
-                    json!({"reason": "budget: turns", "scope": "branch"}),
+                    json!({"reason": "budget: turns", "scope": "turn"}),
                 ),
             ]
             .iter()
