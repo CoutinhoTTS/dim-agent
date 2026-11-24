@@ -49,10 +49,12 @@ impl Owner {
         }
     }
 
-    /// Releases task admission without taking up the interrupt the settlement
-    /// deferred, and answers that interrupt. A state write that failed states
-    /// nothing, so it does not decide that pause again: it stays with the fold
-    /// until a later settlement takes it up (Pursuit §4.1, §13 E2, #2119).
+    /// Releases task admission and returns the interrupt the settlement
+    /// deferred to the caller: `resume_settlement` takes it up, a caller whose
+    /// state write failed leaves it with the fold for a later settlement. That
+    /// caller's settlement waited for every task it cancelled to finish before
+    /// it wrote, so the decisions it cancelled decide nothing after this
+    /// release (Pursuit §4.1, §13 E2, #2119).
     pub(super) fn release_settlement(self: &Arc<Self>) -> Option<u64> {
         let interrupt = {
             let mut state = self.state.lock().unwrap();

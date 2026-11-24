@@ -701,8 +701,10 @@ impl Owner {
             Ok(_) => self.resume_settlement(),
             // A change that failed states no state, so the interrupt the
             // settlement deferred waits for a later settlement that succeeds
-            // instead of reaching an append of its own (Pursuit §4.1, §13 E2,
-            // #2119).
+            // instead of reaching an append of its own; the decisions that
+            // settlement cancelled decide nothing after this release, because
+            // the settlement waited for every one of them before it wrote
+            // (Pursuit §4.1, §13 E2, #2119).
             Err(_) => {
                 self.release_settlement();
             }
@@ -1469,9 +1471,11 @@ impl Owner {
                         owner.resume_decisions();
                     }
                 }
-                // A write that failed states nothing, so it takes up neither the
-                // interrupt the settlement deferred nor a later decision: a
-                // later settlement decides again (Pursuit §4.1, §13 E2, #2119).
+                // A write that failed states nothing, so it leaves the interrupt
+                // its settlement deferred with the fold for a later settlement;
+                // the decisions that settlement cancelled decide nothing after
+                // this release, because that settlement waited for every one of
+                // them before it wrote (Pursuit §4.1, §13 E2, #2119).
                 Err(_) => {
                     owner.release_settlement();
                 }
