@@ -4069,7 +4069,9 @@ pub(crate) mod shell {
                     }
                     let mut tail = Vec::new();
                     let read = file.read_to_end(&mut tail);
-                    let text = String::from_utf8_lossy(&tail).into_owned();
+                    let mut decoder = Decoder::default();
+                    let mut text = decoder.write(&tail);
+                    text.push_str(&decoder.end());
                     let failure = read.err().map(|error| super::TaskFailure::JobUnavailable {
                         message: error.to_string(),
                     });
