@@ -1,7 +1,7 @@
 # #1295 clean redesign: one task owner, one record, one splitter
-Status: design for re-implementation from `984f6b59d1`; replaces the `af6752a2e9` patch
-stack (`backup/pr-2002-af675`). Not an implementation record. The contract lands in
-`docs/design/resource-faces.md` §3; other pages link to it.
+Status: design and implementation record for #1295 from `984f6b59d1`; the earlier
+`af6752a2e9` patch stack is only the local `backup/pr-2002-af675` reference. The contract
+lands in `docs/design/resource-faces.md` §3; other pages link to it.
 ## 0. Decision
 1. `HostPlatform` owns all four task kinds: exec command, persistent-shell command, shell
    job, persistent shell. One `TaskRecord` with an immutable `TaskKind` payload makes
