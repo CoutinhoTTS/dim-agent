@@ -2806,6 +2806,118 @@ async fn routed_model_update_restores_the_previous_model_on_disconnect() {
     server.join().await.unwrap();
 }
 
+/// `session.model.get` names the catalog Provider an adoption was selected
+/// from when a temporary route made the route its execution identity, on the
+/// default line and on the root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn model_get_names_the_catalog_provider_of_a_routed_adoption() {
+    let store = Store::new();
+    let Served {
+        server,
+        agent,
+        mut client,
+        ..
+    } = serve_with(Setup {
+        database: Some(store.database()),
+        home: Some(store.0.clone()),
+        ..Default::default()
+    })
+    .await;
+    super::process_typescript::select_model(&mut client).await;
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":std::env::temp_dir(),"tools":["confirm","branch"],
+                "permissionPolicy":host_policy()}),
+        )
+        .await;
+    assert_ok(&created);
+    let id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = agent.get_session(&id).unwrap();
+    session.idle("main").await.unwrap();
+    let provider = session.config().model.provider_id.clone();
+
+    // The line the conversation is on, opened from the idle root.
+    let head = client
+        .rpc(
+            "session.history",
+            json!({"sessionId":id,"branchId":"main","after":0,"limit":256}),
+        )
+        .await;
+    assert_ok(&head);
+    let opened = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":id,"parentBranchId":"main",
+                "at":head["result"]["through"],"prompt":"worker work"}),
+        )
+        .await;
+    assert_ok(&opened);
+    let line = opened["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    session.idle(&line).await.unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "session.branch_set_default",
+                json!({"sessionId":id,"branchId":line}),
+            )
+            .await,
+    );
+
+    let mut routed = Client::new_version(&server, false, 4).await;
+    assert_ok(
+        &routed
+            .rpc(
+                "provider.routes.set",
+                json!({"providerId":provider,
+                    "connection":{"apiFormat":"openai-compatible","baseUrl":"http://localhost/routed/v1"}}),
+            )
+            .await,
+    );
+
+    for branch in [line.as_str(), "main"] {
+        let updated = routed
+            .rpc(
+                "session.model.update",
+                json!({"sessionId":id,"branchId":branch,"providerId":provider,"modelId":"fixture"}),
+            )
+            .await;
+        assert_ok(&updated);
+        let route = updated["result"]["model"]["providerId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(
+            route, provider,
+            "the temporary route is the execution identity: {updated}"
+        );
+        let read = client
+            .rpc(
+                "session.model.get",
+                json!({"sessionId":id,"branchId":branch}),
+            )
+            .await;
+        assert_ok(&read);
+        let configuration = &read["result"]["configuration"];
+        assert_eq!(configuration["model"]["providerId"], json!(route), "{read}");
+        assert_eq!(configuration["model"]["modelId"], "fixture", "{read}");
+        assert_eq!(
+            configuration["catalogProviderId"],
+            json!(provider),
+            "{read}"
+        );
+    }
+
+    drop(routed);
+    drop(client);
+    drop(agent);
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_waits_for_published_input_dispatch_and_abandonment_is_local() {
     let gate = Arc::new(PendingDispatchGate::default());

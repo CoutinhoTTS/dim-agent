@@ -223,6 +223,16 @@ pub struct BranchesHold {
     pub release: tokio::sync::Notify,
 }
 
+/// Feature `testing`: a hold on one attach's `expectedConfig` check after the
+/// reply's record is captured. It notifies `entered` once the check is held and
+/// answers once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct AttachCheckHold {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 /// Feature `testing`: a hold on the business close of one Session. It
 /// notifies `admission` once the close stopped the Session's restoration in
 /// this process, `waiting` once its runtime close returned and before the close
@@ -352,6 +362,15 @@ impl RunningServer {
         self.root
             .get::<ConnectionHub>()
             .map(|hub| hub.hold_next_branches())
+    }
+    /// Holds the next attach's `expectedConfig` check after its record is
+    /// captured until `release`, so a test can move the default away and end
+    /// the former default at a known point. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_attach_check(&self) -> Option<Arc<AttachCheckHold>> {
+        self.root
+            .get::<ConnectionHub>()
+            .map(|hub| hub.hold_next_attach_check())
     }
     /// Makes the next attach fail before it registers its listener. Feature
     /// `testing` only.

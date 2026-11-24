@@ -2185,6 +2185,10 @@ pub(crate) struct ConnectionHub {
     /// snapshot.
     #[cfg(feature = "testing")]
     branches_hold: Mutex<Option<Arc<crate::BranchesHold>>>,
+    /// Feature `testing`: holds the next attach's `expectedConfig` check after
+    /// its record is captured.
+    #[cfg(feature = "testing")]
+    attach_check_hold: Mutex<Option<Arc<crate::AttachCheckHold>>>,
     /// Feature `testing`: fails the next attach before it registers its
     /// listener.
     #[cfg(feature = "testing")]
@@ -2218,6 +2222,8 @@ impl ConnectionHub {
             follow_hold: Mutex::new(None),
             #[cfg(feature = "testing")]
             branches_hold: Mutex::new(None),
+            #[cfg(feature = "testing")]
+            attach_check_hold: Mutex::new(None),
             #[cfg(feature = "testing")]
             fail_attach_before_registration: std::sync::atomic::AtomicBool::new(false),
         }
@@ -2361,6 +2367,21 @@ impl ConnectionHub {
     #[cfg(feature = "testing")]
     pub(crate) fn take_branches_hold(&self) -> Option<Arc<crate::BranchesHold>> {
         self.branches_hold.lock().expect("branches hold").take()
+    }
+    /// Holds the next attach's `expectedConfig` check after its record is
+    /// captured until `release`. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_attach_check(&self) -> Arc<crate::AttachCheckHold> {
+        let hold = Arc::new(crate::AttachCheckHold::default());
+        *self.attach_check_hold.lock().expect("attach check hold") = Some(hold.clone());
+        hold
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn take_attach_check_hold(&self) -> Option<Arc<crate::AttachCheckHold>> {
+        self.attach_check_hold
+            .lock()
+            .expect("attach check hold")
+            .take()
     }
     /// Feature `testing`: the next attach fails before it registers its
     /// listener.
