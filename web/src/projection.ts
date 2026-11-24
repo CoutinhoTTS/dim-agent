@@ -347,9 +347,6 @@ export class Projection {
     const requestId = progress.requestId
     if (requestId === undefined || this.endedRequests.has(requestId) || this.endedTurnRequests.has(requestId)) return
     this.turnRequests.add(requestId)
-    // A notice with no output at offset zero is the producer restarting the
-    // request: a retry starts from nothing, whatever the attempt before showed.
-    if (progress.text === "" && progress.textOffset === 0 && progress.thinking === "" && progress.thinkingOffset === 0) this.committed.delete(requestId)
     const committed = this.requestChars(requestId)
     const text = [...progress.text].length
     const thinking = [...progress.thinking].length
