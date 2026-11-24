@@ -1225,9 +1225,6 @@ impl HostPlatform {
         let task = self
             .task(&request.task_id)
             .ok_or(HostPlatformError::TaskUnknown)?;
-        if matches!(task.kind, TaskKind::Job(_)) {
-            return Err(HostPlatformError::TaskUnknown);
-        }
         tokio::select! {
             biased;
             _ = cancelled() => Err(HostPlatformError::Cancelled),
@@ -1267,7 +1264,16 @@ impl HostPlatform {
                     _ => Ok(()),
                 }
             }
-            TaskKind::ShellCommand(_) => Err(HostPlatformError::TaskUnknown),
+            TaskKind::ShellCommand(command) => {
+                if !command.shell.is_active(&task) {
+                    return Ok(());
+                }
+                command
+                    .shell
+                    .write(b"\x03")
+                    .await
+                    .map_err(|error| HostPlatformError::Io(error.to_string()))
+            }
             TaskKind::Job(job) => {
                 job.stop_requested
                     .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -1302,9 +1308,9 @@ impl HostPlatform {
 
     /// Releases an ended task's record.
     pub async fn settle(&self, request: TaskRequest) -> Result<(), HostPlatformError> {
-        let task = self
-            .task(&request.task_id)
-            .ok_or(HostPlatformError::TaskUnknown)?;
+        let Some(task) = self.task(&request.task_id) else {
+            return Ok(());
+        };
         if !task.is_terminal() {
             return Err(HostPlatformError::TaskRunning);
         }
@@ -1413,9 +1419,16 @@ impl HostPlatform {
 
     /// Writes bytes to a shell task.
     pub async fn write(&self, request: ShellWrite) -> Result<(), HostPlatformError> {
-        let shell = self
-            .shell_task(&request.task_id)
+        let task = self
+            .task(&request.task_id)
             .ok_or(HostPlatformError::TaskUnknown)?;
+        if task.is_terminal() {
+            return Err(HostPlatformError::TaskEnded);
+        }
+        let shell = match &task.kind {
+            TaskKind::Shell(shell) => shell.clone(),
+            _ => return Err(HostPlatformError::TaskUnknown),
+        };
         if request.command.is_some() && request.job.is_some() {
             return Err(HostPlatformError::Invalid(
                 "a shell write cannot start a command and a job together".into(),
@@ -1523,9 +1536,16 @@ impl HostPlatform {
 
     /// Resizes a shell task's PTY.
     pub async fn resize(&self, request: ShellResize) -> Result<(), HostPlatformError> {
-        let shell = self
-            .shell_task(&request.task_id)
+        let task = self
+            .task(&request.task_id)
             .ok_or(HostPlatformError::TaskUnknown)?;
+        if task.is_terminal() {
+            return Err(HostPlatformError::TaskEnded);
+        }
+        let shell = match &task.kind {
+            TaskKind::Shell(shell) => shell.clone(),
+            _ => return Err(HostPlatformError::TaskUnknown),
+        };
         shell
             .resize(PtySize {
                 cols: request.cols,
@@ -1561,6 +1581,26 @@ impl HostPlatform {
             .task(&request.task_id)
             .and_then(|task| task.terminal_page(request.cursor.unwrap_or(0), limit))
         {
+            return Ok(OutputPageReply {
+                text: page.text,
+                bytes: page.bytes,
+                next_cursor: page.next_cursor,
+                truncated: page.truncated,
+                retained_from: 0,
+                reset: None,
+            });
+        }
+        if let Some(task) = self.task(&request.task_id)
+            && let TaskKind::Job(job) = &task.kind
+        {
+            let page = self
+                .retained_output_page(
+                    std::path::Path::new(&job.output_path),
+                    request.cursor.unwrap_or(0),
+                    limit,
+                )
+                .await
+                .map_err(HostPlatformError::from)?;
             return Ok(OutputPageReply {
                 text: page.text,
                 bytes: page.bytes,
@@ -1633,6 +1673,16 @@ impl HostPlatform {
         }
         if let Some(command) = self.shell_command(&request.task_id) {
             return Ok(command.tail());
+        }
+        if let Some(task) = self.task(&request.task_id)
+            && let TaskKind::Job(job) = &task.kind
+        {
+            let (record, _) = job.output_record();
+            return Ok(crate::workspace_tools::exec::OutputTail {
+                text: record.preview,
+                total_bytes: record.bytes,
+                truncated: record.truncated,
+            });
         }
         if let Some(terminal) = self.task(&request.task_id).and_then(|task| task.terminal()) {
             let text = match &terminal.output.text {
@@ -3958,6 +4008,18 @@ pub(crate) mod shell {
             }
         }
 
+        fn finish(&mut self) {
+            if self.pending.is_empty() {
+                return;
+            }
+            let cursor = self.next;
+            self.next += 1;
+            let text = std::mem::take(&mut self.pending);
+            self.chars += text.len();
+            self.items
+                .push_back(super::ShellEvent::Output { cursor, text });
+        }
+
         fn page(&mut self, cursor: u64, limit: usize) -> EventPage {
             while let Some(front) = self.items.front() {
                 if front.cursor() >= cursor {
@@ -4000,6 +4062,101 @@ pub(crate) mod shell {
         pub(crate) next_cursor: u64,
         pub(crate) state: super::ShellState,
         pub(crate) reset: bool,
+    }
+
+    #[derive(Default)]
+    struct LineSplitter {
+        pending: String,
+        finished: bool,
+    }
+
+    impl LineSplitter {
+        fn push(&mut self, chunk: &str) -> Vec<String> {
+            self.pending.push_str(chunk);
+            let mut lines = Vec::new();
+            while let Some(newline) = self.pending.find('\n') {
+                lines.push(self.pending.drain(..=newline).collect());
+            }
+            if self.pending.len() > 64 * 1024 {
+                lines.push(std::mem::take(&mut self.pending));
+            }
+            lines
+        }
+
+        fn finish(&mut self) -> Option<String> {
+            if self.finished {
+                return None;
+            }
+            self.finished = true;
+            (!self.pending.is_empty()).then(|| std::mem::take(&mut self.pending))
+        }
+    }
+
+    fn classify_line(
+        line: &str,
+        pump: &Arc<ShellTask>,
+        jobs: &Arc<Mutex<std::collections::HashMap<String, Arc<TaskRecord>>>>,
+    ) {
+        let active = pump.active_command.lock().unwrap().clone();
+        if let Some(record) = active.and_then(|weak| weak.upgrade())
+            && let TaskKind::ShellCommand(command) = &record.kind
+            && let Some(code) = command.feed(line)
+        {
+            record.finish(shell_command_terminal(&record, command, code));
+            pump.clear_active(&record);
+        }
+        if let Some((task_id, reported)) = parse_shell_job(line) {
+            let pid = pump
+                .pty
+                .blocking_lock()
+                .as_ref()
+                .and_then(|pty| pty.job_pid(reported).ok());
+            if let Some(pid) = pid {
+                let jobs = jobs.lock().unwrap();
+                if let Some(record) = jobs.get(&task_id)
+                    && let TaskKind::Job(job) = &record.kind
+                    && job
+                        .shell
+                        .upgrade()
+                        .is_some_and(|shell| Arc::ptr_eq(&shell, pump))
+                {
+                    job.pid.send_replace(Some(pid));
+                    if job.stop_requested.load(Ordering::SeqCst) {
+                        let _ = terminate_job(pid);
+                        record.finish(Terminal {
+                            status: TaskStatus::Cancelled,
+                            exit_code: None,
+                            signal: None,
+                            duration_ms: record.started.elapsed().as_millis() as u64,
+                            failure: None,
+                            output: job.output_record().0,
+                            note: None,
+                        });
+                    }
+                }
+            }
+        }
+        {
+            let jobs = jobs.lock().unwrap();
+            for record in jobs.values() {
+                if record.is_terminal() {
+                    continue;
+                }
+                let TaskKind::Job(job) = &record.kind else {
+                    continue;
+                };
+                if !job
+                    .shell
+                    .upgrade()
+                    .is_some_and(|shell| Arc::ptr_eq(&shell, pump))
+                {
+                    continue;
+                }
+                if line.contains(&job.end_marker) {
+                    record.finish(job_terminal(record, job));
+                }
+            }
+        }
     }
 
     impl HostPlatform {
@@ -4114,7 +4271,7 @@ pub(crate) mod shell {
             std::thread::spawn(move || {
                 let mut bytes = [0; 4096];
                 let mut written = 0usize;
-                let mut pending = String::new();
+                let mut splitter = LineSplitter::default();
                 while let Ok(n) = reader.read(&mut bytes) {
                     if n == 0 {
                         break;
@@ -4123,70 +4280,8 @@ pub(crate) mod shell {
                         break;
                     };
                     let chunk = crate::shell_session::regularize_output(&bytes[..n]);
-                    pending.push_str(&chunk);
-                    while let Some(newline) = pending.find('\n') {
-                        let line: String = pending.drain(..=newline).collect();
-                        let active = pump.active_command.lock().unwrap().clone();
-                        if let Some(record) = active.and_then(|weak| weak.upgrade())
-                            && let TaskKind::ShellCommand(command) = &record.kind
-                            && let Some(code) = command.feed(&line)
-                        {
-                            record.finish(shell_command_terminal(&record, command, code));
-                            pump.clear_active(&record);
-                        }
-                        if let Some((task_id, reported)) = parse_shell_job(&line) {
-                            let pid = pump
-                                .pty
-                                .blocking_lock()
-                                .as_ref()
-                                .and_then(|pty| pty.job_pid(reported).ok());
-                            if let Some(pid) = pid {
-                                let jobs = jobs.lock().unwrap();
-                                if let Some(record) = jobs.get(&task_id)
-                                    && let TaskKind::Job(job) = &record.kind
-                                    && job
-                                        .shell
-                                        .upgrade()
-                                        .is_some_and(|shell| Arc::ptr_eq(&shell, &pump))
-                                {
-                                    job.pid.send_replace(Some(pid));
-                                    if job.stop_requested.load(Ordering::SeqCst) {
-                                        let _ = terminate_job(pid);
-                                        record.finish(Terminal {
-                                            status: TaskStatus::Cancelled,
-                                            exit_code: None,
-                                            signal: None,
-                                            duration_ms: record.started.elapsed().as_millis()
-                                                as u64,
-                                            failure: None,
-                                            output: job.output_record().0,
-                                            note: None,
-                                        });
-                                    }
-                                }
-                            }
-                        }
-                        {
-                            let jobs = jobs.lock().unwrap();
-                            for record in jobs.values() {
-                                if record.is_terminal() {
-                                    continue;
-                                }
-                                let TaskKind::Job(job) = &record.kind else {
-                                    continue;
-                                };
-                                if !job
-                                    .shell
-                                    .upgrade()
-                                    .is_some_and(|shell| Arc::ptr_eq(&shell, &pump))
-                                {
-                                    continue;
-                                }
-                                if line.contains(&job.end_marker) {
-                                    record.finish(job_terminal(record, job));
-                                }
-                            }
-                        }
+                    for line in splitter.push(&chunk) {
+                        classify_line(&line, &pump, &jobs);
                     }
                     let mut capture = pump.capture.lock().unwrap();
                     if shell_record.is_terminal() {
@@ -4222,6 +4317,12 @@ pub(crate) mod shell {
                         }
                     }
                     pump.event_notify.notify_waiters();
+                }
+                if let Some(pump) = pump.upgrade() {
+                    if let Some(line) = splitter.finish() {
+                        classify_line(&line, &pump, &jobs);
+                    }
+                    pump.events.lock().unwrap().finish();
                 }
                 let _ = drained.send(());
             });
@@ -4289,6 +4390,15 @@ pub(crate) mod shell {
 
         pub(crate) fn set_active_command(&self, command: Option<Arc<super::TaskRecord>>) {
             *self.active_command.lock().unwrap() = command.map(|command| Arc::downgrade(&command));
+        }
+
+        pub(crate) fn is_active(&self, record: &Arc<super::TaskRecord>) -> bool {
+            self.active_command
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|current| Arc::ptr_eq(&current, record))
         }
 
         pub(crate) fn clear_active(&self, record: &super::TaskRecord) {

@@ -833,7 +833,6 @@ impl ShellSession {
         self.start_command(&command_id, &start_marker, &end_marker, &wrapped)
             .await
             .map_err(|e| e.to_string())?;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         let cancel_token = cancel.clone();
         let cancelled: crate::host::CancelledFn = Arc::new(move || {
             let cancel = cancel_token.clone();
@@ -842,8 +841,62 @@ impl ShellSession {
                 Ok(())
             })
         });
-        loop {
-            if self.inner.lock().await.shell.is_none() {
+        match self
+            .host
+            .wait(
+                WaitRequest {
+                    task_id: command_id.clone(),
+                    timeout_ms: Some(timeout_ms),
+                },
+                cancelled,
+            )
+            .await
+        {
+            Ok(reply) if reply.status != WaitStatus::Running => {
+                if reply.status == WaitStatus::Failed
+                    && reply.exit_code.is_none()
+                    && reply.signal.is_none()
+                    && let Some(shell_id) = self.inner.lock().await.shell.clone()
+                    && let Some(record) = self.host.task(&shell_id)
+                    && let Some(terminal) = record.terminal()
+                {
+                    let mut result = ToolResult::text(shell_exit_note(&terminal));
+                    result.is_error = Some(true);
+                    let _ = self
+                        .host
+                        .settle(TaskRequest {
+                            task_id: command_id.clone(),
+                        })
+                        .await;
+                    return Ok(ran(result, command, None));
+                }
+                let text = self.command_result_text(&command_id, &reply).await;
+                let mut result = ToolResult::text(text);
+                result.is_error = (reply.exit_code != Some(0)).then_some(true);
+                let _ = self
+                    .host
+                    .settle(TaskRequest {
+                        task_id: command_id.clone(),
+                    })
+                    .await;
+                Ok(ran(result, command, reply.exit_code))
+            }
+            Ok(_) => {
+                if self.config.member {
+                    self.interrupt(&command_id)
+                        .await
+                        .map(|result| ran(result, command, None))
+                } else {
+                    self.occupy_current(command, &command_id, &output_path, context)
+                        .await
+                        .map(|result| ran(result, command, None))
+                }
+            }
+            Err(HostPlatformError::Cancelled) => self
+                .interrupt(&command_id)
+                .await
+                .map(|result| ran(result, command, None)),
+            Err(_) => {
                 let note = self
                     .inner
                     .lock()
@@ -859,68 +912,7 @@ impl ShellSession {
                         task_id: command_id.clone(),
                     })
                     .await;
-                return Ok(ran(result, command, None));
-            }
-            if tokio::time::Instant::now() >= deadline {
-                if self.config.member {
-                    return self
-                        .interrupt(&command_id)
-                        .await
-                        .map(|result| ran(result, command, None));
-                }
-                return self
-                    .occupy_current(command, &command_id, &output_path, context)
-                    .await
-                    .map(|result| ran(result, command, None));
-            }
-            let waited = self
-                .host
-                .wait(
-                    WaitRequest {
-                        task_id: command_id.clone(),
-                        timeout_ms: Some(10),
-                    },
-                    cancelled.clone(),
-                )
-                .await;
-            match waited {
-                Ok(reply) if reply.status != WaitStatus::Running => {
-                    if reply.status == WaitStatus::Failed
-                        && reply.exit_code.is_none()
-                        && reply.signal.is_none()
-                        && let Some(shell_id) = self.inner.lock().await.shell.clone()
-                        && let Some(record) = self.host.task(&shell_id)
-                        && let Some(terminal) = record.terminal()
-                    {
-                        let mut result = ToolResult::text(shell_exit_note(&terminal));
-                        result.is_error = Some(true);
-                        let _ = self
-                            .host
-                            .settle(TaskRequest {
-                                task_id: command_id.clone(),
-                            })
-                            .await;
-                        return Ok(ran(result, command, None));
-                    }
-                    let text = self.command_result_text(&command_id, &reply).await;
-                    let mut result = ToolResult::text(text);
-                    result.is_error = (reply.exit_code != Some(0)).then_some(true);
-                    let _ = self
-                        .host
-                        .settle(TaskRequest {
-                            task_id: command_id.clone(),
-                        })
-                        .await;
-                    return Ok(ran(result, command, reply.exit_code));
-                }
-                Ok(_) => {}
-                Err(HostPlatformError::Cancelled) => {
-                    return self
-                        .interrupt(&command_id)
-                        .await
-                        .map(|result| ran(result, command, None));
-                }
-                Err(_) => {}
+                Ok(ran(result, command, None))
             }
         }
     }

@@ -34,7 +34,10 @@ shell and answers `task_running` otherwise; `kill` is the explicit stop. Output 
 `output` serves a text page. Public reads are terminal records plus `output`, `tail`, `wait` and
 `retainOutput`; there is no public event cursor or shell state. The owner line queue is private to
 `ShellSession`. A shell command capture is read by its command id and records the bounded output,
-tail and task log. The command/task and shell settlement rules are in
+tail and task log. `wait`, `kill`, `output` and `tail` address shell command and job ids as well
+as exec tasks. A shell command ends from its marker; shell exit sweeps its command and job
+children. A terminal shell answers `write`/`resize` with `task_ended`, and `settle` is
+idempotent. The command/task and shell settlement rules are in
 [resource faces §3.2](../../../design/resource-faces.md#32-settlement-and-retained-task-records).
 
 ## Events and lifetime

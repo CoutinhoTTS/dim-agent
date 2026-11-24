@@ -1518,7 +1518,24 @@ async fn the_host_platform_service_serves_a_shell() {
     .await
     .unwrap();
     assert!(page["text"].as_str().unwrap().contains("hi"));
+    assert!(matches!(
+        platform
+            .write(ShellWrite {
+                task_id: "service-shell".into(),
+                data: String::new(),
+                command: None,
+                job: None,
+            })
+            .await,
+        Err(HostPlatformError::TaskEnded)
+    ));
     invoke("settle", serde_json::json!({"taskId": "service-shell"}))
+        .await
+        .unwrap();
+    platform
+        .settle(TaskRequest {
+            task_id: "service-shell".into(),
+        })
         .await
         .unwrap();
     assert!(!std::path::Path::new(&terminal.output_path).exists());
