@@ -732,6 +732,15 @@ impl ModelDriver for AimuxDriver {
                     if let Some(pending) = pending.as_mut() { pending.cancelled(); }
                     return Err(HostError::Cancelled("Model invocation cancelled".into()));
                 }
+                _ = tokio::time::sleep(stream::STREAM_IDLE_TIMEOUT) => {
+                    abort.abort();
+                    let error = stream::idle_failure(format!(
+                        "the response headers did not arrive within {} seconds",
+                        stream::STREAM_IDLE_TIMEOUT.as_secs()
+                    ));
+                    if let Some(pending) = pending.as_mut() { pending.failed(&error.to_string()); }
+                    return Err(error);
+                }
                 result = async {
                     match &recording {
                         Some(capture) => capture.scope(model.do_stream(&options)).await,

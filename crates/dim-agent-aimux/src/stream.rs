@@ -28,15 +28,16 @@ use tokio_util::sync::CancellationToken;
 
 use crate::request::ToolNames;
 
-/// How long a request waits for the next part of its stream before the
+/// How long a request waits for the reply to start or continue before the
 /// connection counts as lost.
 ///
 /// Five minutes matches the allowance other harnesses give a slow model step.
-/// It bounds only the wait between parts: a reply that keeps streaming is never
-/// cut, however long it takes, while a half-open connection fails as a network
-/// failure instead of holding the turn until an external deadline. The same
-/// failure is retried in place while the attempt committed nothing.
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// It bounds the wait for the response headers and, once they arrive, the wait
+/// between parts: a reply that keeps streaming is never cut, however long it
+/// takes, while a half-open connection fails as a network failure instead of
+/// holding the turn until an external deadline. The same failure is retried in
+/// place while the attempt committed nothing.
+pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) fn convert(
     result: StreamResult,
@@ -95,7 +96,10 @@ pub(crate) fn convert(
                         break Some(Err(HostError::Cancelled("Model request cancelled".into())));
                     }
                     _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
-                        break Some(Err(idle_failure()));
+                        break Some(Err(idle_failure(format!(
+                            "the stream delivered nothing for {} seconds",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        ))));
                     }
                     next = stream.next() => next,
                 }
@@ -543,17 +547,14 @@ fn empty_reply() -> HostError {
     )
 }
 
-/// The failure of a stream that delivered nothing for [`STREAM_IDLE_TIMEOUT`].
+/// The failure of a request that waited [`STREAM_IDLE_TIMEOUT`] without the
+/// reply starting or continuing.
 ///
 /// A connection that stays silent this long is treated as a lost transport, not
 /// as a malformed reply: the request was never answered, so the retry policy
 /// retries it like any other network failure while the attempt committed
 /// nothing, and nothing published is replayed.
-fn idle_failure() -> HostError {
-    let reason = format!(
-        "the stream delivered nothing for {} seconds",
-        STREAM_IDLE_TIMEOUT.as_secs()
-    );
+pub(crate) fn idle_failure(reason: String) -> HostError {
     HostError::Failed {
         message: ModelFailureKind::Network.line(Some(&reason)),
         budget: None,
