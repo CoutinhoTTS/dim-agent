@@ -7810,6 +7810,64 @@ fn tui_models_picker_scrolls_across_batches_and_reopens_without_a_cache() {
 }
 
 #[test]
+fn tui_models_picker_rereads_loaded_batches_after_clearing_preferences() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let accounts = wire.read("account.providers");
+        wire.reply(&accounts, json!([]));
+
+        let cursor = json!({"providerId":"test","modelId":"first"});
+        let page = |id, version| picker_page("test", "Test", json!({"catalog":{
+            "version":version,"disabledModelIds":[],"models":[{"id":id,"name":id,
+                "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}]
+        }}));
+        for (version, target) in [(7, "second"), (8, "first"), (9, "second"), (10, "")] {
+            let first = wire.read("provider.models.query");
+            assert!(first["params"]["after"].is_null());
+            let mut first_page = page("first", version);
+            first_page["next"] = cursor.clone();
+            wire.reply(&first, first_page);
+            let second = wire.read("provider.models.query");
+            assert_eq!(second["params"]["after"], cursor);
+            wire.reply(&second, page("second", version));
+            if !target.is_empty() {
+                let clear = wire.read("provider.preferences.update");
+                assert_eq!(clear["params"]["modelId"], target);
+                assert_eq!(clear["params"]["expectedVersion"], version);
+                wire.reply(&clear, json!({}));
+            }
+        }
+        wire.hold();
+    });
+    let mut terminal = Terminal::resume_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("Selected: Test / first");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Test / second");
+
+    for (arrow, target) in [
+        (b"\x1b[B", "second"),
+        (b"\x1b[A", "first"),
+        (b"\x1b[B", "second"),
+    ] {
+        terminal.raw(arrow);
+        terminal.until(&format!("Selected: Test / {target}"));
+        terminal.write(b"\x18");
+        terminal.until("Saved model preferences cleared");
+    }
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
 fn tui_models_picker_names_every_provider_with_no_selectable_model() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {

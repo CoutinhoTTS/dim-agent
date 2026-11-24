@@ -389,7 +389,7 @@ pub enum Command {
     },
     ClearModelPreferences {
         query: String,
-        after: Option<dim_agent_types::ModelId>,
+        batches: usize,
         provider_id: String,
         model_id: String,
         expected_version: u32,
@@ -1445,7 +1445,7 @@ pub enum Update {
     Models {
         query: String,
         after: Option<dim_agent_types::ModelId>,
-        result: Result<ModelList, String>,
+        result: Result<Vec<ModelList>, String>,
     },
     EffortChoices(Result<crate::configure::EffortChoices, String>),
     /// Sent only by a daemon that advertises the policy methods.

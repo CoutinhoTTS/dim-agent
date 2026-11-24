@@ -159,47 +159,35 @@ impl ModelsPanel {
         &mut self,
         query: &str,
         after: Option<ModelId>,
-        result: Result<ModelList, String>,
+        result: Result<Vec<ModelList>, String>,
     ) -> Effect {
-        if query != self.query() {
+        if query != self.query()
+            || (after.is_some()
+                && after.as_ref() != self.pages.last().and_then(|page| page.next.as_ref()))
+        {
             return Effect::None;
         }
-        let index = match after.as_ref() {
-            Some(after) => {
-                let Some(before) = self
-                    .pages
-                    .iter()
-                    .position(|page| page.next.as_ref() == Some(after))
-                else {
-                    return Effect::None;
-                };
-                before + 1
-            }
-            None => 0,
-        };
-        let page = match result {
-            Ok(page) => page,
+        let pages = match result {
+            Ok(pages) => pages,
             Err(error) => {
-                self.refill = 0;
-                if after.is_none() || self.models().is_empty() {
+                if after.is_none() || self.refill != 0 || self.models().is_empty() {
+                    self.pages.clear();
                     self.set_models(Err(error.clone()));
                 }
+                self.refill = 0;
                 self.requesting = false;
                 return Effect::Notice(error);
             }
         };
-        let empty = page.models.is_empty();
-        if let Some(previous) = self.pages.get_mut(index) {
-            let same_end = previous.next == page.next;
-            *previous = page;
-            if !same_end {
-                self.pages.truncate(index + 1);
-            }
-        } else {
-            self.pages.push(page);
+        if after.is_none() {
+            self.pages.clear();
         }
+        self.pages.extend(pages);
+        let last = self.pages.last().unwrap();
+        let empty = last.models.is_empty();
+        let next = last.next.clone();
         if self.pages.len() < self.refill
-            && let Some(next) = self.pages.last().and_then(|page| page.next.clone())
+            && let Some(next) = next
         {
             return self.request(Some(next));
         }
@@ -211,11 +199,9 @@ impl ModelsPanel {
             combined.limits.extend(page.limits.iter().cloned());
             combined.next.clone_from(&page.next);
         }
-        let next = combined.next.clone();
         self.set_models(Ok(combined));
         if let Some(next) = next
             && empty
-            && index + 1 == self.pages.len()
         {
             if self.models().is_empty() && matches!(self.view, View::Models | View::Fixed) {
                 self.list.loading();
@@ -832,32 +818,30 @@ impl ModelsPanel {
         // Clearing the saved preferences drops the row's cycled effort
         // too: the notice asks for the model to be selected again so it
         // adopts its defaults, and that only holds if the cycle is gone.
+        if self.requesting {
+            return Effect::None;
+        }
         let Some(id) = self.list.selected_id() else {
             return Effect::None;
         };
+        let Some(model) = self
+            .models()
+            .iter()
+            .find(|model| key(&model.provider_id, &model.model_id) == id)
+        else {
+            return Effect::None;
+        };
+        let effect = Effect::ClearModelPreferences {
+            query: self.query().to_owned(),
+            batches: self.pages.len().max(1),
+            provider_id: model.provider_id.clone(),
+            model_id: model.model_id.clone(),
+            expected_version: model.provider_version,
+        };
+        self.requesting = true;
         self.chosen.remove(&id);
         self.rebuild(None);
-        let after = self
-            .pages
-            .iter()
-            .position(|page| {
-                page.models
-                    .iter()
-                    .any(|m| key(&m.provider_id, &m.model_id) == id)
-            })
-            .and_then(|index| index.checked_sub(1))
-            .and_then(|index| self.pages[index].next.clone());
-        self.models()
-            .iter()
-            .find(|model| id == self::key(&model.provider_id, &model.model_id))
-            .map(|model| Effect::ClearModelPreferences {
-                query: self.list.query().to_owned(),
-                after,
-                provider_id: model.provider_id.clone(),
-                model_id: model.model_id.clone(),
-                expected_version: model.provider_version,
-            })
-            .unwrap_or(Effect::None)
+        effect
     }
 
     fn cycle(&mut self, forward: bool) -> Effect {

@@ -265,7 +265,7 @@ pub enum Effect {
     },
     ClearModelPreferences {
         query: String,
-        after: Option<dim_agent_types::ModelId>,
+        batches: usize,
         provider_id: String,
         model_id: String,
         expected_version: u32,

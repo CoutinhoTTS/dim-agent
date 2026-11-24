@@ -4699,14 +4699,14 @@ impl App {
             }
             Effect::ClearModelPreferences {
                 query,
-                after,
+                batches,
                 provider_id,
                 model_id,
                 expected_version,
             } => {
                 self.host.send(Command::ClearModelPreferences {
                     query,
-                    after,
+                    batches,
                     provider_id,
                     model_id,
                     expected_version,

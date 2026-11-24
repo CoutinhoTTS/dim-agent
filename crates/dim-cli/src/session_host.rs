@@ -1989,11 +1989,11 @@ impl Worker {
                 }
             }
             Command::ListModels => {
-                self.send_models(String::new(), None).await;
+                self.send_models(String::new(), None, 1).await;
                 self.read_model_policy(false).await;
             }
             Command::QueryModels { query, after } => {
-                self.send_models(query, after).await;
+                self.send_models(query, after, 1).await;
             }
             Command::ReadIsolation => {
                 if !self.client.supports(&["settings.read", "settings.update"]) {
@@ -2213,7 +2213,7 @@ impl Worker {
             }
             Command::ClearModelPreferences {
                 query,
-                after,
+                batches,
                 provider_id,
                 model_id,
                 expected_version,
@@ -2225,10 +2225,7 @@ impl Worker {
                     expected_version,
                 )
                 .await;
-                // The reread lands before the notice: a conflict tells the
-                // user to reread and retry, so the row a retry presses must
-                // already carry the record's current version.
-                self.send_models(query, after).await;
+                self.send_models(query, None, batches).await;
                 self.send(Update::Notice(match result {
                     Ok(()) => {
                         "Saved model preferences cleared; select the model to adopt its defaults"
@@ -3945,11 +3942,27 @@ impl Worker {
         result.map_err(|error| error.to_string())
     }
 
-    async fn send_models(&mut self, query: String, after: Option<dim_agent_types::ModelId>) {
-        let result = self
-            .models(query.clone(), after.clone())
-            .await
-            .map_err(|error| error.to_string());
+    async fn send_models(
+        &mut self,
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
+        batches: usize,
+    ) {
+        let result = async {
+            let mut pages = Vec::new();
+            let mut cursor = after.clone();
+            for _ in 0..batches {
+                let page = self.models(query.clone(), cursor).await?;
+                cursor = page.next.clone();
+                pages.push(page);
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            Ok::<_, crate::Error>(pages)
+        }
+        .await
+        .map_err(|error| error.to_string());
         self.send(Update::Models {
             query,
             after,

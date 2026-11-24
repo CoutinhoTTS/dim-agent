@@ -1364,9 +1364,11 @@ automatically while it has a continuation cursor. Cursor navigation is never
 shown as a row. Until the first selectable models arrive the picker shows
 loading; an empty result is shown only once traversal ends. Diagnostics describe
 the batches loaded so far. Typing searches on the server and starts a new list;
-closing the picker releases its results. Capability reads for the adopted model
-pass its provider and model ID. Catalog refresh is the explicit management action
-in the provider/account panel.
+closing the picker releases its results. Clearing saved preferences rereads the
+loaded batches before allowing another clear: a write changes the provider
+version shared by all its model rows. Capability reads for the adopted model pass
+its provider and model ID. Catalog refresh is the explicit management action in
+the provider/account panel.
 
 ```text
 /models    -> first selectable rows (or an empty result)
