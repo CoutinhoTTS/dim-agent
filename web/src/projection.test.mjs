@@ -225,6 +225,18 @@ test("a history read's counts cover the rows of a request that began before its 
   ])
 })
 
+test("a retry starts a request's committed counts from nothing", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "Write the file" }))
+  projection.apply(event(3, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} }))
+  // The producer restarts the request: its offsets count from the start, so a retry opens at zero.
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: "", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " and run it", textOffset: 0, thinking: "", thinkingOffset: 0 })
+
+  const answers = projection.rows.filter((row) => row.kind === "assistant").map((row) => [row.text, row.streaming])
+  assert.deepEqual(answers, [["Write the file", false], [" and run it", true]], "the new attempt's tail is not swallowed by the replaced attempt's count")
+})
+
 test("branch messages, ends and the last turn end become rows", () => {
   const projection = new Projection()
   projection.apply(event(1, {
