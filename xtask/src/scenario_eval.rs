@@ -5926,9 +5926,7 @@ async fn drive_once(
     // whose request consumed the input without it is failed before the judge,
     // so the policy comparison cannot score an answer that did not see the
     // text being evaluated (Timeline branches §12.4).
-    if driven.error.is_none()
-        && let Some(error) = switch_notes_unseen(&export, &driven.switch_notes.expected)
-    {
+    if let Some(error) = switch_note_failure(&driven, &export) {
         driven.stop = "switch_note_missing";
         driven.error = Some(error.clone());
         return Ok(Finished {
@@ -6086,12 +6084,35 @@ fn settle_failed_turn(driven: &mut Driven, failed_turn: Option<String>) {
     }
 }
 
+/// The run's first missing switch note, or `None` when the run is not scored
+/// on its notes: a run that already failed is not (Timeline branches §12.4).
+fn switch_note_failure(driven: &Driven, export: &str) -> Option<String> {
+    if driven.error.is_some() {
+        return None;
+    }
+    switch_notes_unseen(
+        export,
+        &driven.switch_notes.expected,
+        driven.stop == "turns",
+    )
+}
+
 /// Why a scored switch follow-up did not see its note, or `None` when every
-/// consumed follow-up's request carries it: the request the line began after
-/// it consumed the input, and the note's exact text (Timeline branches §12.4).
-/// An input no request consumed is not checked: no answer of that line is
-/// scored.
-fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
+/// consumed follow-up's note reached the model: the first request the line
+/// began after it consumed the input whose model call exists, and the note's
+/// exact text (Timeline branches §12.4). An input no request consumed is not
+/// checked: no answer of that line is scored. A request a steer replaced
+/// before its model call is not checked either: the note travels in the
+/// request that replaces it. A run that stopped on its turn budget
+/// (`stopped_on_turns`) ended the request before its call, so its note is not
+/// reported as unseen (issue #2140); every other request that never reached
+/// the model is, because no request of the line carried the text being
+/// evaluated.
+fn switch_notes_unseen(
+    export: &str,
+    notes: &[SwitchNote],
+    stopped_on_turns: bool,
+) -> Option<String> {
     /// One `input/message` of the export, the line it is on, and the note it
     /// carries when it is one.
     struct Message {
@@ -6102,6 +6123,7 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
     let mut consumed: Vec<(String, u64, String)> = Vec::new();
     let mut starts: Vec<(String, u64, String)> = Vec::new();
     let mut calls: BTreeMap<(String, String), Value> = BTreeMap::new();
+    let mut replaced: BTreeSet<(String, String)> = BTreeSet::new();
     for line in export.lines() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -6141,10 +6163,18 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
                     );
                 }
             }
+            (Some("step"), Some("model-output-end")) => {
+                if event["data"]["status"] == "cancelled"
+                    && event["data"]["reason"] == "replaced by steer"
+                    && let Some(request) = event["data"]["request_id"].as_str()
+                {
+                    replaced.insert((branch, request.to_owned()));
+                }
+            }
             _ => {}
         }
     }
-    for note in notes {
+    'notes: for note in notes {
         let Some(message) = messages.get(&note.input) else {
             return Some(format!(
                 "the switch input {} on line {} is not in the export",
@@ -6159,17 +6189,35 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
         else {
             continue;
         };
-        let Some((_, _, request)) = starts
+        let mut requests: Vec<&(String, u64, String)> = starts
             .iter()
             .filter(|(branch, sequence, _)| branch == &message.branch && *sequence > consumed_at)
-            .min_by_key(|(_, sequence, _)| *sequence)
-        else {
+            .collect();
+        requests.sort_by_key(|(_, sequence, _)| *sequence);
+        if requests.is_empty() {
             return Some(format!(
                 "line {} consumed the switch input {} but started no request after it",
                 note.line, note.input
             ));
-        };
-        let Some(call) = calls.get(&(message.branch.clone(), request.clone())) else {
+        }
+        // A steer can replace the request a line began before it reaches the
+        // model; the note then travels in the request that replaces it, so a
+        // replaced request is passed over (issue #2140). Any other request
+        // without a model call ended before the note reached the model.
+        let mut call = None;
+        for (branch, _, request) in &requests {
+            if let Some(found) = calls.get(&((*branch).clone(), (*request).clone())) {
+                call = Some(found);
+                break;
+            }
+            if !replaced.contains(&((*branch).clone(), (*request).clone())) {
+                break;
+            }
+        }
+        let Some(call) = call else {
+            if stopped_on_turns {
+                continue 'notes;
+            }
             return Some(format!(
                 "line {} consumed the switch input {} but its request never reached the model",
                 note.line, note.input
@@ -9784,12 +9832,211 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            switch_notes_unseen(&export(note), &notes).is_none(),
+            switch_notes_unseen(&export(note), &notes, false).is_none(),
             "the request carries the note"
         );
-        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes)
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, false)
             .expect("the request without the note is unseen");
         assert!(unseen.contains("line 2"), "{unseen}");
+    }
+
+    /// A steer can replace the request a line began after it consumed a switch
+    /// input before that request reaches the model. The replacement request in
+    /// the same turn carries the note, so the check reads the first request
+    /// after the consumption that reached the model (issue #2140).
+    #[test]
+    fn a_replaced_request_does_not_hide_the_note_its_replacement_carries() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |request: &str| {
+            [
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"request_id": "r1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "o1", "sequence": 5, "type": "step", "name": "model-output-end",
+                                 "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                          "reason": "replaced by steer"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s2", "sequence": 6, "type": "step", "name": "model-start",
+                                 "data": {"request_id": "r2"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "m2", "sequence": 7, "type": "model", "name": "call",
+                                 "data": {"request_id": "r2",
+                                          "request": {"messages": [{"role": "user", "content": request}]}}}}),
+            ]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        assert!(
+            switch_notes_unseen(&export(note), &notes, false).is_none(),
+            "the replacement request carries the note"
+        );
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, false)
+            .expect("the request without the note is still unseen");
+        assert!(unseen.contains("does not carry the note"), "{unseen}");
+    }
+
+    /// A run that closed its session before the follow-up's request reached the
+    /// model is failed on its note: no request of the line carried the text to
+    /// the model, so the probe would score an answer that did not see it
+    /// (Timeline branches §12.4). The same export with no request started after
+    /// the consumption is failed the way the check read it before #2140.
+    #[test]
+    fn a_note_whose_request_the_run_closed_before_the_model_is_unseen() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |start: bool| {
+            let mut records = vec![
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+            ];
+            if start {
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"request_id": "r1"}}}));
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "o1", "sequence": 5, "type": "step", "name": "model-output-end",
+                                 "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                          "reason": "timeline closed"}}}));
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "e1", "sequence": 6, "type": "turn", "name": "end",
+                                 "data": {"status": "cancelled", "reason": "timeline closed"}}}));
+            }
+            records
+                .iter()
+                .map(|record| serde_json::to_string(record).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let unseen = switch_notes_unseen(&export(true), &notes, false)
+            .expect("the closed request never reached the model");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+        let unseen = switch_notes_unseen(&export(false), &notes, false)
+            .expect("no request started after the consumption");
+        assert!(unseen.contains("started no request after it"), "{unseen}");
+    }
+
+    /// A run that stopped on its turn budget ended the request before its
+    /// model call, so its note is not reported as unseen; the same export with
+    /// any other stop is (issue #2140).
+    #[test]
+    fn a_turn_budget_stop_does_not_report_a_note_its_stop_ended() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = [
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                             "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                    "text": note}]}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                             "data": {}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                             "data": {"input_id": "f1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                             "data": {"request_id": "r1"}}}),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        assert!(
+            switch_notes_unseen(&export, &notes, true).is_none(),
+            "the run's turn budget ended the request before its model call"
+        );
+        let unseen = switch_notes_unseen(&export, &notes, false)
+            .expect("any other stop still reports the note");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A turn-budget stop does not hide a request that reached the model
+    /// without the note: the stop explains a request that never reached the
+    /// model, not one that did (Timeline branches §12.4).
+    #[test]
+    fn a_turn_budget_stop_still_reports_a_request_that_reached_the_model_without_the_note() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = [
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                             "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                    "text": note}]}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                             "data": {}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                             "data": {"input_id": "f1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                             "data": {"request_id": "r1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "m1", "sequence": 5, "type": "model", "name": "call",
+                             "data": {"request_id": "r1",
+                                      "request": {"messages": [{"role": "user", "content": "the follow-up was answered"}]}}}}),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![SwitchNote {
+                    line: "2".into(),
+                    input: "f1".into(),
+                    default: true,
+                    other: "main".into(),
+                }],
+            },
+            error: None,
+        };
+        let unseen = switch_note_failure(&driven, &export).expect("the note is missing");
+        assert!(unseen.contains("does not carry the note"), "{unseen}");
     }
 
     /// A switch that has started its target stays with it: a tool line opened
@@ -10317,6 +10564,44 @@ mod tests {
             workspace_files(&flooding.directory),
             workspace_files(&never_ending.directory),
             "flooding and never-ending start from one workspace"
+        );
+    }
+
+    /// The opening scenarios pre-register the probe that their runs open one
+    /// line for one job, and the compact scenario asks the user for the parser
+    /// line (Timeline branches §12.3). No model runs, so CI catches a drift in
+    /// the committed probes or steer before a manual run.
+    #[test]
+    fn the_opening_scenarios_pre_register_their_probe_and_the_compact_scenario_asks_for_one_line() {
+        let root = repository().join("xtask").join("scenario-eval");
+        let branches = read_scenarios(&root.join("timeline-branches")).unwrap();
+        let compact = read_scenarios(&root.join("timeline-branches-compact")).unwrap();
+        fn find<'a>(scenarios: &'a [Scenario], id: &str) -> &'a Scenario {
+            scenarios
+                .iter()
+                .find(|scenario| scenario.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the committed set"))
+        }
+        for id in ["long-work-and-a-flaky-test", "refactor-and-a-pasted-report"] {
+            assert!(
+                find(&branches, id).probes.iter().any(|probe| {
+                    probe.id == "line-opened-for-one-job" && probe.kind == ProbeKind::MustShow
+                }),
+                "{id} pre-registers the probe that its run opens a line for one job"
+            );
+        }
+        let identity = find(&compact, "identity-after-compaction");
+        assert_eq!(
+            identity.steers.len(),
+            1,
+            "identity-after-compaction asks the user for one line"
+        );
+        assert!(
+            identity.steers[0]
+                .text
+                .contains("Open one line for the parser/"),
+            "the steer names the parser line: {}",
+            identity.steers[0].text
         );
     }
 
