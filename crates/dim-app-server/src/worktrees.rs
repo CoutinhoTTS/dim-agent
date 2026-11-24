@@ -61,8 +61,9 @@ pub struct CreatedWorktree {
     pub base: String,
     /// The creation's registration of `prepared.directory.root`: a removal of
     /// that path is refused until this value drops, which is after the Session
-    /// row is written or after the failed creation's rollback returns.
-    creating: WorktreeCreation,
+    /// row is written or after the failed creation's rollback took the
+    /// registration over as the path's deletion registration.
+    creating: std::sync::Mutex<Option<WorktreeCreation>>,
 }
 
 /// One row of `worktree.list`: a recorded directory under the managed root,
@@ -371,7 +372,7 @@ impl ManagedWorktrees {
             let root_dir = match canonical(directory.clone()).await {
                 Ok(root_dir) => root_dir,
                 Err(error) => {
-                    self.rollback_add(&repository, &directory, &branch_name, &creating)
+                    self.rollback_add(&repository, &directory, &branch_name, Some(creating))
                         .await;
                     return Err(error);
                 }
@@ -379,7 +380,7 @@ impl ManagedWorktrees {
             let subtree = match checked_subtree(&root_dir, &relative).await {
                 Ok(subtree) => subtree,
                 Err(error) => {
-                    self.rollback_add(&repository, &root_dir, &branch_name, &creating)
+                    self.rollback_add(&repository, &root_dir, &branch_name, Some(creating))
                         .await;
                     return Err(error);
                 }
@@ -395,7 +396,7 @@ impl ManagedWorktrees {
                 },
                 branch: branch_name,
                 base,
-                creating,
+                creating: std::sync::Mutex::new(Some(creating)),
             });
         }
         Err(last.unwrap_or_else(|| WorktreeError::Invalid("no task id was free".into())))
@@ -404,18 +405,18 @@ impl ManagedWorktrees {
     /// Removes a worktree this call just added under the store's ownership
     /// exclusion, without `--force` and with a token that cannot be cancelled.
     /// The branch goes only after Git accepted the removal. A Session or
-    /// content that appeared since the checkout keeps both. Its own creation's
-    /// `registration` ends first: a removal of the path is refused while a
-    /// creation may still hand the worktree to a Session, and this rollback is
-    /// that creation's end.
+    /// content that appeared since the checkout keeps both. The creation's own
+    /// `registration`, if it has not ended yet, becomes the path's deletion
+    /// registration in the same lock hold that re-checks the removal, so no
+    /// creation registers the path in between and the rollback still deletes
+    /// what it built.
     async fn rollback_add(
         &self,
         repository: &Path,
         root: &Path,
         branch: &str,
-        registration: &WorktreeCreation,
+        registration: Option<WorktreeCreation>,
     ) {
-        registration.end();
         #[cfg(feature = "testing")]
         wait_creation_hold(&self.rollback_hold).await;
         let directory = WorktreeDirectory {
@@ -424,36 +425,41 @@ impl ManagedWorktrees {
         };
         let repository = directory.repository.clone();
         let branch = branch.to_owned();
-        let _ = self
-            .sessions
-            .remove_worktree(directory, move |root| {
-                Box::pin(async move {
-                    let text = root.to_str().ok_or_else(|| {
-                        AgentError::InvalidInput("the worktree path is not UTF-8".into())
-                    })?;
-                    let cancel = CancellationToken::new();
-                    git(
-                        &repository,
-                        &["worktree", "remove", text],
-                        &cancel,
-                        GIT_WRITE_TIMEOUT,
-                    )
-                    .await
-                    .map_err(|error| AgentError::Storage(error.message().to_owned()))?;
-                    if let Some(parent) = root.parent() {
-                        let _ = tokio::fs::remove_dir(parent).await;
-                    }
-                    let _ = git(
-                        &repository,
-                        &["branch", "-D", &branch],
-                        &cancel,
-                        GIT_WRITE_TIMEOUT,
-                    )
-                    .await;
-                    Ok(())
-                })
+        let remove = move |root: PathBuf| -> BoxFuture<'static, Result<(), AgentError>> {
+            Box::pin(async move {
+                let text = root.to_str().ok_or_else(|| {
+                    AgentError::InvalidInput("the worktree path is not UTF-8".into())
+                })?;
+                let cancel = CancellationToken::new();
+                git(
+                    &repository,
+                    &["worktree", "remove", text],
+                    &cancel,
+                    GIT_WRITE_TIMEOUT,
+                )
+                .await
+                .map_err(|error| AgentError::Storage(error.message().to_owned()))?;
+                if let Some(parent) = root.parent() {
+                    let _ = tokio::fs::remove_dir(parent).await;
+                }
+                let _ = git(
+                    &repository,
+                    &["branch", "-D", &branch],
+                    &cancel,
+                    GIT_WRITE_TIMEOUT,
+                )
+                .await;
+                Ok(())
             })
-            .await;
+        };
+        let _ = match registration {
+            Some(registration) => {
+                self.sessions
+                    .remove_created_worktree(directory, registration, remove)
+                    .await
+            }
+            None => self.sessions.remove_worktree(directory, remove).await,
+        };
     }
 
     /// Removes what a failed creation made: the worktree and the branch this
@@ -465,7 +471,7 @@ impl ManagedWorktrees {
             &created.prepared.directory.repository,
             &created.prepared.directory.root,
             &created.branch,
-            &created.creating,
+            created.take_creation(),
         )
         .await;
     }
@@ -1553,6 +1559,15 @@ impl CreatedWorktree {
             base: self.base.clone(),
             branch: self.branch.clone(),
         }
+    }
+
+    /// Takes this creation's registration, if the creation still holds it, so
+    /// its rollback can hand it over to the deletion of the path.
+    fn take_creation(&self) -> Option<WorktreeCreation> {
+        self.creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 }
 

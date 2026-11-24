@@ -154,6 +154,17 @@ impl Store {
     ) -> impl Future<Output = Result<bool>> {
         self.0.remove_worktree(directory, remove)
     }
+    /// Removes the worktree a failed creation built, taking the creation's own
+    /// registration over as the path's deletion registration. The rollback of
+    /// a managed creation is the only caller, so this stays off the face.
+    pub(crate) fn remove_created_worktree(
+        &self,
+        directory: WorktreeDirectory,
+        creation: WorktreeCreation,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
+    ) -> impl Future<Output = Result<bool>> {
+        self.0.remove_created_worktree(directory, creation, remove)
+    }
     pub fn remove_unregistered_directory(
         &self,
         path: PathBuf,

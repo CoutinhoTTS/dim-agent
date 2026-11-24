@@ -1289,8 +1289,9 @@ pub struct SessionStore {
     /// The normalized directories a worktree creation is building now. A
     /// creation registers its chosen directory under the ownership lock before
     /// it builds there and holds it until its Session row is written or its
-    /// rollback ends, so a removal of the same path meets this registration
-    /// instead of deleting a worktree that is still being created.
+    /// rollback hands the path over to a deletion, so a removal of the same
+    /// path meets this registration instead of deleting a worktree that is
+    /// still being created.
     creating: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
@@ -1318,6 +1319,11 @@ impl Drop for Deleting {
 pub(crate) struct WorktreeCreation {
     store: SessionStore,
     path: PathBuf,
+    /// Whether the rollback's removal took this registration over as the
+    /// path's deletion registration. A registration ends once, so the drop
+    /// that follows the hand-over cannot clear a registration another
+    /// creation made for the same path.
+    handed_over: bool,
 }
 
 impl std::fmt::Debug for WorktreeCreation {
@@ -1329,22 +1335,16 @@ impl std::fmt::Debug for WorktreeCreation {
     }
 }
 
-impl WorktreeCreation {
-    /// Ends this registration before the creation's rollback removes its
-    /// directory, which that removal would otherwise be refused for. Dropping
-    /// the guard afterwards changes nothing.
-    pub(crate) fn end(&self) {
+impl Drop for WorktreeCreation {
+    fn drop(&mut self) {
+        if self.handed_over {
+            return;
+        }
         self.store
             .creating
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.path);
-    }
-}
-
-impl Drop for WorktreeCreation {
-    fn drop(&mut self) {
-        self.end();
     }
 }
 
@@ -1936,6 +1936,31 @@ impl SessionStore {
         directory: WorktreeDirectory,
         remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
     ) -> Result<bool> {
+        self.remove_registered_worktree(directory, None, remove)
+            .await
+    }
+
+    /// Removes the worktree a failed creation built, as its rollback: inside
+    /// the ownership lock this removal takes the creation's own registration
+    /// over as the path's deletion registration, so neither a creation nor a
+    /// removal registers that path in between. Otherwise the same as
+    /// [`Self::remove_worktree`].
+    pub(crate) async fn remove_created_worktree(
+        &self,
+        directory: WorktreeDirectory,
+        creation: WorktreeCreation,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
+    ) -> Result<bool> {
+        self.remove_registered_worktree(directory, Some(creation), remove)
+            .await
+    }
+
+    async fn remove_registered_worktree(
+        &self,
+        directory: WorktreeDirectory,
+        creation: Option<WorktreeCreation>,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
+    ) -> Result<bool> {
         let repository = stored_worktree_path(&directory.repository)?.to_owned();
         let root = stored_worktree_path(&directory.root)?.to_owned();
         let checked = (repository.clone(), root.clone());
@@ -1969,7 +1994,10 @@ impl SessionStore {
                         "Session {session} uses this worktree"
                     )));
                 }
-                store.begin_deletion(&path).await?
+                match creation {
+                    Some(creation) => store.begin_deletion_of_creation(creation),
+                    None => store.begin_deletion(&path).await?,
+                }
             };
             remove(path).await?;
             let _ownership = store.ownership.lock().await;
@@ -2081,6 +2109,30 @@ impl SessionStore {
         })
     }
 
+    /// Registers `creation`'s path as being deleted in the same lock hold that
+    /// ends the creation's own registration. The caller holds the ownership
+    /// lock, so no creation or removal registers this path in between: it is
+    /// registered as being created until this call and as being deleted from
+    /// before the creation's registration ends until the returned guard drops.
+    fn begin_deletion_of_creation(&self, mut creation: WorktreeCreation) -> Deleting {
+        let path = creation.path.clone();
+        let mut deleting = self
+            .deleting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut creating = self
+            .creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        creation.handed_over = true;
+        creating.remove(&path);
+        deleting.insert(path.clone());
+        Deleting {
+            store: self.clone(),
+            path,
+        }
+    }
+
     /// Refuses a workspace or root that a removal is deleting now. The caller
     /// holds the ownership lock, which is the same lock a removal registers
     /// under, so a path seen as free cannot be registered before this
@@ -2103,9 +2155,9 @@ impl SessionStore {
     }
 
     /// Registers the worktree directory a creation selected, until the returned
-    /// guard drops. The caller holds the ownership lock, which is the same lock
-    /// a removal registers under, so a path seen as free cannot be registered
-    /// by a removal before this creation records what it does with it. A path a
+    /// guard drops. This call takes the ownership lock, the same lock a removal
+    /// registers under, so a path seen as free cannot be registered by a
+    /// removal before this creation records what it does with it. A path a
     /// removal is deleting, or one another creation registered, is refused.
     pub(crate) async fn begin_worktree_creation(&self, path: &Path) -> Result<WorktreeCreation> {
         let path = normalized(path).await;
@@ -2125,6 +2177,7 @@ impl SessionStore {
         Ok(WorktreeCreation {
             store: self.clone(),
             path,
+            handed_over: false,
         })
     }
 
