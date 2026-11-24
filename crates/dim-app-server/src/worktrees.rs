@@ -1200,9 +1200,10 @@ async fn check_unregistered_tree(entry: &Path) -> Result<(), WorktreeError> {
 }
 
 /// A task directory whose checks passed. `force` removes everything; otherwise
-/// only the plain empty subdirectories the check recorded are removed, each
-/// without recursion, so content that appears after the check fails the
-/// removal with `worktree_in_use` instead of being deleted.
+/// only the plain empty subdirectories the check recorded are removed, each by
+/// name from an open directory handle, so content that appears after the check
+/// fails the removal with `worktree_in_use` instead of being deleted and a task
+/// directory or child swapped for a symlink cannot redirect the removal.
 async fn remove_checked_entry(
     entry: &Path,
     empty_children: &[PathBuf],
@@ -1213,15 +1214,104 @@ async fn remove_checked_entry(
             .await
             .map_err(|error| WorktreeError::Store(error.to_string()));
     }
-    for child in empty_children {
-        remove_empty_dir(child).await?;
-    }
-    remove_empty_dir(entry).await
+    let entry = entry.to_path_buf();
+    let children = empty_children.to_vec();
+    tokio::task::spawn_blocking(move || remove_empty_directories(&entry, &children))
+        .await
+        .map_err(|error| WorktreeError::Store(format!("the removal task failed: {error}")))?
 }
 
-/// Remove one directory only while it is still empty.
-async fn remove_empty_dir(path: &Path) -> Result<(), WorktreeError> {
-    match tokio::fs::remove_dir(path).await {
+/// Removes the recorded empty children and then the task directory, each by
+/// name from an open directory handle. A name this removes is never resolved
+/// through a symlink, so replacing the task directory or one of its children
+/// with a symlink after the check refuses the removal instead of deleting a
+/// same-named directory outside the managed root.
+#[cfg(unix)]
+fn remove_empty_directories(entry: &Path, empty_children: &[PathBuf]) -> Result<(), WorktreeError> {
+    let directory = open_plain_directory(entry)?;
+    for child in empty_children {
+        let name = child.file_name().ok_or_else(|| {
+            WorktreeError::InUse(format!("{} is not a directory entry", child.display()))
+        })?;
+        remove_entry(&directory, name, child)?;
+    }
+    let parent = entry
+        .parent()
+        .ok_or_else(|| WorktreeError::InUse(format!("{} has no parent", entry.display())))?;
+    let parent = open_plain_directory(parent)?;
+    let name = entry.file_name().ok_or_else(|| {
+        WorktreeError::InUse(format!("{} is not a directory entry", entry.display()))
+    })?;
+    remove_entry(&parent, name, entry)
+}
+
+/// Opens `path` as a directory without following a symlink at it.
+#[cfg(unix)]
+fn open_plain_directory(path: &Path) -> Result<std::fs::File, WorktreeError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP | libc::ENOTDIR) => {
+                WorktreeError::InUse(format!("{} is not a plain directory", path.display()))
+            }
+            _ => WorktreeError::Store(format!("{}: {error}", path.display())),
+        })
+}
+
+/// Removes the directory `name` in `directory`, only while it is empty.
+#[cfg(unix)]
+fn remove_entry(directory: &std::fs::File, name: &OsStr, path: &Path) -> Result<(), WorktreeError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| WorktreeError::InUse(format!("{} is not a directory name", path.display())))?;
+    // SAFETY: `directory` is an open handle for the call and `name` is a live
+    // NUL-terminated string.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    Err(match error.raw_os_error() {
+        Some(libc::ENOTEMPTY | libc::EEXIST) => WorktreeError::InUse(format!(
+            "{} is not empty; --force removes it",
+            path.display()
+        )),
+        Some(libc::ENOTDIR | libc::ELOOP) => {
+            WorktreeError::InUse(format!("{} is not a plain directory", path.display()))
+        }
+        _ => WorktreeError::Store(format!("{}: {error}", path.display())),
+    })
+}
+
+/// Removes the recorded empty children and then the task directory after
+/// proving each is still a plain directory. Removing a directory here resolves
+/// a reparse point in a path component between that proof and the call; the
+/// handle-relative removal that closes the window is Unix-only.
+#[cfg(not(unix))]
+fn remove_empty_directories(entry: &Path, empty_children: &[PathBuf]) -> Result<(), WorktreeError> {
+    for child in empty_children {
+        remove_plain_directory(child)?;
+    }
+    remove_plain_directory(entry)
+}
+
+/// Remove one directory only while it is still a plain, empty directory.
+#[cfg(not(unix))]
+fn remove_plain_directory(path: &Path) -> Result<(), WorktreeError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return Err(WorktreeError::InUse(format!(
+                "{} is not a plain directory",
+                path.display()
+            )));
+        }
+        Err(error) => return Err(WorktreeError::Store(format!("{}: {error}", path.display()))),
+    }
+    match std::fs::remove_dir(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
             Err(WorktreeError::InUse(format!(
@@ -1229,7 +1319,7 @@ async fn remove_empty_dir(path: &Path) -> Result<(), WorktreeError> {
                 path.display()
             )))
         }
-        Err(error) => Err(WorktreeError::Store(error.to_string())),
+        Err(error) => Err(WorktreeError::Store(format!("{}: {error}", path.display()))),
     }
 }
 
@@ -1585,6 +1675,54 @@ mod tests {
             "keep"
         );
         std::fs::remove_dir_all(&entry).unwrap();
+    }
+
+    /// A task directory swapped for a symlink after the check must not
+    /// redirect the recorded empty child removal outside the managed root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_swapped_task_directory_does_not_redirect_the_removal() {
+        let base = scratch("swapped-entry");
+        let entry = base.join("aaaaaa");
+        let victim = base.join("victim");
+        std::fs::create_dir_all(entry.join("repo")).unwrap();
+        std::fs::create_dir_all(victim.join("repo")).unwrap();
+        let children = vec![entry.join("repo")];
+        std::fs::rename(&entry, base.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&victim, &entry).unwrap();
+        let error = remove_checked_entry(&entry, &children, false)
+            .await
+            .expect_err("a redirected task directory must refuse the removal");
+        assert!(
+            matches!(&error, WorktreeError::InUse(message) if message.contains("not a plain directory")),
+            "{error:?}"
+        );
+        assert!(victim.join("repo").is_dir());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A child swapped for a symlink after the check is not followed: the
+    /// directory it names is left alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_swapped_child_does_not_redirect_the_removal() {
+        let base = scratch("swapped-child");
+        let entry = base.join("aaaaaa");
+        let victim = base.join("victim");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::create_dir_all(victim.join("repo")).unwrap();
+        let children = vec![entry.join("repo")];
+        std::os::unix::fs::symlink(victim.join("repo"), entry.join("repo")).unwrap();
+        let error = remove_checked_entry(&entry, &children, false)
+            .await
+            .expect_err("a redirected child must refuse the removal");
+        assert!(
+            matches!(&error, WorktreeError::InUse(message) if message.contains("not a plain directory")),
+            "{error:?}"
+        );
+        assert!(victim.join("repo").is_dir());
+        assert!(entry.is_dir());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     /// Content that appears in a subdirectory the check recorded as empty must
