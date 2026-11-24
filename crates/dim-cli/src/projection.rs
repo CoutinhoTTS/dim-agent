@@ -4917,4 +4917,119 @@ mod tests {
             "the tool use drops the replaced row: {rows:?}"
         );
     }
+
+    /// The empty progress frame between two attempts can be coalesced away,
+    /// so the terminal fact carries the retry boundary: a retry that stops
+    /// without output takes the replaced attempt's thought row with it.
+    #[test]
+    fn a_retry_terminal_takes_the_replaced_thought_without_an_empty_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        let end = model_end(
+            2,
+            failure_data(serde_json::json!({
+                "failure": {
+                    "kind": "server_error",
+                    "cause": [],
+                    "attempts": 2,
+                    "waitedMs": 0,
+                    "retried": true,
+                },
+            })),
+        );
+        let decoded = serde_json::from_value::<dim_agent_types::AgentEvent>(end.clone());
+        assert!(
+            decoded.is_ok(),
+            "the terminal fact carries its retry boundary: {}",
+            serde_json::to_string(&end).unwrap()
+        );
+        apply(&mut projection, &[end]);
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert!(
+            !row.text.starts_with("The response above is incomplete."),
+            "nothing showed above the failure: {}",
+            row.text
+        );
+    }
+
+    /// The final attempt showed a thought of its own: its row stays and the
+    /// failure still says the response is incomplete.
+    #[test]
+    fn a_retry_terminal_keeps_the_final_attempts_own_thought() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        projection.progress(&part_progress("final thought", "second", 2000));
+        let end = model_end(
+            2,
+            failure_data(serde_json::json!({
+                "failure": {
+                    "kind": "server_error",
+                    "cause": [],
+                    "attempts": 2,
+                    "waitedMs": 0,
+                    "retried": true,
+                    "thinkingPartId": "second",
+                },
+            })),
+        );
+        let decoded = serde_json::from_value::<dim_agent_types::AgentEvent>(end.clone());
+        assert!(
+            decoded.is_ok(),
+            "the terminal fact names the final attempt's block: {}",
+            serde_json::to_string(&end).unwrap()
+        );
+        apply(&mut projection, &[end]);
+        let rows = projection.snapshot().rows;
+        let thought = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Thinking)
+            .expect("the final attempt keeps its thought");
+        assert!(!thought.streaming);
+        assert_eq!(thought.text, "", "only progress showed it");
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert!(
+            row.text.starts_with("The response above is incomplete."),
+            "the final attempt showed a response above the failure: {}",
+            row.text
+        );
+    }
+
+    /// A retry reopened the request and a steer replaced it before any output:
+    /// the row it left belongs to the replaced attempt and goes with it.
+    #[test]
+    fn a_retry_terminal_takes_the_replaced_thought_when_a_steer_cancels_it() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        apply(
+            &mut projection,
+            &[model_end(
+                2,
+                serde_json::json!({
+                    "turn_id": "t1",
+                    "request_id": "r1",
+                    "status": "cancelled",
+                    "reason": "replaced by steer",
+                }),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+    }
 }
