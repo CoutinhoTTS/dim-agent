@@ -82,7 +82,7 @@ turn-scope stop/interrupt、执行失败或取消使正在运行的 Goal 停止�
 
 ### 4.1 Interrupt committed before the continuation (at most one extra turn)
 
-决定只使用已消费事实，写入前重查同一轮次和执行。中断与已经提交的 continuation 交错时，不抹去已提交事实；后续暂停阻止新续行。已经交接的工作允许按原交接规则完成结算，不为了保证零额外调用而改变 InputQueue/Loop。
+决定只使用已消费事实，写入前重查同一轮次和执行；续行只在决定时的已提交头部仍是当前头部时写入，头部变了就重新决定。中断与已经提交的 continuation 交错时，不抹去已提交事实；后续暂停阻止新续行。已经交接的工作允许按原交接规则完成结算，不为了保证零额外调用而改变 InputQueue/Loop。
 
 ### 4.2 Reload
 
@@ -134,7 +134,7 @@ guide 和 active 文本不能把历史 active 解释为当前实例的运行授�
 | §4.3、§4.4 | 无 before I/O；核心不解释 Goal。 |
 | §4.5 | 业务状态和必要输入同批提交，Dispatcher 按序消费，任务写前重查。 |
 | §4.6 | 模型内容只经采用输入，不注入内存状态。 |
-| §4.7、§4.8 | 已声明的现有服务，无核心机制新增。 |
+| §4.7、§4.8 | 已声明的现有服务；唯一的核心机制新增是条件输入提交（§9）。 |
 | §4.9 | 业务状态及实际驱动输入持久化，执行进度不落盘。 |
 | ADR 002 D1 | Session 注册工具/方法；目标、执行和任务归 branch。 |
 | ADR 002 D2 | 不增加接线模块或全局隐式资源。 |
@@ -144,7 +144,7 @@ guide 和 active 文本不能把历史 active 解释为当前实例的运行授�
 
 ## 9. Requirements raised to mechanism owners
 
-无。Goal branch 使用已有 append_batch、Dispatcher、生命周期及属性查询。完整业务事件是扩展数据，不新增核心事件类型、查询字段或 native 格式版本。
+一个条件输入提交：输入入口接收作出决定时的已提交头部，在提交锁内核对，头部变了就不写入并答复调用方（#1989）。Goal 的续行是它的第一个消费者（§4.1、A.4 C4/C5）；状态记录、evaluate-again 和结论报告仍走原入口。其余使用已有的 append_batch、Dispatcher、生命周期及属性查询；完整业务事件是扩展数据，不新增核心事件类型、查询字段或 native 格式版本。
 
 ## 10. Implementation
 

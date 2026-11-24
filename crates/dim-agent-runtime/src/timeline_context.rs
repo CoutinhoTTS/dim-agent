@@ -364,6 +364,27 @@ impl TimelineContext {
     pub(crate) async fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
         self.input_commit(data).await.map(|(event, _)| event)
     }
+    /// The checks every externally committed input passes before it reaches
+    /// the Timeline: the Dispatcher and the Session generation are healthy,
+    /// and the input carries well-formed blocks.
+    fn check_input(&self, data: &InputMessageData) -> Result<()> {
+        if let Some(error) = self.dispatcher.failure() {
+            return Err(error);
+        }
+        if self.close.started() {
+            return Err(AgentError::Closed(self.id().into()));
+        }
+        data.validate()
+            .map_err(|reason| AgentError::InvalidInput(reason.into()))
+    }
+    /// The admission every input append runs under the Timeline's commit
+    /// lock: a branch that has ended refuses new input.
+    fn admit_input(&self) -> Result<()> {
+        if self.ended() {
+            return Err(AgentError::BranchEnded(self.id.clone()));
+        }
+        Ok(())
+    }
     /// [`Self::input`], also saying whether this call wrote the input. The
     /// answer comes from the append that decides the duplicate under the
     /// commit lock, so of two concurrent duplicates exactly one is
@@ -372,28 +393,43 @@ impl TimelineContext {
         &self,
         data: InputMessageData,
     ) -> Result<(Arc<AgentEvent>, InputCommit)> {
-        if let Some(error) = self.dispatcher.failure() {
-            return Err(error);
-        }
-        if self.close.started() {
-            return Err(AgentError::Closed(self.id().into()));
-        }
-        data.validate()
-            .map_err(|reason| AgentError::InvalidInput(reason.into()))?;
+        self.check_input(&data)?;
         let result = self
             .timeline
-            .input_checked(data, || {
-                if self.ended() {
-                    return Err(AgentError::BranchEnded(self.id.clone()));
-                }
-                Ok(())
-            })
+            .input_checked(data, None, || self.admit_input())
             .await?;
         match result {
             crate::core::Appended::Written(event) => Ok((event, InputCommit::Written)),
             crate::core::Appended::Existing(sequence) => {
                 Ok((self.committed_input(sequence).await?, InputCommit::Existing))
             }
+            crate::core::Appended::Moved => Err(AgentError::fault(
+                "timeline.input",
+                "an unconditional input moved",
+            )),
+        }
+    }
+    /// [`Self::input`] only while the branch's last assigned sequence is still
+    /// `head`. `None` means a fact committed behind `head`: nothing was
+    /// written, no sequence was assigned and the caller decides again, even
+    /// for a submission id already committed; otherwise it answers as
+    /// [`Self::input`] does.
+    pub(crate) async fn input_if_head(
+        &self,
+        data: InputMessageData,
+        head: u64,
+    ) -> Result<Option<Arc<AgentEvent>>> {
+        self.check_input(&data)?;
+        let result = self
+            .timeline
+            .input_checked(data, Some(head), || self.admit_input())
+            .await?;
+        match result {
+            crate::core::Appended::Written(event) => Ok(Some(event)),
+            crate::core::Appended::Existing(sequence) => {
+                Ok(Some(self.committed_input(sequence).await?))
+            }
+            crate::core::Appended::Moved => Ok(None),
         }
     }
     /// Validates a batch of input from outside the branch and appends it as

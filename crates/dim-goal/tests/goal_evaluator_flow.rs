@@ -124,6 +124,17 @@ async fn wait_evaluated(env: &Env, branch: &str, evaluation: u64) -> Block {
     .expect("an evaluated continuation")
 }
 
+/// The evaluated continuations of `evaluation` on `main`, as markers with
+/// their sequences.
+async fn evaluated_writes(env: &Env, evaluation: u64) -> Vec<String> {
+    writes_with(env, "main", &format!(r#"evaluation="{evaluation}""#))
+        .await
+        .into_iter()
+        .filter(|block| block.marker.contains(r#"kind="continuation""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect()
+}
+
 /// The pending inputs of `branch`, as string slices for a turn.
 async fn pending_refs(env: &Env, branch: &str) -> Vec<String> {
     env.pending_inputs(branch).await
@@ -915,6 +926,347 @@ async fn pursuit_2_a_continue_conclusion_reads_the_latest_committed_cutoff() {
         env.pending_inputs("main").await.contains(&queued.id),
         "the Queue drives the next turn instead of the evaluated continuation"
     );
+    env.close().await;
+}
+
+/// A Queue that commits inside the evaluated continuation's submission lookup,
+/// then is consumed by the next turn while `turn_end` still names the judged
+/// end: the recheck sees the started turn and the append refuses the head that
+/// moved behind it (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_consumed_queue_that_started_a_turn_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let (entered, release) = env.gated().hold_query("input/message");
+    let conclusion = texts::conclusion(
+        "main",
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    env.write_message(
+        "main",
+        vec![raw(&conclusion, None, false)],
+        InputMode::Append,
+    );
+    tokio::time::timeout(Duration::from_secs(15), entered)
+        .await
+        .expect("the evaluated continuation's submission lookup starts")
+        .expect("the held lookup is the continuation's");
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    env.consume("main", &queued.id);
+    release.send(()).expect("the lookup answers");
+    let writes = env.settled("main").await;
+    let stale: Vec<String> = writes
+        .iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"evaluation="{evaluation}""#))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened a new turn inside the lookup window, yet it wrote {stale:?}",
+        queued.sequence
+    );
+    env.close().await;
+}
+
+/// A Queue whose turn starts and is consumed before the `continue`
+/// conclusion takes its first capture, while the conclusion waits to read its
+/// settings: the decision is bound to the judged turn, so the newer turn
+/// decides and the conclusion writes no evaluated continuation (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_turn_already_open_before_the_conclusion_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let mut continued = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Continue,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    let held = tokio::time::timeout(Duration::from_secs(15), continued.arrived())
+        .await
+        .expect("the conclusion task reaches its settings read");
+    assert_eq!(
+        held, conclusion,
+        "the held step follows the conclusion at {conclusion}"
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    let consumed = env.consume("main", &queued.id);
+    env.dispatched("main", consumed.sequence).await;
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        conclusion,
+        Some(conclusion),
+    );
+    continued.release();
+    done.arrived().await;
+    let stale = evaluated_writes(&env, evaluation).await;
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened a turn before its first capture, but it wrote {stale:?}",
+        queued.sequence
+    );
+    done.release();
+    env.close().await;
+}
+
+/// A Queue whose turn starts, is consumed and ends before the `continue`
+/// conclusion takes its first capture, while the conclusion waits to read its
+/// settings: the conclusion names a turn end that is no longer the branch's
+/// latest, so it decides nothing and the newer turn end decides (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_turn_that_ended_before_the_conclusion_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let mut continued = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Continue,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    let held = tokio::time::timeout(Duration::from_secs(15), continued.arrived())
+        .await
+        .expect("the conclusion task reaches its settings read");
+    assert_eq!(
+        held, conclusion,
+        "the held step follows the conclusion at {conclusion}"
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    env.consume("main", &queued.id);
+    let mut turn_end = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let ended = env.end_turn("main", "next", "completed");
+    env.dispatched("main", ended.sequence).await;
+    assert!(
+        ended.sequence > evaluation,
+        "the newer turn end at {} follows the judged end at {evaluation}",
+        ended.sequence
+    );
+    let held_end = tokio::time::timeout(Duration::from_secs(15), turn_end.arrived())
+        .await
+        .expect("the newer turn end reaches its decision");
+    assert_eq!(
+        held_end, ended.sequence,
+        "the held decision follows the turn end at {}",
+        ended.sequence
+    );
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        conclusion,
+        Some(conclusion),
+    );
+    continued.release();
+    done.arrived().await;
+    let stale = evaluated_writes(&env, evaluation).await;
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened and ended a turn before its first capture, but it wrote {stale:?}",
+        queued.sequence
+    );
+    done.release();
+    turn_end.release();
+    let regular = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let writes = env.writes("main").await;
+            if let Some(block) = writes.iter().find(|block| {
+                block.marker.contains(r#"kind="continuation""#)
+                    && block
+                        .marker
+                        .contains(&format!(r#"after="{}""#, ended.sequence))
+            }) {
+                return block.sequence;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the newer turn end decides its own continuation");
+    env.dispatched("main", regular).await;
+    env.close().await;
+}
+
+/// A turn interrupt that commits after the evaluated continuation took its
+/// decision, before its append: the append is refused against the moved head,
+/// and the retry must not continue a goal the interrupt paused (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_an_interrupt_in_the_evaluated_write_window_holds_the_continuation() {
+    let env = Env::start().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let mut write = dim_goal::testing::hold_write(env.session_id(), "main");
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    assert_eq!(
+        write.arrived().await,
+        evaluation,
+        "the held write belongs to the decision for the evaluated turn end"
+    );
+    let interrupt = env.interrupt("main");
+    env.dispatched("main", interrupt.sequence).await;
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        conclusion,
+        Some(conclusion),
+    );
+    write.release();
+    done.arrived().await;
+    let stale = evaluated_writes(&env, evaluation).await;
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the interrupt at {}, but it wrote {stale:?}",
+        interrupt.sequence
+    );
+    done.release();
+    env.close().await;
+}
+
+/// A Queue that the turn end saw pending is withdrawn before the turn-end
+/// decision: the end belongs to the evaluator-first decision again, not to an
+/// ordinary continuation (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_1_a_withdrawn_queue_returns_the_turn_end_to_the_evaluator() {
+    let env = Env::start_gated().await;
+    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
+        .await
+        .expect("set writes");
+    let set = env.wait_for("main", r#"op="set""#).await;
+    env.turn("main", &[&set]);
+    let continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    env.turn_start("main", "work");
+    env.consume("main", &continuation.id);
+    env.tool(
+        "main",
+        json!({"status": "completed", "summary": "all tests pass"}),
+    )
+    .await;
+
+    let mut decision = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let ended = env.end_turn("main", "work", "completed");
+    env.dispatched("main", ended.sequence).await;
+    assert_eq!(
+        decision.arrived().await,
+        ended.sequence,
+        "the held decision follows the turn end at {}",
+        ended.sequence
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    let mut cutoff = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Cutoff,
+        queued.sequence,
+        Some(queued.sequence),
+    );
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        ended.sequence,
+        Some(ended.sequence),
+    );
+    decision.release();
+    assert_eq!(
+        cutoff.arrived().await,
+        queued.sequence,
+        "the turn-end decision reaches the Queue's cutoff with the Queue still pending"
+    );
+    env.delete_id("main", &queued.id);
+    let deleted = env.timeline("main").committed();
+    env.dispatched("main", deleted).await;
+    cutoff.release();
+    done.arrived().await;
+    let creates = env.creates("main").await;
+    assert_eq!(
+        creates.len(),
+        1,
+        "the withdrawn Queue at {} returns the turn end to the evaluator-first decision: {creates:#?}",
+        queued.sequence
+    );
+    let stale = env
+        .writes("main")
+        .await
+        .into_iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"after="{}""#, ended.sequence))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "the withdrawn Queue at {} leaves the turn end to the evaluator, but an ordinary continuation was written: {stale:?}",
+        queued.sequence
+    );
+    done.release();
     env.close().await;
 }
 

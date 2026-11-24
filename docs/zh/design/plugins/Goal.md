@@ -209,7 +209,7 @@ sequenceDiagram
   Note over TL: 模型最后看到暂停，该轮结束时 C1 为假
 ```
 
-按序号决定：决策和任务的复核只使用了直到 `N` 的已消费事件，因此续跑成立，之后的暂停记录结束目标。这多出的一轮是可接受的（决定 E18）；Goal 不撤回其续跑。
+按序号决定：决策和任务的复核只使用了直到 `N` 的已消费事件，续行只在 `N` 仍是已提交头部时写入，否则重新决定，因此续跑成立，之后的暂停记录结束目标。这多出的一轮是可接受的（决定 E18）；Goal 不撤回其续跑。
 
 ### 4.2 重载
 
@@ -278,11 +278,11 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 | §4.1 改别的模块拥有的状态时写指令事件 | 每次变更都是 Goal 自己消费的输入；Goal 从不删除或应用输入，它依据 InputQueue 的 `input/deleted`，不读 `input/withdraw`。 |
 | §4.2 交接后不能撤回 | Goal 从不撤回自己的续跑；中断后才被应用的续跑多跑一轮，之后的暂停块结束目标。 |
 | §4.3 只用 before 回调在写入前干预 | 不适用：Goal 不注册 before 回调，其工具和方法也不加入口检查（它们只写不判断）。 |
-| §4.4 核心机制不带业务含义 | Goal 不要求 Timeline、Dispatcher、InputQueue 或 Loop 改动；其标记是一个普通 key 下的普通 raw 块，触发器不带 key。 |
-| §4.5 批次 | 折叠结果随每条事件推进；对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 的决定在 Goal 消费它们时只依据已消费状态做出，写入前的复核也只用已消费状态。 |
+| §4.4 核心机制不带业务含义 | 除条件输入提交（§9）外，Goal 不要求 Timeline、Dispatcher、InputQueue 或 Loop 改动；其标记是一个普通 key 下的普通 raw 块，触发器不带 key。 |
+| §4.5 批次 | 折叠结果随每条事件推进；对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 的决定在 Goal 消费它们时只依据已消费状态做出，写入前的复核也只用已消费状态。写入时还核对决定时的已提交头部。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 目标块与续跑只在被采用后进入模型；被删除的输入从不进入，并从折叠中移除。 |
 | §4.7 插件之间只通过公开事件和服务交互 | Goal 只读公开的 `branch/start`、`input/*`、`turn/*` 与 `stop/interrupt` 契约，并经 `Branch::input` 写入。 |
-| §4.8 向机制所有者提通用需求 | 无：Goal 使用的运行时服务已按名导出（C5，#4）。 |
+| §4.8 向机制所有者提通用需求 | 无：Goal 使用的运行时服务已按名导出（C5，#4）；条件输入提交见 §9。 |
 | §4.9 只有后续决定要用的事实进入 Timeline | 每条变更输入既是模型上下文，也是折叠的输入；Goal 自己的写入驱动轮次、结束续跑或陈述状态；折叠结果就是最新的存活记录，也就是压缩重放的内容（A16）；折叠结果、在途任务和诊断不进入 Timeline。 |
 | §1 Capability 与 App Server 边界 | 两个部分都是各自包中的 Capability；Rpc 只分派 `sessionMethods`。 |
 | ADR 002 D1 作用域跟随状态所有者 | 工具与方法是 Session 服务；目标、其折叠结果与决策是分支状态。 |
@@ -293,7 +293,7 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 
 ## 9. 向机制所有者提出的需求
 
-输入入口每次调用只提交一条输入，变更触发器与其记录因此无法共享一次提交。需求——一个原子多输入提交：批次整体校验、只准入一次，按给定顺序返回已提交事件，对已提交的 id 幂等重放——由输入入口的多输入提交满足：`TreeCommands::inputs`、`Session::inputs` 与 `Branch::inputs`，契约见 [interrupt §2](../../../architecture/rust-agent/interrupt.md#2-事件契约)。Goal 的变更批次是它的第一个消费者（#1195，[#1215](https://github.com/arcships/dim/pull/1215)）。之前的需求"运行时服务按名字暴露给非 Rust 部分"（#4）已由 C5 交付（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）。
+输入入口每次调用只提交一条输入，变更触发器与其记录因此无法共享一次提交。需求——一个原子多输入提交：批次整体校验、只准入一次，按给定顺序返回已提交事件，对已提交的 id 幂等重放——由输入入口的多输入提交满足：`TreeCommands::inputs`、`Session::inputs` 与 `Branch::inputs`，契约见 [interrupt §2](../../../architecture/rust-agent/interrupt.md#2-事件契约)。Goal 的变更批次是它的第一个消费者（#1195，[#1215](https://github.com/arcships/dim/pull/1215)）。之前的需求"运行时服务按名字暴露给非 Rust 部分"（#4）已由 C5 交付（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）。另一个需求——条件输入提交：输入入口接收作出决定时的已提交头部，在提交锁内核对，头部变了就不写入并答复调用方；Goal 的续行是它的第一个消费者（#1989）。
 
 ## 10. 实现
 

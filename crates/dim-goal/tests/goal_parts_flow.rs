@@ -649,3 +649,92 @@ async fn set_reopens_the_goal_and_the_count_restarts() {
     );
     env.close().await;
 }
+
+/// A Queue that commits while the continuation's submission lookup runs
+/// leaves the decision's head behind it: the append refuses the stale
+/// continuation, and the Queue's own turn decides (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queue_committed_during_the_submission_lookup_holds_the_continuation() {
+    let env = Env::start_gated().await;
+    env.set_limit(5);
+    let set = env.set("make the tests pass").await;
+    let _set_end = env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    let (entered, release) = env.gated().hold_query("input/message");
+    let second_end = env.tool_turn("main", &[&first]);
+    tokio::time::timeout(std::time::Duration::from_secs(15), entered)
+        .await
+        .expect("the continuation's submission lookup starts")
+        .expect("the held lookup is the continuation's");
+    let queued = env
+        .session
+        .submit("keep going".to_owned(), InputMode::Queue, "main")
+        .await
+        .expect("the operator input commits");
+    assert!(
+        queued.sequence > second_end.sequence,
+        "the Queue at {} commits after the turn end at {}",
+        queued.sequence,
+        second_end.sequence
+    );
+
+    release.send(()).expect("the lookup answers");
+    env.dispatched("main", queued.sequence).await;
+    let writes = env.settled("main").await;
+    let stale: Vec<String> = writes
+        .iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"after="{}""#, second_end.sequence))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the turn end at {} writes no continuation after the Queue at {} commits inside the lookup window, yet it wrote {stale:?}",
+        second_end.sequence,
+        queued.sequence
+    );
+    assert!(
+        env.pending_inputs("main").await.contains(&queued.id),
+        "the Queue drives the next turn"
+    );
+    env.close().await;
+}
+
+/// Control for the case above: the same Queue, committed before the turn end
+/// decides, holds the continuation. Only the commit point differs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queue_committed_before_the_decision_holds_the_continuation() {
+    let env = Env::start_gated().await;
+    env.set_limit(5);
+    let set = env.set("make the tests pass").await;
+    let _set_end = env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    let queued = env
+        .session
+        .submit("keep going".to_owned(), InputMode::Queue, "main")
+        .await
+        .expect("the operator input commits");
+    env.dispatched("main", queued.sequence).await;
+    let second_end = env.tool_turn("main", &[&first]);
+    let writes = env.settled("main").await;
+    assert!(
+        !writes.iter().any(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"after="{}""#, second_end.sequence))
+        }),
+        "a Queue the fold holds before the decision writes no continuation: {writes:#?}"
+    );
+    env.close().await;
+}

@@ -108,12 +108,15 @@ pub(crate) struct SubmissionInput {
     pub id: String,
     pub sequence: u64,
 }
-/// What [`Timeline::input`] did.
+/// What [`Timeline::input_checked`] did.
 pub(crate) enum Appended {
     Written(Arc<AgentEvent>),
     /// An input with the same submission id is already committed at this
     /// sequence; nothing was written.
     Existing(u64),
+    /// A fact committed behind the caller's expected head; nothing was
+    /// written and no sequence was assigned.
+    Moved,
 }
 pub(crate) enum AppendedBatch {
     Written(Vec<Arc<AgentEvent>>),
@@ -281,9 +284,13 @@ impl Timeline {
     }
     /// Appends an input once per submission id, including accepted inputs
     /// awaiting publication. Concurrent attempts return the same input.
+    /// With `expected`, the append also requires the last assigned sequence
+    /// to still be that value: a fact behind it commits nothing and answers
+    /// [`Appended::Moved`].
     pub(crate) async fn input_checked(
         &self,
         data: InputMessageData,
+        expected: Option<u64>,
         admit: impl FnOnce() -> Result<()>,
     ) -> Result<Appended> {
         loop {
@@ -294,6 +301,9 @@ impl Timeline {
             };
             let _append = AppendGuard::enter()?;
             let _commit = self.0.commit.lock().unwrap();
+            if expected.is_some_and(|expected| self.committed() != expected) {
+                return Ok(Appended::Moved);
+            }
             if data.submission_id.is_some() && self.committed() != through {
                 continue;
             }
