@@ -1571,7 +1571,10 @@ async fn a_retry_that_emits_no_output_names_its_boundary_on_the_terminal() {
             thinking_events(&chain_events(&session, "main", ..).await.unwrap()).is_empty(),
             "the shown thought was never committed"
         );
-        send(&cut, vec![Err(failure(ModelFailureKind::ServerError, None))]);
+        send(
+            &cut,
+            vec![Err(failure(ModelFailureKind::ServerError, None))],
+        );
         drop(cut);
         let ended = tokio::select! {
             _ = model.second_attempt.notified() => None,
@@ -1582,7 +1585,10 @@ async fn a_retry_that_emits_no_output_names_its_boundary_on_the_terminal() {
             "a cut before any committed output retries in place; the turn ended with {ended:?}"
         );
         model.release.notify_one();
-        send(&retry, vec![Err(failure(ModelFailureKind::InvalidRequest, None))]);
+        send(
+            &retry,
+            vec![Err(failure(ModelFailureKind::InvalidRequest, None))],
+        );
         drop(retry);
         session.idle("main").await.unwrap();
 
@@ -1638,7 +1644,10 @@ async fn a_retry_that_shows_its_own_thought_names_that_block_on_the_terminal() {
             .wait_for(|progress| progress.thinking == "first attempt")
             .await
             .unwrap();
-        send(&cut, vec![Err(failure(ModelFailureKind::ServerError, None))]);
+        send(
+            &cut,
+            vec![Err(failure(ModelFailureKind::ServerError, None))],
+        );
         drop(cut);
         let ended = tokio::select! {
             _ = model.second_attempt.notified() => None,
@@ -1670,7 +1679,10 @@ async fn a_retry_that_shows_its_own_thought_names_that_block_on_the_terminal() {
                 .clone()
                 .expect("the shown thought names its block")
         };
-        send(&retry, vec![Err(failure(ModelFailureKind::InvalidRequest, None))]);
+        send(
+            &retry,
+            vec![Err(failure(ModelFailureKind::InvalidRequest, None))],
+        );
         drop(retry);
         session.idle("main").await.unwrap();
 

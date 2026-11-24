@@ -139,7 +139,11 @@ impl ModelProvider {
                     error: message,
                     budget,
                     presentation: presentation.map(|value| *value),
-                    failure: Some(Box::new(model_failure(*facts, retried, shown_thinking_part_id))),
+                    failure: Some(Box::new(model_failure(
+                        *facts,
+                        retried,
+                        shown_thinking_part_id,
+                    ))),
                 }
             }
         };
