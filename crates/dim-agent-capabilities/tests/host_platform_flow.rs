@@ -1239,6 +1239,7 @@ fn public_output_has_no_event_fields() {
     let reply = serde_json::to_value(OutputPageReply {
         text: "done".into(),
         bytes: 4,
+        total_bytes: 4,
         next_cursor: None,
         truncated: false,
         retained_from: 0,
@@ -1538,7 +1539,7 @@ async fn the_host_platform_service_serves_a_shell() {
         })
         .await
         .unwrap();
-    assert!(!std::path::Path::new(&terminal.output_path).exists());
+    assert!(std::path::Path::new(&terminal.output_path).exists());
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -2116,6 +2117,9 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
         .await
         .unwrap();
     assert!(inside.text.is_empty(), "{:?}", inside.text);
+    assert_eq!(inside.bytes, 0);
+    assert_eq!(inside.total_bytes, capped_end.output_bytes);
+    assert!(inside.next_cursor.is_none());
     let whole = platform
         .output(OutputRequest {
             task_id: "capped-command".into(),
@@ -2125,9 +2129,44 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
         .await
         .unwrap();
     assert_eq!(whole.text, "é");
+    assert_eq!(whole.total_bytes, capped_end.output_bytes);
+    assert_eq!(whole.bytes, 2);
     platform
         .settle(TaskRequest {
             task_id: "capped-command".into(),
+        })
+        .await
+        .unwrap();
+    let long = "printf '%s%s\\n' '__DIM_START_aaaabbbb_' 'ccccdddd__'; sleep 30\n";
+    platform
+        .write(ShellWrite {
+            task_id: "capture-shell".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(long.as_bytes()),
+            command: Some(ShellCommandStart {
+                task_id: "long-command".into(),
+                start_marker: "__DIM_START_aaaabbbb_ccccdddd__".into(),
+                end_marker: "__DIM_END_eeeefaff_00001111__".into(),
+            }),
+            job: None,
+        })
+        .await
+        .unwrap();
+    let second = platform
+        .write(ShellWrite {
+            task_id: "capture-shell".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(b"echo second\n"),
+            command: Some(ShellCommandStart {
+                task_id: "second-command".into(),
+                start_marker: "__DIM_START_11112222_33334444__".into(),
+                end_marker: "__DIM_END_55556666_77778888__".into(),
+            }),
+            job: None,
+        })
+        .await;
+    assert!(matches!(second, Err(HostPlatformError::TaskRunning)));
+    let retained = platform
+        .retain_output(TaskRequest {
+            task_id: "capture-shell".into(),
         })
         .await
         .unwrap();
@@ -2143,5 +2182,6 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
         })
         .await
         .unwrap();
+    assert!(std::path::Path::new(&retained.output_path).exists());
     std::fs::remove_dir_all(dir).unwrap();
 }

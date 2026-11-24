@@ -2142,6 +2142,7 @@ impl CommandTask {
         use tokio::io::AsyncSeekExt;
         let capture = self.output.capture.lock().await;
         let truncated = capture.truncated;
+        let total_bytes = capture.output_bytes;
         let budget = limit + PAGE_CHAR_TRAILING_BYTES;
         if capture.file.is_none() {
             let bytes = capture.inline.as_bytes();
@@ -2149,7 +2150,9 @@ impl CommandTask {
                 .unwrap_or(usize::MAX)
                 .min(bytes.len());
             let end = start.saturating_add(budget).min(bytes.len());
-            return decode_page(&bytes[start..end], cursor, limit, truncated);
+            let mut page = decode_page(&bytes[start..end], cursor, limit, truncated)?;
+            page.total_bytes = total_bytes;
+            return Ok(page);
         }
         drop(capture);
         let mut file = tokio::fs::File::open(&self.path)
@@ -2163,7 +2166,9 @@ impl CommandTask {
             .read_to_end(&mut bytes)
             .await
             .map_err(|_| OutputPageError::Unavailable)?;
-        decode_page(&bytes, cursor, limit, truncated)
+        let mut page = decode_page(&bytes, cursor, limit, truncated)?;
+        page.total_bytes = total_bytes;
+        Ok(page)
     }
 }
 
@@ -2454,7 +2459,7 @@ pub(super) async fn execute(
             task_id: host_task_id,
             command: input.command.clone(),
             cwd: request.cwd.clone(),
-            workspace: request.cwd.clone(),
+            workspace: tools.cwd.to_string_lossy().into_owned(),
             roots: roots
                 .iter()
                 .map(|root| root.to_string_lossy().into_owned())

@@ -140,7 +140,10 @@ impl TaskRecord {
         let end = start
             .saturating_add(limit + PAGE_CHAR_TRAILING_BYTES)
             .min(bytes.len());
-        decode_page(&bytes[start..end], cursor, limit, terminal.output.truncated).ok()
+        let mut page =
+            decode_page(&bytes[start..end], cursor, limit, terminal.output.truncated).ok()?;
+        page.total_bytes = terminal.output.bytes;
+        Some(page)
     }
 
     pub(crate) async fn output_snapshot(&self) -> OutputRecord {

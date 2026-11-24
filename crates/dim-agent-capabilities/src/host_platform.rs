@@ -430,6 +430,7 @@ impl std::fmt::Display for TaskFailure {
 pub struct OutputPageReply {
     pub text: String,
     pub bytes: u64,
+    pub total_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<u64>,
     pub truncated: bool,
@@ -1175,7 +1176,7 @@ impl HostPlatform {
         let cwd = PathBuf::from(&request.cwd);
         let workspace = PathBuf::from(&request.workspace);
         let output_dir = PathBuf::from(&request.output_dir);
-        let mut roots: Vec<PathBuf> = request.roots.iter().map(PathBuf::from).collect();
+        let roots: Vec<PathBuf> = request.roots.iter().map(PathBuf::from).collect();
         if !cwd.is_absolute()
             || !workspace.is_absolute()
             || !output_dir.is_absolute()
@@ -1192,9 +1193,6 @@ impl HostPlatform {
             return Err(HostPlatformError::Invalid(
                 "working directory not found".into(),
             ));
-        }
-        if !roots.contains(&workspace) {
-            roots.push(workspace);
         }
         let (spec, _) = self
             .build_process_spec(&request.command, &cwd)
@@ -1376,7 +1374,7 @@ impl HostPlatform {
         let cwd = PathBuf::from(&request.cwd);
         let workspace = PathBuf::from(&request.workspace);
         let output_dir = PathBuf::from(&request.output_dir);
-        let mut roots: Vec<PathBuf> = request.roots.iter().map(PathBuf::from).collect();
+        let roots: Vec<PathBuf> = request.roots.iter().map(PathBuf::from).collect();
         if !cwd.is_absolute()
             || !workspace.is_absolute()
             || !output_dir.is_absolute()
@@ -1393,9 +1391,6 @@ impl HostPlatform {
             return Err(HostPlatformError::Invalid(
                 "working directory not found".into(),
             ));
-        }
-        if !roots.contains(&workspace) {
-            roots.push(workspace);
         }
         tokio::fs::create_dir_all(&output_dir)
             .await
@@ -1436,6 +1431,9 @@ impl HostPlatform {
                 "a shell write cannot start a command and a job together".into(),
             ));
         }
+        let bytes = STANDARD
+            .decode(request.data)
+            .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
         let command = if let Some(start) = request.command {
             if !valid_shell_marker(&start.start_marker) || !valid_shell_marker(&start.end_marker) {
                 return Err(HostPlatformError::Invalid(
@@ -1470,8 +1468,11 @@ impl HostPlatform {
                     return Err(HostPlatformError::TaskExists);
                 }
                 commands.insert(start.task_id.clone(), record.clone());
+                if !shell.reserve_active_command(&record) {
+                    commands.remove(&start.task_id);
+                    return Err(HostPlatformError::TaskRunning);
+                }
             }
-            shell.set_active_command(Some(record.clone()));
             shell.add_child(&record);
             Some((start.task_id, record))
         } else {
@@ -1534,9 +1535,6 @@ impl HostPlatform {
         } else {
             None
         };
-        let bytes = STANDARD
-            .decode(request.data)
-            .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
         if let Err(error) = shell.write(&bytes).await {
             if let Some((id, _)) = &command {
                 self.commands.lock().unwrap().remove(id);
@@ -1606,6 +1604,7 @@ impl HostPlatform {
             return Ok(OutputPageReply {
                 text: page.text,
                 bytes: page.bytes,
+                total_bytes: page.total_bytes.max(page.bytes),
                 next_cursor: page.next_cursor,
                 truncated: page.truncated,
                 retained_from: 0,
@@ -1626,6 +1625,7 @@ impl HostPlatform {
             return Ok(OutputPageReply {
                 text: page.text,
                 bytes: page.bytes,
+                total_bytes: page.total_bytes.max(page.bytes),
                 next_cursor: page.next_cursor,
                 truncated: page.truncated,
                 retained_from: 0,
@@ -1640,6 +1640,7 @@ impl HostPlatform {
         Ok(OutputPageReply {
             text: page.text,
             bytes: page.bytes,
+            total_bytes: page.total_bytes.max(page.bytes),
             next_cursor: page.next_cursor,
             truncated: page.truncated,
             retained_from: 0,
@@ -3671,12 +3672,13 @@ impl HostPlatform {
                 Err(_) => return Err(OutputPageError::Unavailable),
             }
         }
-        let truncated = file
-            .metadata()
-            .await
-            .map(|m| m.len() >= OUTPUT_FILE_BYTE_LIMIT)
-            .unwrap_or(false);
-        decode_page(&buffer[..read], cursor, limit, truncated)
+        let metadata = file.metadata().await.ok();
+        let truncated = metadata
+            .as_ref()
+            .is_some_and(|m| m.len() >= OUTPUT_FILE_BYTE_LIMIT);
+        let mut page = decode_page(&buffer[..read], cursor, limit, truncated)?;
+        page.total_bytes = metadata.map(|m| m.len()).unwrap_or(0);
+        Ok(page)
     }
 }
 
@@ -3753,12 +3755,6 @@ pub(crate) mod shell {
         kill: CancellationToken,
         path: PathBuf,
         edition: super::ShellEdition,
-    }
-
-    impl Drop for ShellTask {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.path);
-        }
     }
 
     pub(crate) struct ShellCommand {
@@ -3873,8 +3869,9 @@ pub(crate) mod shell {
             let page = decode_page(&bytes[start..end], cursor, limit, state.omitted > 0)?;
             Ok(super::OutputPageReply {
                 text: page.text,
-                bytes: state.bytes,
-                next_cursor: Some(start as u64 + page.bytes),
+                bytes: page.bytes,
+                total_bytes: state.bytes,
+                next_cursor: page.next_cursor,
                 truncated: state.omitted > 0,
                 retained_from: 0,
                 reset: None,
@@ -4437,6 +4434,19 @@ pub(crate) mod shell {
             )
         }
 
+        pub(crate) fn reserve_active_command(&self, command: &Arc<super::TaskRecord>) -> bool {
+            let mut active = self.active_command.lock().unwrap();
+            if active
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|current| !current.is_terminal())
+            {
+                return false;
+            }
+            *active = Some(Arc::downgrade(command));
+            true
+        }
+
         pub(crate) fn set_active_command(&self, command: Option<Arc<super::TaskRecord>>) {
             *self.active_command.lock().unwrap() = command.map(|command| Arc::downgrade(&command));
         }
@@ -4596,6 +4606,7 @@ pub(crate) mod shell {
                 return Ok(super::OutputPageReply {
                     text: String::new(),
                     bytes: 0,
+                    total_bytes: capture.total,
                     next_cursor: None,
                     truncated: true,
                     retained_from: first,
@@ -4613,6 +4624,7 @@ pub(crate) mod shell {
             Ok(super::OutputPageReply {
                 text: page.text,
                 bytes: page.bytes,
+                total_bytes: capture.total,
                 next_cursor: page.next_cursor,
                 truncated: page.truncated,
                 retained_from: first,

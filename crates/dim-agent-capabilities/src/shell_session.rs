@@ -464,9 +464,35 @@ impl ShellSession {
             })
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
-        self.register_output(std::path::Path::new(&reply.output_path))
+        let task_id = reply.task_id.clone();
+        if let Err(error) = self
+            .register_output(std::path::Path::new(&reply.output_path))
             .await
-            .map_err(HostError::failed)?;
+        {
+            let _ = self
+                .host
+                .kill(TaskRequest {
+                    task_id: task_id.clone(),
+                })
+                .await;
+            let _ = self
+                .host
+                .wait(
+                    WaitRequest {
+                        task_id: task_id.clone(),
+                        timeout_ms: None,
+                    },
+                    never_cancelled(),
+                )
+                .await;
+            let _ = self
+                .host
+                .settle(TaskRequest {
+                    task_id: task_id.clone(),
+                })
+                .await;
+            return Err(HostError::failed(error));
+        }
         let dialect = match runtime.edition {
             ShellEdition::Pwsh | ShellEdition::WindowsPowershell => ShellDialect::Pwsh,
             _ => ShellDialect::Posix,
@@ -1488,13 +1514,28 @@ impl ShellSession {
             inner.background.remove(task_id)
         };
         if let Some(task) = task {
-            let terminated = self
+            let killed = self
                 .host
                 .kill(TaskRequest {
                     task_id: task.task_id.clone(),
                 })
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()));
+                .await;
+            if matches!(killed, Err(HostPlatformError::TaskRunning)) {
+                let task_id = task.task_id.clone();
+                self.inner
+                    .lock()
+                    .await
+                    .background
+                    .insert(task_id.clone(), task);
+                return Ok(ExecEndedData {
+                    task_id,
+                    status: ExecStatus::Cancelled,
+                    result: ToolResult::text(
+                        "Background command stop requested; it will end after it starts.",
+                    ),
+                });
+            }
+            let terminated = killed.map_err(|error| std::io::Error::other(error.to_string()));
             let _ = self
                 .host
                 .settle(TaskRequest {
@@ -1753,6 +1794,17 @@ fn wait_code(reply: &WaitReply) -> String {
         .map(|code| code.to_string())
         .or_else(|| reply.signal.clone())
         .unwrap_or_else(|| "failed".to_owned())
+}
+
+fn never_cancelled() -> crate::host::CancelledFn {
+    let never = CancellationToken::new();
+    std::sync::Arc::new(move || {
+        let never = never.clone();
+        Box::pin(async move {
+            never.cancelled().await;
+            Ok(())
+        })
+    })
 }
 
 fn exit_line(code: &str) -> String {

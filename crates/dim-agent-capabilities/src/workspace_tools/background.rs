@@ -120,6 +120,8 @@ pub struct OutputPage {
     /// `cursor + bytes`. `text` can be shorter because sanitization drops
     /// control characters.
     pub bytes: u64,
+    /// The total bytes in the source capture or file.
+    pub total_bytes: u64,
     /// Present when the read found at least `limit` bytes, so the client may
     /// continue immediately; always `cursor + bytes`. Absent on a shorter or
     /// empty page, which does not mean the file ended: the client advances by
@@ -180,6 +182,7 @@ pub(crate) fn decode_page(
     Ok(OutputPage {
         text,
         bytes: end as u64,
+        total_bytes: 0,
         next_cursor,
         truncated,
     })
@@ -594,6 +597,7 @@ impl BackgroundExec {
                     return Ok(OutputPage {
                         text: page.text,
                         bytes: page.bytes,
+                        total_bytes: page.total_bytes.max(page.bytes),
                         next_cursor: page.next_cursor,
                         truncated: page.truncated,
                     });
