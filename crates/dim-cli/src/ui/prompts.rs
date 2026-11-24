@@ -103,6 +103,7 @@ pub enum Effect {
     None,
     /// The prompt wants to leave without answering anything.
     Close,
+    UseSkill(String),
     Fork,
     Exit,
     /// `Update now`: leave the interface and update.

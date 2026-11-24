@@ -2701,15 +2701,7 @@ impl App {
                 self.composer.set_skills(
                     entries
                         .into_iter()
-                        .filter(|entry| {
-                            // A Skill the operator may not invoke is not
-                            // offered, and neither is a name the
-                            // `/skill:<name>` token cannot carry (Skills §9).
-                            entry.enabled
-                                && entry.shadowed_by.is_none()
-                                && entry.user_invocable
-                                && dim_agent_types::skill_token::names_a_token(&entry.name)
-                        })
+                        .filter(|entry| entry.can_use())
                         .map(|entry| crate::ui::composer::palette::Skill {
                             name: entry.name,
                             description: entry.description,
@@ -4301,6 +4293,10 @@ impl App {
     fn apply_effect(&mut self, effect: Effect) -> Outcome {
         match effect {
             Effect::None => {}
+            Effect::UseSkill(name) => {
+                self.prompt = None;
+                self.composer.prepend_skill(&format!("/skill:{name}"));
+            }
             Effect::Close => {
                 if matches!(self.prompt, Some(Prompt::Sessions(_))) {
                     self.host.send(Command::CloseSessions);
@@ -16557,7 +16553,7 @@ mod tests {
             },
         ]));
         typed(&mut app, "/comm");
-        assert!(matches!(app.handle(key(KeyCode::Enter)), Outcome::Continue));
+        assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
         assert_eq!(app.composer.text(), "/skill:commit ");
         assert!(
             sent.borrow().is_empty(),
@@ -16657,10 +16653,8 @@ mod tests {
         );
     }
 
-    /// Both TUI modes draw a filled Skill by its name, and the message the same
-    /// draft sends still carries the canonical `/skill:<name>` token.
     #[test]
-    fn a_filled_skill_draws_its_name_in_both_modes() {
+    fn a_filled_skill_draws_its_reference_in_both_modes() {
         use crate::management::skills::Entry;
         for fullscreen in [false, true] {
             let mut drawn = Drawn::new((100, 30), None, false);
@@ -16683,12 +16677,8 @@ mod tests {
 
             let screen = drawn.emu.rows_text().join("\n");
             assert!(
-                screen.contains("/status"),
-                "the input draws the Skill's name in fullscreen={fullscreen}: {screen}"
-            );
-            assert!(
-                !screen.contains("skill:status"),
-                "the parser's namespace is not drawn in fullscreen={fullscreen}: {screen}"
+                screen.contains("/skill:status"),
+                "the input draws the reference in fullscreen={fullscreen}: {screen}"
             );
             assert_eq!(
                 drawn.app.composer.text(),

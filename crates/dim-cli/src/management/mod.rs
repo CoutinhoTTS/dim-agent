@@ -257,6 +257,7 @@ pub(crate) fn unsupported(area: &Area, kind: Option<ActionKind>) -> String {
 /// the read's check has already passed. Skills' reload has its own method.
 fn kind_sentence(kind: ActionKind) -> &'static str {
     match kind {
+        ActionKind::UseSkill => unreachable!("drafting a Skill makes no management request"),
         ActionKind::Toggle => "This daemon lists {area} but cannot toggle them.",
         ActionKind::Edit => "This daemon lists {area} but cannot edit them.",
         ActionKind::Reload => "This daemon lists {area} but cannot reload them.",

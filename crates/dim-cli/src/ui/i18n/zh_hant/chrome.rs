@@ -1,5 +1,6 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Tab complete · Enter send" => "Tab 補全 · Enter 傳送",
         "Queue" => "佇列",
         "Export session" => "匯出工作階段",
         "Enter steer · x delete held · Esc close" => "Enter steer · x 刪除暫存訊息 · Esc 關閉",

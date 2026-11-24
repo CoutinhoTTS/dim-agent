@@ -729,9 +729,10 @@ pub enum EntryState {
     ReadOnly,
 }
 
-/// An action kind the client offers. Every kind has one key in every panel.
+/// An action kind the client offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionKind {
+    UseSkill,
     Toggle,
     Edit,
     Reload,
