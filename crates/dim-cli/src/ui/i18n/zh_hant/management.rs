@@ -33,6 +33,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "使用者文件關閉了所有鉤子（disableAllHooks）。"
         }
         "Enter toggle" => "Enter 切換",
+        "Tab toggle" => "Tab 切換",
+        "Enter use" => "Enter 使用",
         "Ctrl+E edit" => "Ctrl+E 編輯",
         "Ctrl+N add" => "Ctrl+N 新增",
         "Ctrl+R reload" => "Ctrl+R 重新載入",

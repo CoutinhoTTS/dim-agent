@@ -33,6 +33,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "사용자 문서가 모든 훅을 끕니다(disableAllHooks)."
         }
         "Enter toggle" => "Enter 전환",
+        "Tab toggle" => "Tab 전환",
+        "Enter use" => "Enter 사용",
         "Ctrl+E edit" => "Ctrl+E 편집",
         "Ctrl+N add" => "Ctrl+N 추가",
         "Ctrl+R reload" => "Ctrl+R 다시 로드",

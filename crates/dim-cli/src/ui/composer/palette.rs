@@ -17,6 +17,10 @@ pub const PAGE_SIZE: usize = 6;
 pub const CHROME_ROWS: usize = 4;
 const HINT: &str = "type filter · enter select · esc clear/close";
 
+fn skill_hint(state: &PaletteState, rows: &[Row]) -> Option<&'static str> {
+    matches!(rows.get(state.current(rows))?.kind, Kind::Skill).then(|| t("Tab / Enter complete"))
+}
+
 /// Listed commands matching `query`, best first: the exact name, a name
 /// prefix, an alias prefix, a name part prefix (`reload-skills` for `sk`),
 /// a name containing it, a description word starting with it, then three
@@ -202,7 +206,7 @@ pub fn rows_for(query: &str, context: Context, skills: &[Skill]) -> Vec<Row> {
     let skill_rows: Vec<Row> = matched_skills
         .iter()
         .map(|skill| Row {
-            kind: Kind::Skill(skill.name.clone()),
+            kind: Kind::Skill,
             label: skill.label(),
             detail: skill.detail(),
             key: None,
@@ -299,7 +303,7 @@ impl PaletteState {
 
 /// The panel title: "Suggestions" only when both kinds are listed.
 fn panel_title(rows: &[Row]) -> &'static str {
-    let skills = rows.iter().any(|r| matches!(r.kind, Kind::Skill(_)));
+    let skills = rows.iter().any(|r| matches!(r.kind, Kind::Skill));
     let commands = rows.iter().any(|r| matches!(r.kind, Kind::Command(_)));
     match (skills, commands) {
         (true, true) => "Suggestions",
@@ -328,7 +332,12 @@ pub fn render(
     }
     content.extend(list(state, rows, inner, page, p));
     if footer_visible {
-        content.push(footer(&position(state, rows), t(HINT), inner, p));
+        content.push(footer(
+            &position(state, rows),
+            skill_hint(state, rows).unwrap_or(t(HINT)),
+            inner,
+            p,
+        ));
     }
     bordered(&content, width, Some(page + chrome), &p.border, None, None)
 }
@@ -381,7 +390,14 @@ pub fn render_overlay(
         },
     );
     Overlay {
-        rows: bordered(&content, width, None, &p.border, Some(&title), None),
+        rows: bordered(
+            &content,
+            width,
+            None,
+            &p.border,
+            Some(&title),
+            skill_hint(state, rows),
+        ),
         cursor: Some((
             if query_in_border {
                 0
@@ -839,10 +855,10 @@ mod tests {
         let rows = rows_for("timeline", SCROLLBACK, &skills);
         assert_eq!(rows.len(), 3);
         assert!(matches!(rows[0].kind, Kind::Command(_)));
-        assert!(rows[1..].iter().all(|r| matches!(r.kind, Kind::Skill(_))));
+        assert!(rows[1..].iter().all(|r| matches!(r.kind, Kind::Skill)));
         assert_eq!(panel_title(&rows), "Suggestions");
         let only = rows_for("claude", SCROLLBACK, &skills);
-        assert!(only.iter().all(|r| matches!(r.kind, Kind::Skill(_))));
+        assert!(only.iter().all(|r| matches!(r.kind, Kind::Skill)));
         assert_eq!(panel_title(&only), "Skills");
         let lead = rows_for("codex", SCROLLBACK, &skills);
         assert_eq!(lead.len(), 1);
@@ -867,8 +883,7 @@ mod tests {
                 rows[0].label
             );
             assert!(
-                rows.iter()
-                    .any(|row| matches!(&row.kind, Kind::Skill(name) if name == "new")),
+                rows.iter().any(|row| row.label == "/skill:new"),
                 "{query}: the skill is offered too"
             );
         }

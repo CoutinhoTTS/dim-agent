@@ -2273,8 +2273,7 @@ pub(crate) fn raw_input_line(blocks: &[dim_agent_types::InputBlock]) -> Option<S
     })
 }
 
-/// The one line that names a loaded Skill, in the interface language: the
-/// message's presentation and the plain log both say it.
+/// The plain log's localized record of a loaded Skill.
 pub(crate) fn skill_loaded_label(name: &str) -> String {
     crate::ui::i18n::tf("Skill loaded: {name}", &[("name", name)])
 }
@@ -2359,37 +2358,21 @@ fn loaded_skill(index: usize, block: &ContentBlock) -> Option<String> {
     })
 }
 
-/// The presentation of an operator message: its words with an image marker per
-/// image and one line per loaded Skill; `None` when its words are the message.
+/// The operator's words interleaved with image markers; `None` for text alone.
 fn user_display(blocks: &[ContentBlock]) -> Option<String> {
     let mut images = 0;
-    let mut skills = Vec::new();
     let mut lines = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
         match block {
-            ContentBlock::Text { text } => match loaded_skill(index, block) {
-                Some(name) => skills.push(name),
-                None if markup::runtime_context(index, text) => {}
-                None => lines.push(text.clone()),
-            },
+            ContentBlock::Text { text } if markup::runtime_context(index, text) => {}
+            ContentBlock::Text { text } => lines.push(text.clone()),
             ContentBlock::Image { .. } => {
                 images += 1;
                 lines.push(crate::images::marker(images, ""));
             }
         }
     }
-    if images == 0 && skills.is_empty() {
-        return None;
-    }
-    let mut display = lines.join("\n");
-    for skill in skills {
-        let line = skill_loaded_label(&skill);
-        if !display.is_empty() {
-            display.push('\n');
-        }
-        display.push_str(&line);
-    }
-    Some(display)
+    (images != 0).then(|| lines.join("\n"))
 }
 
 /// A provider presentation's line, as today: its own words, prefixed.
@@ -3531,11 +3514,8 @@ mod tests {
         crate::ui::i18n::set(previous);
     }
 
-    /// A loaded Skill block (Skills §9) is one line under the operator's
-    /// message, never its instructions; the editable text stays the
-    /// operator's own words.
     #[test]
-    fn a_loaded_skill_shows_as_one_line_under_the_message() {
+    fn loaded_skills_do_not_change_the_visible_message() {
         let previous = crate::ui::i18n::active();
         crate::ui::i18n::set(crate::ui::i18n::Locale::En);
         let image = serde_json::json!({
@@ -3608,25 +3588,16 @@ mod tests {
         );
         let rows = projection.snapshot().rows;
         assert_eq!(rows[0].text, "one $skill: checkin please");
-        assert_eq!(
-            rows[0].display.as_deref(),
-            Some("one $skill: checkin please\nSkill loaded: checkin")
-        );
+        assert_eq!(rows[0].display, None);
         assert_eq!(rows[1].text, "two");
-        assert_eq!(
-            rows[1].display.as_deref(),
-            Some("two\nSkill loaded: alpha\nSkill loaded: beta")
-        );
+        assert_eq!(rows[1].display, None);
         assert_eq!(
             rows[2].text, "<dim-skill name=\"mine\">as typed",
             "a first block is the operator's own text, shown as typed"
         );
         assert_eq!(rows[2].display, None);
         assert_eq!(rows[3].text, "look");
-        assert_eq!(
-            rows[3].display.as_deref(),
-            Some("look\n[Image #1]\nSkill loaded: checkin")
-        );
+        assert_eq!(rows[3].display.as_deref(), Some("look\n[Image #1]"));
         crate::ui::i18n::set(previous);
     }
 

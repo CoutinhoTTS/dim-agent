@@ -35,6 +35,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "ユーザードキュメントがすべてのフックを無効にしています（disableAllHooks）。"
         }
         "Enter toggle" => "Enter 切り替え",
+        "Tab toggle" => "Tab 切り替え",
+        "Enter use" => "Enter 使用",
         "Ctrl+E edit" => "Ctrl+E 編集",
         "Ctrl+N add" => "Ctrl+N 作成",
         "Ctrl+R reload" => "Ctrl+R 再読み込み",

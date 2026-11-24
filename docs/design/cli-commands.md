@@ -196,14 +196,11 @@ outside the menu.
 A Skill row reads `/skill:<name>` with its description. Only an enabled, unshadowed,
 user-invocable Skill whose name the token can carry is listed: a name holding a character outside
 `A-Z`, `a-z`, `0-9`, `_`, `-` and `.`, or ending with a full stop, cannot be referenced, so it is
-not listed either. The list
-follows the
-Session's catalog: the client rereads it on attach, on a Session switch, after
+not listed either. Home reads the launch workspace's catalog on startup and on return
+from a Session. In a Session the client reads that Session's workspace on attach, on a switch, after
 `/reload-skills`, and after a change in `/skills`. A daemon that does not serve
-`skills.catalog` shows the commands alone, without an error. Choosing a Skill row,
-with `Enter` or `Tab`, fills `/skill:<name> ` and never sends; the token is part
-of the message text and the draft draws it as one highlighted unit, reading the
-Skill's name. Typing `/skill:`
+`skills.catalog` shows the commands alone, without an error. On a selected Skill,
+Tab and Enter both insert `/skill:<name> ` for further editing without sending. Typing `/skill:`
 narrows the menu to Skills: the query after the `skill:` namespace matches Skill
 names only. A draft that begins with `/skill:` is sent as a message and never run as
 a command, and a token may stand mid-sentence as long as it starts the message or
@@ -212,27 +209,17 @@ starts with the query and no command name or alias does, so a name shared with a
 command keeps both rows, the command first. `/` is the only trigger: `@` stays the
 file picker.
 
-The draft draws a reference the palette filled by the Skill's name, so a chosen
-`status` reads `/status` and not the parser's `/skill:status`:
+The draft and the transcript highlight the same `/skill:<name>` reference. Subsequent text is plain:
 
 ```text
-› /stat|                 › /status |
-  ├─ /skill:status       ├─ a filled /skill:status
-  └─ /skill:staged       └─ drawn by its name, sent as /skill:status
+› /stat|       Tab → › /skill:status |       type → › /skill:status check the build|
+  /skill:status
+  /skill:staged
 ```
 
-Only a filled reference is a named unit; text the operator typed is drawn as typed,
-so no character of the operator's own words ever reads as something else and a
-half-typed or malformed reference stays visible. The draft's text is still
-`/skill:<name> `: that is what it submits and what the input history keeps. Native
-terminal selection copies the displayed `/status`; pasting that label does not
-restore a Skill reference. Choose the Skill again or paste its canonical token.
-The cursor steps over the reference as one unit, a delete takes it whole, and the
-input wraps by the name it draws. A Skill
-whose name is also a command the input dispatches keeps the canonical token
-(`/skill:models`, not `/models`), because the plain name would read as that command
-while the draft is still a message. The menu's rows read `/skill:<name>` in both
-modes: a row states the token it fills; the transcript keeps the submitted token.
+The cursor and delete treat a completed reference as one unit. Terminal selection copies
+the same text that is submitted and kept in history. A successful Skill load adds no text
+to the TUI message; submission errors are reported normally.
 
 The menu fits the available terminal columns and rows in both modes. Command
 names take priority over descriptions and shortcut labels. A shortcut that
@@ -1110,6 +1097,15 @@ no write action, and its detail says why. What the owner could not use is listed
 as its issues. An entry may carry the operation's input document when the run kind takes one: Ctrl+T
 opens the external editor on it first, and sends what it leaves with the run.
 
+In both TUI modes, `/skills` lists names and states by source. Selecting a Skill does not
+display its description, file path or file contents. In this panel Tab toggles the selected
+Skill and leaves the list open. Enter uses an invocable selection: it closes the list and
+puts `/skill:<name> ` in the chat composer. Type the task there and press Enter to send.
+An unanswered question does not take focus from a slash command being completed or edited,
+or from a selected Skill's task draft, even if the question arrives after editing has started.
+Send or cancel the draft to return to the question.
+Enter on a disabled or otherwise non-invocable row neither sends nor changes its state.
+
 ```text
 ╭─ Skills ──────────────────────────────────────╮
 │ >                                             │
@@ -1121,15 +1117,16 @@ opens the external editor on it first, and sends what it leaves with the run.
 │   deploy      enabled                         │
 │   Issues                                      │
 │     /w/.agents/skills/old/SKILL.md: no name   │
-│   Writes commit messages from the staged diff.│
-│   /home/u/.agents/skills/commit/SKILL.md      │
-╰──── Enter toggle · Ctrl+R reload · Esc close ─╯
+╰─ Enter use · Tab toggle · Ctrl+R reload · Esc close ─╯
 ```
 
 ### Actions
 
-The client has a closed set of action kinds. Each kind has one key in every panel, and the hint
-lists the area's kinds plus the selected entry's kinds, in the table's order.
+The table lists the management actions sent to an area's adapter. Using a Skill is a local
+composer action: it needs an invocable catalog entry, not a management method. Except for the
+Skills keys above, the table gives each kind's key. The hint lists the area's kinds plus the
+selected entry's kinds, in the table's order; Skills shows
+`Enter use` before `Tab toggle` when use is available.
 
 An action that names one entry carries the entry's id and the source its row reports. Two entries
 of one id in different sources are two rows, each selected and acted on on its own, and the
@@ -1278,9 +1275,10 @@ Writes follow [Execution settings](#execution-settings):
                           Update::Management ◄───────┴ group, entries, states, actions, issues
 Panel  ◄───────────────────{ area, view }◄──────────┘
    │
-   ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
-   │                                                                                (the view again)
-   └─ Ctrl+E ──► the external editor ──► Command { area, Save { id?, expectedRevision, document } }
+   ├─ Enter ──► UseSkill ──► editable task draft (no request sent)
+   └─ Tab ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+
+/hooks panel ── Ctrl+E ──► external editor ──► Command { area, Save { id?, expectedRevision, document } }
                                           ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► the same adapter, over its own connection

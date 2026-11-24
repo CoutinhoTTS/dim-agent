@@ -39,6 +39,15 @@ fn invocable() -> bool {
     true
 }
 
+impl Entry {
+    pub fn can_use(&self) -> bool {
+        self.enabled
+            && self.shadowed_by.is_none()
+            && self.user_invocable
+            && dim_agent_types::skill_token::names_a_token(&self.name)
+    }
+}
+
 /// A Skill the catalog could not use.
 #[derive(Debug, Deserialize)]
 pub struct Issue {
@@ -119,6 +128,10 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
         if let Some(by) = &entry.shadowed_by {
             states.push(EntryState::Shadowed { by: by.clone() });
         }
+        let mut actions = super::entry_kinds(actions);
+        if entry.can_use() {
+            actions.push(ActionKind::UseSkill);
+        }
         groups.push(
             entry.source.as_deref().unwrap_or(t("skills")),
             ManagementEntry {
@@ -128,7 +141,7 @@ pub(super) fn view(catalog: &Catalog, actions: &[ActionKind]) -> ManagementView 
                 detail: [entry.description.clone(), entry.file_path.clone()].to_vec(),
                 enabled: Some(entry.enabled),
                 states,
-                actions: super::entry_kinds(actions),
+                actions,
                 remove_verb: RemoveVerb::Remove,
                 document: None,
                 run: None,

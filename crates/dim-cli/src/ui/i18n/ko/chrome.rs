@@ -1,5 +1,6 @@
 pub fn lookup(english: &str) -> Option<&'static str> {
     Some(match english {
+        "Tab / Enter complete" => "Tab / Enter 완성",
         "Queue" => "대기열",
         "Export session" => "세션 내보내기",
         "Enter steer · x delete held · Esc close" => {

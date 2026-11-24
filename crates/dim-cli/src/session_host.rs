@@ -859,6 +859,7 @@ impl Worker {
                 "Cannot preview startup model: {error}"
             )));
         }
+        self.read_skills().await;
         Ok(())
     }
 
@@ -976,6 +977,7 @@ impl Worker {
             }
             Err(error) => {
                 self.parked = attached_session;
+                self.read_skills().await;
                 Err(error)
             }
         }
@@ -1014,6 +1016,7 @@ impl Worker {
                     kind,
                     cwd: None,
                 });
+                self.read_skills().await;
                 self.reportable(
                     crate::report::Captured::observed(
                         crate::report::Operation::SessionRead,
@@ -1169,25 +1172,36 @@ impl Worker {
                 },
             ));
         }
-        if self.client.offers("skills.catalog") {
-            match &self.session_cwd {
-                Some(cwd) => {
-                    reads.push(("skills.catalog", json!({"cwd":cwd}), OpeningRead::Skills))
-                }
-                None => self.send(Update::Notice(
-                    "Skills unavailable: the daemon did not report the Session workspace".into(),
-                )),
-            }
-        }
         for (method, params, kind) in reads {
             match self.client.send(method, params).await {
                 Ok(id) => self.opening_reads.push((id, kind)),
                 Err(error) => self.send(Update::Notice(format!("{method}: {error}"))),
             }
         }
+        self.read_skills().await;
         self.context_stale = true;
         self.publish();
         Ok(())
+    }
+
+    async fn read_skills(&mut self) {
+        if !self.client.offers("skills.catalog") {
+            return;
+        }
+        let cwd = if self.session_id.is_empty() {
+            self.options.workspace().as_str()
+        } else if let Some(cwd) = self.session_cwd.as_deref() {
+            cwd
+        } else {
+            self.send(Update::Notice(
+                "Skills unavailable: the daemon did not report the Session workspace".into(),
+            ));
+            return;
+        };
+        match self.client.send("skills.catalog", json!({"cwd":cwd})).await {
+            Ok(id) => self.opening_reads.push((id, OpeningRead::Skills)),
+            Err(error) => self.send(Update::Notice(format!("skills.catalog: {error}"))),
+        }
     }
 
     fn opening_reply(&mut self, kind: OpeningRead, result: Result<Value, client::RpcError>) {
@@ -1814,7 +1828,7 @@ impl Worker {
             // Home, not a Session: the first message creates one. Every
             // `/new` ends here, including the one that was already Home.
             Command::NewSession => {
-                self.home();
+                self.home().await;
                 self.send(Update::NewSessionDone);
             }
             Command::DeleteSession { session_id, name } => {
@@ -1824,7 +1838,7 @@ impl Worker {
                 // behind the reply then match no Session and are ignored, so
                 // they raise no disconnect report.
                 if shown && outcome.ends_session() {
-                    self.home();
+                    self.home().await;
                 }
                 self.send(Update::Deleted(DeleteReply {
                     session_id,
@@ -2767,7 +2781,7 @@ impl Worker {
     /// Home, not a Session: the first message creates one. `/new`, and a
     /// delete of the shown Session, leave to it the same way, so the composer
     /// and the `─ new session ─` boundary are what `/new` leaves.
-    fn home(&mut self) {
+    async fn home(&mut self) {
         if self.session_id.is_empty() {
             return;
         }
@@ -2785,6 +2799,7 @@ impl Worker {
             kind: SwitchKind::New,
             cwd: None,
         });
+        self.read_skills().await;
     }
 
     /// `session.delete {sessionId}` for one row of `/resume`, without

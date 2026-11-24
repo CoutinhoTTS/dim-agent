@@ -1317,11 +1317,7 @@ struct App {
     runs: Runs,
     /// The draft set aside while Ctrl+O/Ctrl+P has the palette open; it
     /// comes back when command entry ends.
-    palette_stash: Option<String>,
-    /// Command entry over a pending question: the composer has the keys
-    /// from the palette through the command's argument until it runs
-    /// ([`Self::command_entry_open`]).
-    command_entry: bool,
+    palette_stash: Option<(String, bool)>,
     /// The workspace's git branch for the banner and composer.
     branch: Option<String>,
     git_head: Option<PathBuf>,
@@ -1727,7 +1723,6 @@ impl App {
             notified_tasks: HashSet::new(),
             runs: Runs::default(),
             palette_stash: None,
-            command_entry: false,
             branch: None,
             git_head: None,
             git_checked: Instant::now(),
@@ -1818,22 +1813,17 @@ impl App {
         }
     }
 
-    /// Command entry is open over a pending question that is not being
-    /// edited: the composer owns the keys and takes the panel's place until
-    /// the command runs, Esc, or a draft that stops being a command. It
-    /// starts with `/`, Ctrl+O or Ctrl+P, or with a command draft the
-    /// question arrived under, and lasts past the palette through the
-    /// command's argument.
     fn command_entry_open(&self) -> bool {
-        (self.command_entry || self.composer.palette_open())
+        (self.composer.skill_draft
+            || (self.composer.shell().is_none() && self.composer.text().starts_with('/')))
             && matches!(&self.prompt, Some(Prompt::Ask(prompt)) if !prompt.typing)
     }
 
     /// Opens the command palette on the draft it replaces; the draft comes
     /// back when command entry ends ([`Self::handle`]).
     fn open_palette(&mut self) {
-        if !self.composer.is_empty() {
-            self.palette_stash = Some(self.composer.text().to_owned());
+        if !self.composer.is_empty() || self.composer.skill_draft {
+            self.palette_stash = Some((self.composer.text().to_owned(), self.composer.skill_draft));
         }
         self.set_draft("/");
     }
@@ -2701,15 +2691,7 @@ impl App {
                 self.composer.set_skills(
                     entries
                         .into_iter()
-                        .filter(|entry| {
-                            // A Skill the operator may not invoke is not
-                            // offered, and neither is a name the
-                            // `/skill:<name>` token cannot carry (Skills §9).
-                            entry.enabled
-                                && entry.shadowed_by.is_none()
-                                && entry.user_invocable
-                                && dim_agent_types::skill_token::names_a_token(&entry.name)
-                        })
+                        .filter(|entry| entry.can_use())
                         .map(|entry| crate::ui::composer::palette::Skill {
                             name: entry.name,
                             description: entry.description,
@@ -3397,12 +3379,11 @@ impl App {
     fn handle(&mut self, event: InputEvent) -> Outcome {
         let outcome = self.handle_input(event);
         self.restore_question();
-        self.command_entry = self.command_entry_open() && self.composer.text().starts_with('/');
-        if !self.command_entry
-            && self.composer.is_empty()
-            && let Some(draft) = self.palette_stash.take()
+        if self.composer.is_empty()
+            && let Some((draft, skill_draft)) = self.palette_stash.take()
         {
             self.set_draft(&draft);
+            self.composer.skill_draft = skill_draft;
         }
         outcome
     }
@@ -3505,12 +3486,8 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return self.ctrl_c();
         }
-        // A question keeps the keys, but a command entered over it keeps
-        // them from `/`, Ctrl+O or Ctrl+P through its argument: only Enter,
-        // Esc or a draft that stops being a command gives them back.
         if matches!(&self.prompt, Some(Prompt::Ask(prompt)) if !prompt.typing) {
             if self.command_entry_open() {
-                self.command_entry = true;
                 if key.code == KeyCode::Esc
                     && !self.composer.palette_open()
                     && !self.composer.mention_open()
@@ -3524,7 +3501,6 @@ impl App {
                 || (ctrl && matches!(key.code, KeyCode::Char('o' | 'p')))
             {
                 self.open_palette();
-                self.command_entry = true;
                 return Outcome::Continue;
             }
         }
@@ -4303,6 +4279,10 @@ impl App {
     fn apply_effect(&mut self, effect: Effect) -> Outcome {
         match effect {
             Effect::None => {}
+            Effect::UseSkill(name) => {
+                self.prompt = None;
+                self.composer.prepend_skill(&format!("/skill:{name}"));
+            }
             Effect::Close => {
                 if matches!(self.prompt, Some(Prompt::Sessions(_))) {
                     self.host.send(Command::CloseSessions);
@@ -16560,7 +16540,7 @@ mod tests {
             },
         ]));
         typed(&mut app, "/comm");
-        assert!(matches!(app.handle(key(KeyCode::Enter)), Outcome::Continue));
+        assert!(matches!(app.handle(key(KeyCode::Tab)), Outcome::Continue));
         assert_eq!(app.composer.text(), "/skill:commit ");
         assert!(
             sent.borrow().is_empty(),
@@ -16660,10 +16640,8 @@ mod tests {
         );
     }
 
-    /// Both TUI modes draw a filled Skill by its name, and the message the same
-    /// draft sends still carries the canonical `/skill:<name>` token.
     #[test]
-    fn a_filled_skill_draws_its_name_in_both_modes() {
+    fn a_filled_skill_draws_its_reference_in_both_modes() {
         use crate::management::skills::Entry;
         for fullscreen in [false, true] {
             let mut drawn = Drawn::new((100, 30), None, false);
@@ -16686,12 +16664,8 @@ mod tests {
 
             let screen = drawn.emu.rows_text().join("\n");
             assert!(
-                screen.contains("/status"),
-                "the input draws the Skill's name in fullscreen={fullscreen}: {screen}"
-            );
-            assert!(
-                !screen.contains("skill:status"),
-                "the parser's namespace is not drawn in fullscreen={fullscreen}: {screen}"
+                screen.contains("/skill:status"),
+                "the input draws the reference in fullscreen={fullscreen}: {screen}"
             );
             assert_eq!(
                 drawn.app.composer.text(),

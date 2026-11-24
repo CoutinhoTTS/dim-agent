@@ -35,6 +35,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Le document utilisateur désactive tous les hooks (disableAllHooks)."
         }
         "Enter toggle" => "Enter basculer",
+        "Tab toggle" => "Tab basculer",
+        "Enter use" => "Enter utiliser",
         "Ctrl+E edit" => "Ctrl+E modifier",
         "Ctrl+N add" => "Ctrl+N ajouter",
         "Ctrl+R reload" => "Ctrl+R recharger",

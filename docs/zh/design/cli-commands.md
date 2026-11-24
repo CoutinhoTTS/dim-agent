@@ -36,25 +36,22 @@ Skill 行补全 `/skill:<name> ` 标记。没有匹配项时草稿保持不变�
 `Tab`、`Home`、`End` 在菜单之外保留各自的 fullscreen 消息选择和滚动绑定。
 
 Skill 行读作 `/skill:<name>`，带其描述。只列出已启用、未被其他来源遮蔽、且可被用户调用、名称可被 token 承载的 Skill：名称含 `A-Z`、`a-z`、`0-9`、`_`、`-`、`.` 之外字符，或以句点结尾的 Skill 无法被引用，因此也不列出。列表跟随会话的目录：
-客户端在挂载、切换会话、`/reload-skills` 之后以及 `/skills` 中的改动之后重新读取。不提供 `skills.catalog` 的守护进程只显示命令，不报错。
-用 `Enter` 或 `Tab` 选择 Skill 行只填入 `/skill:<name> `，绝不发送；该 token 随消息文本一起提交，草稿把它画成一个高亮单位，读作该 Skill 的名称。
+Home 在启动时和从会话返回时读取启动工作区的 Skill 目录。进入或切换会话则读取该会话工作区的目录；`/reload-skills` 和 `/skills` 的状态变更也会刷新目录。不提供 `skills.catalog` 的守护进程只显示命令，不报错。
+选中 Skill 行时，Tab 和 Enter 都只填入 `/skill:<name> ` 以便继续输入，不发送。
 输入 `/skill:` 会把菜单缩到只剩 Skill：`skill:` 命名空间之后的查询只匹配 Skill 名称。以 `/skill:` 开头的草稿作为消息发送，绝不当作命令执行；token 只要位于消息开头或空白之后，就可以出现在句中。Skill 排在命令之后；
 只有当查询是某个 Skill 名称的前缀、且不是任何命令名或别名的前缀时，Skill 才排在前面；因此与命令同名的 Skill 两行都保留，命令在前。
 `/` 是唯一的触发器：`@` 仍是文件选择器。
 
-草稿把从菜单填入的引用画成 Skill 的名称：选中 `status` 后输入框读作 `/status`，而不是解析器前缀 `/skill:status`。
+草稿和聊天记录都高亮同一个 `/skill:<name>` 引用，后续输入按普通文字显示：
 
 ```text
-› /stat|                 › /status |
-  ├─ /skill:status       ├─ 填入的 /skill:status
-  └─ /skill:staged       └─ 画作名称，发送 /skill:status
+› /stat|       Tab → › /skill:status |       输入 → › /skill:status 检查构建|
+  /skill:status
+  /skill:staged
 ```
 
-只有填入的引用才画作名称；操作者自己输入的文本按原样显示，半写或写错的引用仍然可见。
-草稿的文本仍是 `/skill:<name> `，提交和输入历史都保留它。终端原生选区复制的是显示出来的 `/status`，粘贴该标签不会恢复 Skill 引用；
-需重新选择 Skill，或粘贴完整 token。光标把引用当作一个单位跨过，一次删除整个引用，换行按显示名称计算。
-名称同时是输入框会派发的命令时（如 `/models`），草稿保留规范 token（`/skill:models`），因为裸名称会让草稿看起来像那条命令，而草稿仍是消息。
-两种模式下菜单行都读作 `/skill:<name>`，说明它填入哪个 token；对话记录保留提交的 token。
+光标把补全的引用当作一个单位跨过，一次删除整个引用。终端选区复制的文本与提交、历史记录中的文本相同。
+Skill 加载成功不在 TUI 消息里追加文字；提交错误照常显示。
 
 两种模式下，菜单都适应终端可用的列数和行数。命令名优先于描述和快捷键标签。
 快捷键标签会挤占命令名时省略标签，但不改变按键绑定。
@@ -646,6 +643,11 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 
 条目按所有者报告的分组归类——user、project、`plugin:<id>`、内置——顺序与所有者的报告顺序一致；一个 Hook 来源本身就是一个条目，归在 `sources` 分组下。每个条目有标签、详情、它的状态（已启用、已禁用、无效、不可用、被覆盖、只读）以及它提供的动作。所有者不允许客户端写入的条目（插件所有、已锁定）不提供写入动作，详情说明原因。所有者无法使用的东西作为 issue 列在条目之后。当 run 种类接受输入文档时，条目可以携带该操作的输入文档：Ctrl+T 先用外部编辑器打开它，run 随编辑器留下的文本发出。
 
+两种 TUI 模式下，`/skills` 都按来源列出名称和状态。选中 Skill 不显示其描述、文件路径或正文。
+在此面板中，Tab 切换所选 Skill 的启停状态并留在列表。Enter 使用可调用的选中项：关闭列表，
+把 `/skill:<name> ` 回填到聊天框。写完任务后再按 Enter 才发送。在已禁用或不可调用的条目上按 Enter，不发送，也不改变状态。
+补全斜杠命令、编辑命令参数或编写所选 Skill 的任务时，即使问题在编辑途中到达，焦点仍留在聊天框。发送或取消草稿后才回到问题。
+
 ```text
 ╭─ Skills ──────────────────────────────────────╮
 │ >                                             │
@@ -657,14 +659,12 @@ Reset 要求确认后把两个布尔值都写为 false。Off 可保留无效的�
 │   deploy      enabled                         │
 │   Issues                                      │
 │     /w/.agents/skills/old/SKILL.md: no name   │
-│   Writes commit messages from the staged diff.│
-│   /home/u/.agents/skills/commit/SKILL.md      │
-╰──── Enter toggle · Ctrl+R reload · Esc close ─╯
+╰─ Enter use · Tab toggle · Ctrl+R reload · Esc close ─╯
 ```
 
 ### 动作
 
-客户端有一组封闭的动作种类。每种在每个面板里都只有一个键，键提示按表格顺序列出该领域提供的种类，加上所选条目提供的种类。
+下表列出发给领域适配器的管理动作。使用 Skill 是输入框的本地动作：只要求目录条目可调用，不需要管理方法。除上面说明的 Skills 面板按键外，各动作使用下表中的键。键提示按表格顺序列出该领域提供的种类，加上所选条目提供的种类；所选 Skill 可用时，`Enter use` 排在 `Tab toggle` 前面。
 
 针对单个条目的动作同时携带条目 id 和其所在行报告的来源。同一个 id 出现在不同来源时是两行，各自可以被选中和操作；适配器按动作携带的来源执行，不在目录里按 id 找来源。所有者不报告来源的领域不带来源，其 id 本身唯一。
 
@@ -731,9 +731,10 @@ Esc 关闭面板。动作键要么是 Ctrl 组合键，要么是筛选从不接�
                           Update::Management ◄───────┴ 分组、条目、状态、动作、issues
 面板  ◄───────────────────{ area, view }◄──────────┘
    │
-   ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
-   │                                                                                （再次给出视图）
-   └─ Ctrl+E ──► 外部编辑器 ──► Command { area, Save { id?, expectedRevision, document } }
+   ├─ Enter ──► UseSkill ──► 可编辑的任务草稿（不发送请求）
+   └─ Tab ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+
+/hooks 面板 ── Ctrl+E ──► 外部编辑器 ──► Command { area, Save { id?, expectedRevision, document } }
                                 ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► 同一个适配器，用自己的连接

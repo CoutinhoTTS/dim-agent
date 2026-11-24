@@ -35,6 +35,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Das Benutzerdokument schaltet alle Hooks ab (disableAllHooks)."
         }
         "Enter toggle" => "Enter umschalten",
+        "Tab toggle" => "Tab umschalten",
+        "Enter use" => "Enter verwenden",
         "Ctrl+E edit" => "Ctrl+E bearbeiten",
         "Ctrl+N add" => "Ctrl+N hinzufügen",
         "Ctrl+R reload" => "Ctrl+R neu laden",
