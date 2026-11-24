@@ -7752,7 +7752,7 @@ fn tui_models_picker_draws_its_hint_in_the_interface_language() {
 }
 
 #[test]
-fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
+fn tui_models_picker_scrolls_across_batches_and_reopens_without_a_cache() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
@@ -7768,20 +7768,38 @@ fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
         wire.reply(&first, json!({"models":[],"empty":[{"providerId":"empty","providerName":"Empty","reason":{"kind":"no_models","listable":true}}],"next":{"providerId":"empty","modelId":""}}));
         let next = wire.read("provider.models.query");
         assert_eq!(next["params"]["after"], json!({"providerId":"empty","modelId":""}));
-        let snapshot = json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"second","name":"Second","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}]}});
-        wire.reply(&next, picker_page("test", "Test", snapshot.clone()));
+        let snapshot = |id| json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":id,"name":id,"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}]}});
+        let mut second = picker_page("test", "Test", snapshot("second"));
+        second["next"] = json!({"providerId":"test","modelId":"second"});
+        wire.reply(&next, second);
+        let filtered = wire.read("provider.models.query");
+        assert_eq!(filtered["params"]["after"], json!({"providerId":"test","modelId":"second"}));
+        let mut skipped = picker_page("test", "Test", snapshot("second-disabled"));
+        skipped["models"][0]["disabled"] = json!(true);
+        skipped["next"] = json!({"providerId":"test","modelId":"second-disabled"});
+        wire.reply(&filtered, skipped);
+        let third = wire.read("provider.models.query");
+        assert_eq!(third["params"]["after"], json!({"providerId":"test","modelId":"second-disabled"}));
+        wire.reply(&third, picker_page("test", "Test", snapshot("third")));
         let reopened = wire.read("provider.models.query");
         assert!(reopened["params"]["after"].is_null());
-        wire.reply(&reopened, picker_page("test", "Changed", snapshot));
+        wire.reply(&reopened, picker_page("test", "Changed", snapshot("second")));
         wire.hold();
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/models\r");
-    terminal.until("Empty: no models");
-    terminal.until_anywhere("Next page");
-    terminal.write(b"\r");
     terminal.until("Test / second");
+    terminal.until_anywhere("Empty: no models");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Test / third");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Selected: Test / third");
+    terminal.raw(b"\x1b[A");
+    terminal.until("Selected: Test / second");
+    let shown = strip_ansi(&terminal.transcript);
+    assert!(!shown.contains("Next page") && !shown.contains("Previous page"));
+    assert!(!shown.contains("Test / second-disabled"));
     terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
     terminal.write(b"/models\r");

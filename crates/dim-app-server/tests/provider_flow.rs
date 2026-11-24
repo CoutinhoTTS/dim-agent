@@ -10956,6 +10956,76 @@ async fn model_pages_follow_committed_edits_and_selection_uses_exact_targets() {
 }
 
 #[tokio::test]
+async fn model_page_keeps_magpie_visible_without_the_dim_account_plugin() {
+    use dim_app_server::provider::ModelQuery;
+
+    let home = temp_home("provider-model-page-without-oauth");
+    let (root, provider) = provider_root(&home).await;
+    let cancel = CancellationToken::new();
+    let (base, server) = listing_server(json!({"data":[{"id":"magpie-model",
+        "context_window":64000,"max_output_tokens":512}]}))
+    .await;
+    let magpie = provider
+        .management("magpie".into(), None, &cancel)
+        .await
+        .unwrap();
+    provider
+        .update(
+            "magpie".into(),
+            magpie.providers[0].info.version.unwrap(),
+            serde_json::from_value(json!({"baseUrl":format!("{base}/v1"),"enabled":true,
+                "credential":{"action":"set","value":"fixture-key"}}))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let models: Vec<_> = (0..40)
+        .map(|index| {
+            json!({"entry":model(&format!("old-{index:02}"), 512),
+                "protocol":"openai-compatible","unavailableReason":null,"zdr":false})
+        })
+        .collect();
+    let record = json!({"kind":"managed","version":1,"models":models,
+        "account":{"credentialEpoch":"fixture","generation":1,
+            "account":{"issuer":"fixture","subject":"fixture","grantedScopes":[]}},
+        "modelConfigOverrides":[],"disabledModelIds":[],"modelAliases":{}});
+    let database = rusqlite::Connection::open(home.join("native.sqlite")).unwrap();
+    dim_app_server::provider::testing::replace_provider(
+        &database,
+        "dimcode-api-oauth",
+        1,
+        &record.to_string(),
+    )
+    .unwrap();
+    drop(database);
+
+    let page = provider
+        .query_models(ModelQuery::default(), &cancel)
+        .await
+        .unwrap();
+    let selectable: Vec<_> = page
+        .models
+        .iter()
+        .filter(|row| !row.disabled && row.model.unavailable_reason.is_none())
+        .map(|row| (row.provider_id.as_str(), row.model.id.as_str()))
+        .collect();
+    assert_eq!(selectable, [("magpie", "magpie-model")]);
+    let page = serde_json::to_value(page).unwrap();
+    assert!(page["next"].is_null(), "{page}");
+    assert!(
+        page["empty"].as_array().unwrap().iter().any(|row| {
+            row["providerId"] == "dimcode-api-oauth" && row["reason"]["kind"] == "unreadable"
+        }),
+        "{page}"
+    );
+
+    root.shutdown().await.unwrap();
+    server.abort();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[tokio::test]
 #[ignore = "records warm provider-read measurements against a disposable store"]
 async fn measure_on_demand_provider_reads() {
     use dim_app_server::provider::ManagementPageRequest;

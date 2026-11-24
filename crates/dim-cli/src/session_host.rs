@@ -1989,19 +1989,11 @@ impl Worker {
                 }
             }
             Command::ListModels => {
-                let models = self
-                    .models(String::new(), None)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.send(Update::Models(models));
+                self.send_models(String::new(), None).await;
                 self.read_model_policy(false).await;
             }
             Command::QueryModels { query, after } => {
-                let models = self
-                    .models(query, after)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.send(Update::Models(models));
+                self.send_models(query, after).await;
             }
             Command::ReadIsolation => {
                 if !self.client.supports(&["settings.read", "settings.update"]) {
@@ -2236,11 +2228,7 @@ impl Worker {
                 // The reread lands before the notice: a conflict tells the
                 // user to reread and retry, so the row a retry presses must
                 // already carry the record's current version.
-                let models = self
-                    .models(query, after)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.send(Update::Models(models));
+                self.send_models(query, after).await;
                 self.send(Update::Notice(match result {
                     Ok(()) => {
                         "Saved model preferences cleared; select the model to adopt its defaults"
@@ -3955,6 +3943,18 @@ impl Worker {
             Ok(message)
         }.await;
         result.map_err(|error| error.to_string())
+    }
+
+    async fn send_models(&mut self, query: String, after: Option<dim_agent_types::ModelId>) {
+        let result = self
+            .models(query.clone(), after.clone())
+            .await
+            .map_err(|error| error.to_string());
+        self.send(Update::Models {
+            query,
+            after,
+            result,
+        });
     }
 
     async fn models(

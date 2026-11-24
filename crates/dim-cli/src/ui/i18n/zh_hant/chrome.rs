@@ -429,8 +429,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "選擇模型",
         "Loading models..." => "正在載入模型…",
-        "Previous page" => "上一頁",
-        "Next page" => "下一頁",
         "No models available. Connect a provider first." => "沒有可用的模型。請先連線供應商。",
         "No matching models." => "沒有相符的模型。",
         "current" => "目前",
