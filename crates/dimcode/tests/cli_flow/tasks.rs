@@ -1952,6 +1952,50 @@ fn tui_main_history_failure_is_visible_and_disables_submission() {
     }
 }
 
+#[test]
+fn tui_main_history_failure_is_visible_on_a_reporting_daemon() {
+    let home = Home::new();
+    let daemon = home.daemon(move |wire| {
+        wire.hello(&["report.prepare"]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        assert_eq!(history["params"]["branchId"], "main");
+        wire.send(json!({"jsonrpc":"2.0","id":history["id"],"error":{"code":-32000,"message":"main store unreadable","data":{"appError":"storage_failed"}}}));
+        while let Some(line) = wire.trailing_request() {
+            let request: Value = serde_json::from_str(&line).unwrap();
+            match request["method"].as_str().unwrap() {
+                "session.context.usage" => assert_eq!(request["params"], json!({"sessionId":"session","branchId":"main"})),
+                "account.providers" => wire.reply(&request, json!([])),
+                other => panic!("failed main history must not accept a hidden turn: {other}"),
+            }
+        }
+    });
+    let mut launch = home.command();
+    launch.args(["--resume", "session"]);
+    let mut terminal = Terminal::launch_tui(launch);
+    terminal.until("Main branch history:");
+    terminal.write(b"keep this draft");
+    terminal.until("keep this draft");
+    terminal.write(b"\r");
+    terminal.until("Disconnected; draft kept. Exit and resume this Session.");
+    assert!(
+        terminal.transcript.contains("keep this draft"),
+        "the refused submission stays in the composer: {}",
+        terminal.transcript
+    );
+    assert!(
+        !terminal
+            .transcript
+            .contains("Run /report to create a report."),
+        "a fatal main history failure is not offered as a report: {}",
+        terminal.transcript
+    );
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
 fn workflow_run(id: &str, name: &str, state: &str, started_by: Value, report_to: Value) -> Value {
     let ended = !matches!(state, "running" | "stopping");
     let mut run = json!({

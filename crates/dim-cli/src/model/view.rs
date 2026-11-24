@@ -477,6 +477,12 @@ pub struct ViewSnapshot {
     pub projection_id: u64,
     /// The shown line's history has loaded: its transcript can be laid out.
     pub history_complete: bool,
+    /// The shown line's first window could not be read, with the reason; the
+    /// line draws it instead of a transcript until the line is opened again.
+    /// `None` while the window loads, after it loads, and when only a later
+    /// read (an inventory refresh or an `/earlier` page) failed;
+    /// `history_complete` separates the first case from the other two.
+    pub window_error: Option<String>,
     /// Whether history older than the loaded window exists, and whether an
     /// earlier read is in flight; `/earlier`, PageUp at the drawn top and the
     /// load-more row act on it.

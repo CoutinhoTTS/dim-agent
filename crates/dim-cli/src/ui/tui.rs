@@ -510,13 +510,8 @@ fn run_terminal(
             (true, Some(at)) if !terminal.writing() => {
                 FRAME_INTERVAL.saturating_sub(now.duration_since(at))
             }
-            _ if app.running()
-                || terminal.writing()
-                || app.failure.is_none() && app.awaiting_window =>
-            {
-                FRAME_INTERVAL
-            }
-            _ => SESSION_POLL,
+            _ if terminal.writing() => FRAME_INTERVAL,
+            _ => app.poll_interval(),
         };
         let wait = full
             .as_ref()
@@ -1888,6 +1883,16 @@ impl App {
         self.failure.is_none() && self.snapshot.as_ref().is_some_and(|s| s.running)
     }
 
+    /// The wait before input is polled again when no frame is due: frame rate
+    /// while a turn runs or a shown window still loads, else the idle poll.
+    fn poll_interval(&self) -> Duration {
+        if self.running() || (self.failure.is_none() && self.awaiting_window) {
+            FRAME_INTERVAL
+        } else {
+            SESSION_POLL
+        }
+    }
+
     /// Refuses to start a clipboard or image read while a send-now is settling,
     /// with the notice that says why. A read started after the stop was asked
     /// for cannot be ordered against the stop's reply, so the message a settled
@@ -2570,6 +2575,13 @@ impl App {
                     .is_some_and(|shown| shown.focus != snapshot.focus);
                 if switched {
                     self.switch_line(snapshot.focus.clone());
+                } else if self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|shown| shown.window_error.is_some())
+                    && snapshot.window_error.is_none()
+                {
+                    self.rearm_window();
                 }
                 if let Some(Prompt::Tasks(panel)) = &mut self.prompt {
                     if panel.projection_id == snapshot.projection_id {
@@ -7080,10 +7092,13 @@ impl App {
         let Some(snapshot) = &self.snapshot else {
             return false;
         };
-        if !snapshot.history_complete {
+        if !snapshot.history_complete && snapshot.window_error.is_none() {
             return false;
         }
         self.awaiting_window = false;
+        if !snapshot.history_complete {
+            return true;
+        }
         let messages: Vec<usize> = snapshot
             .rows
             .iter()
@@ -7563,7 +7578,31 @@ impl App {
         }
         self.tail_groups = tail_groups;
         self.tail_thoughts = tail_thoughts;
+        if let Some(error) = snapshot.window_error.as_deref() {
+            let block = Block::Status {
+                text: format!(
+                    "{}: {}",
+                    t("Branch history failed; reopen to retry"),
+                    crate::sanitize::safe_line(error)
+                ),
+                tone: Tone::Warning,
+            };
+            let rows = render_block(&block, width, p, markdown, self.fullscreen);
+            tail.push(String::new());
+            tail.extend(rows.into_iter().map(|r| format!("{pad}{r}")));
+        }
         (commits, sources, tail)
+    }
+
+    /// Arms the shown line's window again after its first read failed. A
+    /// retry publishes the same focus as loading, so no switch announces it.
+    fn rearm_window(&mut self) {
+        self.window_floor = 0;
+        self.history_floor = 0;
+        self.load_more = false;
+        self.window_info = (0, 0);
+        self.history_request = None;
+        self.awaiting_window = true;
     }
 
     fn switch_line(&mut self, line: String) {
@@ -15996,6 +16035,158 @@ mod tests {
         assert!(text.contains("⑂ main"), "the return is marked: {text}");
         assert_eq!(text.matches("main one").count(), 2, "{text}");
         assert_eq!(text.matches("line one").count(), 1, "{text}");
+    }
+
+    #[test]
+    fn a_failed_line_window_shows_its_error_and_returns_the_idle_poll() {
+        for fullscreen in [false, true] {
+            let mut drawn = Drawn::new((100, 40), None, true);
+            drawn.app.fullscreen = fullscreen;
+            drawn.show(&[], "main", true);
+            drawn.show(&[], "b-7c", false);
+            assert!(
+                drawn.app.awaiting_window,
+                "fullscreen={fullscreen}: the line is still loading"
+            );
+            assert_eq!(
+                drawn.app.poll_interval(),
+                FRAME_INTERVAL,
+                "fullscreen={fullscreen}: a loading window asks for frames"
+            );
+            assert!(
+                !drawn.transcript().contains("Branch history failed"),
+                "fullscreen={fullscreen}: nothing is drawn while the window loads"
+            );
+
+            drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+                session_id: "s1".into(),
+                focus: "b-7c".into(),
+                window_error: Some("the daemon dropped the read".into()),
+                ..ViewSnapshot::default()
+            })));
+            drawn.draw();
+
+            let text = drawn.transcript();
+            assert!(
+                !drawn.app.awaiting_window,
+                "fullscreen={fullscreen}: the failed window armed the view"
+            );
+            assert_eq!(
+                drawn.app.poll_interval(),
+                SESSION_POLL,
+                "fullscreen={fullscreen}: a failed window waits at the idle poll"
+            );
+            assert!(
+                text.contains("Branch history failed; reopen to retry"),
+                "fullscreen={fullscreen}: the line names the failure and its retry: {text}"
+            );
+            assert!(
+                text.contains("the daemon dropped the read"),
+                "fullscreen={fullscreen}: the line carries the reason: {text}"
+            );
+            assert!(
+                text.contains("⑂ b-7c"),
+                "fullscreen={fullscreen}: the failure draws under the line's boundary: {text}"
+            );
+        }
+    }
+
+    /// A failed first window can be read again: reopening `/tasks` on the
+    /// same line publishes it as loading, and the page that lands is laid out
+    /// as a first window with the older history behind the load-more row.
+    #[test]
+    fn reopening_a_failed_line_rearms_its_window() {
+        let mut drawn = Drawn::new((80, 40), None, true);
+        drawn.app.fullscreen = true;
+        let sent = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        drawn.app.host = Box::new(Recorder(sent.clone()));
+        drawn.show(&[], "main", true);
+        drawn.show(&[], "b-7c", false);
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            window_error: Some("the daemon dropped the read".into()),
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        assert!(
+            !drawn.app.awaiting_window,
+            "the failed window settled the view"
+        );
+
+        drawn.app.run_command("tasks", "");
+        assert!(
+            matches!(drawn.app.prompt, Some(Prompt::Tasks(_))),
+            "/tasks opens on the failed line"
+        );
+        assert!(
+            sent.borrow()
+                .iter()
+                .any(|command| matches!(command, Command::TaskHistory { .. })),
+            "reopening the panel retries the line's window"
+        );
+
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        assert!(
+            drawn.app.awaiting_window,
+            "the retry loads the same line again instead of staying failed"
+        );
+        assert_eq!(
+            drawn.app.poll_interval(),
+            FRAME_INTERVAL,
+            "a loading window asks for frames"
+        );
+        assert!(
+            !drawn.transcript().contains("Branch history failed"),
+            "the retry clears the failure from the line"
+        );
+
+        let mut rows = older_rows(30);
+        rows.extend(window_rows(HISTORY_WINDOW));
+        drawn.app.apply(Update::Snapshot(Box::new(ViewSnapshot {
+            session_id: "s1".into(),
+            focus: "b-7c".into(),
+            rows,
+            history_complete: true,
+            earlier: Earlier::Unread,
+            ..ViewSnapshot::default()
+        })));
+        drawn.draw();
+        assert!(
+            !drawn.app.awaiting_window,
+            "the retried page armed the view"
+        );
+        assert_eq!(
+            drawn.app.poll_interval(),
+            SESSION_POLL,
+            "the loaded window waits at the idle poll"
+        );
+        assert_eq!(
+            drawn.app.window_floor, 30,
+            "the page is laid out over the newest window"
+        );
+        assert_eq!(
+            drawn.app.history_floor, 30,
+            "the retried page starts at the same floor"
+        );
+        assert_eq!(
+            drawn.app.window_info,
+            (HISTORY_WINDOW, 30),
+            "the window names the older messages it hides"
+        );
+        assert!(
+            drawn
+                .app
+                .history
+                .iter()
+                .any(|block| matches!(block, Block::LoadMore(30))),
+            "the older history is left to the load-more row"
+        );
     }
 
     #[test]
