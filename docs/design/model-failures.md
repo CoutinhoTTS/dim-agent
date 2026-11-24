@@ -107,7 +107,9 @@ ModelFailure {
   attempts,         // at least 1
   waitedMs,         // total backoff slept
   retryForbidden?,  // true only when the failure policy forbids retrying
-  retryAfterMs?     // the provider asked to wait longer than the budget left, so Dim stopped
+  retryAfterMs?,    // the provider asked to wait longer than the budget left, so Dim stopped
+  retried?,         // true only when a retry replaced an earlier attempt of this request
+  thinkingPartId?   // the thinking block the final attempt left open, when it showed one
 }
 ```
 
@@ -119,6 +121,15 @@ ModelFailure {
 - `retryForbidden` is present only when true. ModelProvider sets it when its
   failure policy forbids retrying the failure that ended the request, and a
   continuation declines it, so the prohibition covers the continuation.
+- `retried` is present only when true: a retry replaced an earlier attempt of
+  this request after the attempt showed output as progress. `thinkingPartId` is
+  written only with it and names the thinking block the final attempt left open
+  when it showed one as progress. A client showing an open thought row from
+  progress keeps it when the identity matches and takes it, with the replaced
+  attempt, when it does not; the terminal fact is the only place the boundary
+  is observable when the empty progress between the attempts was coalesced
+  away. Continued requests keep the field out: `attempts` counts a failure
+  chain's attempts as well, so it does not mean an in-place retry.
 - `reason` is the provider's error message for a response or stream-event
   failure, and the innermost frame of the cause chain for a transport failure.
   A reply that completed with no answer has no provider error behind it, so its
@@ -320,10 +331,11 @@ written with it, because `ModelOutputOutcome` denies unknown fields. That is the
 same forward-compatibility limit `presentation` has, so a downgrade across this
 change is unsupported, as it already was for `presentation`.
 
-The same decision covers the continuation fields, the retry prohibition and
-handover inputs. The optional `failure_chain` on `ContextPrepareData` and
-`ModelCallData`, the optional `handover` on `InputMessageData`, and the optional
-`retryForbidden` on `ModelFailure` are additive, and a binary without them
+The same decision covers the continuation fields, the retry prohibition, the
+retry boundary and handover inputs. The optional `failure_chain` on
+`ContextPrepareData` and `ModelCallData`, the optional `handover` on
+`InputMessageData`, the optional `retryForbidden`, `retried` and
+`thinkingPartId` on `ModelFailure` are additive, and a binary without them
 cannot read a record that carries them, so a downgrade across this change is
 unsupported. Each addition registers the
 decision in the contract tests with its compatibility cases; the frozen
