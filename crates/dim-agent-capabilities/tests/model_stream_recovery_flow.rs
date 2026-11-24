@@ -7,6 +7,7 @@ use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::testing::chain_events;
 use dim_agent_runtime::*;
 use dim_agent_types::*;
+use rutis::{Ctx, Plugin};
 use std::{
     sync::{
         Arc, Mutex,
@@ -1216,6 +1217,244 @@ async fn a_steer_during_a_spent_retry_budget_drain_keeps_the_failure() {
             Some(Duration::from_secs(301)),
         ),
     )
+    .await
+    .unwrap();
+}
+
+/// Rejects the first attempt's credential and holds the refresh until the test
+/// releases it, while the scripted model keeps the next attempt at the driver.
+#[derive(Clone)]
+struct CredentialRefresh {
+    refreshing: Arc<Notify>,
+    released: Arc<Notify>,
+}
+impl CredentialRefresh {
+    fn new() -> Self {
+        Self {
+            refreshing: Arc::new(Notify::new()),
+            released: Arc::new(Notify::new()),
+        }
+    }
+}
+impl ResolveModelConnection for CredentialRefresh {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, ResolvedModelConnection> {
+        Box::pin(async move {
+            Ok(ResolvedModelConnection {
+                connection: ModelConnection::Local,
+                failure_policy: None,
+                recovery: Some(Arc::new(self.clone()) as Arc<dyn RecoverModelConnection>),
+            })
+        })
+    }
+}
+impl RecoverModelConnection for CredentialRefresh {
+    /// A rejected credential is refreshed once; the refreshed connection
+    /// rejects it for good.
+    fn rejection(&self, error: &HostError, phase: CredentialRecoveryPhase) -> CredentialRejection {
+        if !matches!(
+            error,
+            HostError::Failed {
+                model: Some(facts),
+                ..
+            } if facts.kind == ModelFailureKind::AuthRejected
+        ) {
+            return CredentialRejection::Unrelated;
+        }
+        match phase {
+            CredentialRecoveryPhase::Initial => CredentialRejection::Recoverable,
+            CredentialRecoveryPhase::Recovered => CredentialRejection::Terminal,
+        }
+    }
+    fn recover(&self, cancel: CancellationToken) -> HostFuture<'_, RecoveredModelConnection> {
+        Box::pin(async move {
+            self.refreshing.notify_one();
+            tokio::select! {
+                _ = self.released.notified() => {}
+                _ = cancel.cancelled() => {
+                    return Err(HostError::Cancelled("the fixture refresh was cancelled".into()));
+                }
+            }
+            Ok(RecoveredModelConnection {
+                connection: ModelConnection::Local,
+                recovery: Arc::new(self.clone()),
+            })
+        })
+    }
+    fn finish_rejected(&self, _: CancellationToken) -> HostFuture<'_, ()> {
+        Box::pin(async move { Ok(()) })
+    }
+}
+struct CredentialRefreshHosts(Arc<ScriptedModel>, CredentialRefresh);
+impl Plugin for CredentialRefreshHosts {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "test.credential-refresh"
+    }
+    async fn apply(&self, ctx: &Ctx, (): Self::Deps) -> rutis::Result {
+        ctx.provide(ModelHost(self.0.clone()))?;
+        ctx.provide(ProviderConnectionResolver(Arc::new(self.1.clone())))?;
+        Ok(())
+    }
+}
+
+/// A credential refresh keeps the failed attempt's shown thought and does not
+/// let a steer replace the request; the retry that follows a successful
+/// refresh starts from nothing and is replaceable again.
+#[tokio::test(start_paused = true)]
+async fn a_credential_refresh_clears_the_attempt_only_once_it_succeeds() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (first, first_stream) = mpsc::unbounded_channel();
+        let (retry, retry_stream) = mpsc::unbounded_channel();
+        let (steer, steer_stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![
+            first_stream,
+            retry_stream,
+            steer_stream,
+        ]));
+        let refresh = CredentialRefresh::new();
+        let mut builder = AgentBuilder::new(AgentConfig::default());
+        builder
+            .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+            .session_value(Arc::new(
+                dim_agent_capabilities::history::HistoryRenderer::default(),
+            ))
+            .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+            .session_value(Arc::new(ContextModelHost(None)))
+            .session_value(Arc::new(CompactionStrategyHost(None)))
+            .require_feature(
+                Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                    Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+                }),
+            );
+        defaults::install_with_process_model(&mut builder);
+        let driver = model.clone();
+        let resolver = refresh.clone();
+        builder.plugin(move |_| {
+            Ok(Box::new(CredentialRefreshHosts(
+                driver.clone(),
+                resolver.clone(),
+            )))
+        });
+        let agent = MinimalHost::start(&builder).await.unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+        send(
+            &first,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "refresh".into(),
+                }),
+                Ok(ModelChunk::Thinking("shown".into())),
+            ],
+        );
+        progress
+            .wait_for(|progress| progress.thinking == "shown")
+            .await
+            .unwrap();
+        let shown = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert!(
+            shown.thinking_part_id.is_some(),
+            "the shown thought has a block identity: {shown:?}"
+        );
+        send(
+            &first,
+            vec![Err(failure(ModelFailureKind::AuthRejected, None))],
+        );
+        drop(first);
+
+        refresh.refreshing.notified().await;
+        let refreshing = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert_eq!(
+            refreshing.thinking, "shown",
+            "the refresh keeps what the failed attempt showed: {refreshing:?}"
+        );
+        let during = session
+            .submit("STEER-DURING-REFRESH".into(), InputMode::Steer, "main")
+            .await
+            .unwrap();
+        wait_input_applied(&session, &during.id).await;
+        let steered = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert_eq!(
+            steered.thinking, "shown",
+            "a steer during the refresh drops nothing: {steered:?}"
+        );
+
+        refresh.released.notify_one();
+        let ended = tokio::select! {
+            _ = model.second_attempt.notified() => None,
+            outcome = turn_end(&session) => Some(outcome),
+        };
+        assert!(
+            ended.is_none(),
+            "a steer during the refresh does not replace the request; the turn ended with {ended:?}"
+        );
+
+        let retrying = session.get::<ModelProgress>("main").unwrap().unwrap();
+        assert!(
+            retrying.thinking.is_empty() && retrying.thinking_part_id.is_none(),
+            "the retry starts with nothing of the failed attempt shown: {retrying:?}"
+        );
+        let after = session
+            .submit("STEER-AFTER-REFRESH".into(), InputMode::Steer, "main")
+            .await
+            .unwrap();
+        wait_input_applied(&session, &after.id).await;
+        drop(retry);
+        model.release.notify_one();
+        send(&steer, reply("steer"));
+        drop(steer);
+        session.idle("main").await.unwrap();
+
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let first_call = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelCall(data) => Some(data.request_id.as_str()),
+                _ => None,
+            })
+            .expect("a model call");
+        let outcome = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelOutputEnd(ModelOutputEndData {
+                    request_id,
+                    outcome,
+                    ..
+                }) if request_id == first_call => Some(outcome),
+                _ => None,
+            })
+            .expect("the first request's terminal");
+        assert!(
+            matches!(
+                outcome,
+                ModelOutputOutcome::Cancelled { reason }
+                    if reason == dim_agent_capabilities::steer::REPLACED_BY_STEER
+            ),
+            "the retried attempt is replaced by the steer: {outcome:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                &event.kind,
+                EventKind::TurnEnd(TurnEndData {
+                    outcome: TurnOutcome::Completed { .. },
+                    ..
+                })
+            )),
+            "the steer's own request ends the turn"
+        );
+        agent.close().await.unwrap();
+    })
     .await
     .unwrap();
 }
