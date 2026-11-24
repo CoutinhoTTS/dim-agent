@@ -430,6 +430,25 @@ impl Owner {
         Ok(event)
     }
 
+    /// [`Self::write`] only while the branch's last assigned sequence is still
+    /// `head`. `None` means a fact committed behind `head`: nothing was
+    /// written and the caller decides again.
+    async fn write_if_head(
+        &self,
+        input: InputMessageData,
+        head: u64,
+    ) -> Result<Option<Arc<AgentEvent>>, AgentError> {
+        let event = self
+            .tree
+            .input_if_head(self.branch_id.clone(), input, head)
+            .await?;
+        if let Some(event) = &event {
+            let mut state = self.state.lock().unwrap();
+            state.last_write = state.last_write.max(event.sequence);
+        }
+        Ok(event)
+    }
+
     /// Waits until this generation's rebuild has returned and folded the facts
     /// it held (R6.2): before that, the fold is partial and a record composed
     /// from it would state a state the branch does not have. The batch is
@@ -1675,39 +1694,37 @@ impl Owner {
         crate::testing::write_held(&self.session_id, &self.branch_id, after).await;
         // C4, C5, #1989: a report input or a new turn that commits behind the
         // decision makes this continuation stale. The recheck reads the fold at
-        // the latest committed cutoff, catching up to a fact that commits while
-        // it waits.
-        let decision = if matches!(decision, Decision::Continuation { .. }) {
-            loop {
-                let through = self.await_dispatched().await?;
-                let state = self.state.lock().unwrap();
-                if self.timeline.committed() != through {
-                    continue;
-                }
-                if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
-                    || state.fold.interrupt_after(after).is_some()
-                {
-                    return Ok(());
-                }
-                break fold::decide_turn_end(&state.fold, limit, progress);
-            }
-        } else {
-            Some(decision)
-        };
-        let Some(decision) = decision else {
-            return Ok(());
-        };
+        // the latest committed cutoff, and the append refuses a head that moved
+        // after that read. A pause was decided above, at the writer's cutoff.
         match decision {
-            Decision::Continuation { count, idle } => {
-                let input =
-                    text::continuation(&self.branch_id, count, limit, idle, after, &self.texts);
-                self.write(input).await?;
-            }
             Decision::Pause { reason } => {
                 drop(write);
                 self.record(after, Some(text::State::Paused(reason.to_owned())), false)
                     .await?;
             }
+            Decision::Continuation { .. } => loop {
+                let through = self.await_dispatched().await?;
+                let decision = {
+                    let state = self.state.lock().unwrap();
+                    if self.timeline.committed() != through {
+                        continue;
+                    }
+                    if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
+                        || state.fold.interrupt_after(after).is_some()
+                    {
+                        return Ok(());
+                    }
+                    fold::decide_turn_end(&state.fold, limit, progress)
+                };
+                let Some(Decision::Continuation { count, idle }) = decision else {
+                    return Ok(());
+                };
+                let input =
+                    text::continuation(&self.branch_id, count, limit, idle, after, &self.texts);
+                if self.write_if_head(input, through).await?.is_some() {
+                    return Ok(());
+                }
+            },
         }
         Ok(())
     }
@@ -2010,14 +2027,14 @@ impl Owner {
                 if self.stopped() {
                     return Ok(());
                 }
-                let end = {
+                let (end, turn_start) = {
                     let state = self.state.lock().unwrap();
                     if fold::decide_conclusion(&state.fold, sequence, &conclusion)
                         != Some(ConclusionAction::Continue)
                     {
                         return Ok(());
                     }
-                    state.fold.turn_end.clone()
+                    (state.fold.turn_end.clone(), state.fold.turn_start)
                 };
                 let Some(end) = end else {
                     return Ok(());
@@ -2026,9 +2043,11 @@ impl Owner {
                 // judged this turn, so this path reads no progress (Pursuit §5).
                 // C4, C5: a Queue that commits while a continuation waits
                 // leaves this fold behind, so its recheck reads the fold at the
-                // latest committed cutoff and catches up to that Queue. A pause
-                // is decided once, at the writer's cutoff, and does not claim a
-                // Queue that commits after it.
+                // latest committed cutoff and catches up to that Queue; a turn
+                // the Queue opened moves `turn_start`, and the append refuses a
+                // head that moved after the recheck. A pause is decided once, at
+                // the writer's cutoff, and does not claim a Queue that commits
+                // after it.
                 let write = self.write_guard().await?;
                 let decision = {
                     let state = self.state.lock().unwrap();
@@ -2037,35 +2056,44 @@ impl Owner {
                             != Some(ConclusionAction::Continue)
                         || state.fold.turn_end.as_ref().map(|end| end.sequence)
                             != Some(end.sequence)
+                        || state.fold.turn_start != turn_start
                     {
                         return Ok(());
                     }
                     fold::decide_evaluated_continuation(&state.fold, limit)
                 };
-                let decision = match decision {
+                match decision {
+                    None => {}
+                    Some(Decision::Pause { reason }) => {
+                        drop(write);
+                        self.record(
+                            sequence,
+                            Some(text::State::Paused(reason.to_owned())),
+                            false,
+                        )
+                        .await?;
+                    }
                     Some(Decision::Continuation { .. }) => loop {
                         let through = self.await_dispatched().await?;
-                        let state = self.state.lock().unwrap();
-                        if self.timeline.committed() != through {
-                            continue;
-                        }
-                        if state.written.contains(&sequence)
-                            || fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                                != Some(ConclusionAction::Continue)
-                            || state.fold.turn_end.as_ref().map(|end| end.sequence)
-                                != Some(end.sequence)
-                        {
+                        let decision = {
+                            let state = self.state.lock().unwrap();
+                            if self.timeline.committed() != through {
+                                continue;
+                            }
+                            if state.written.contains(&sequence)
+                                || fold::decide_conclusion(&state.fold, sequence, &conclusion)
+                                    != Some(ConclusionAction::Continue)
+                                || state.fold.turn_end.as_ref().map(|end| end.sequence)
+                                    != Some(end.sequence)
+                                || state.fold.turn_start != turn_start
+                            {
+                                return Ok(());
+                            }
+                            fold::decide_evaluated_continuation(&state.fold, limit)
+                        };
+                        let Some(Decision::Continuation { count, idle }) = decision else {
                             return Ok(());
-                        }
-                        break fold::decide_evaluated_continuation(&state.fold, limit);
-                    },
-                    decided => decided,
-                };
-                let Some(decision) = decision else {
-                    return Ok(());
-                };
-                match decision {
-                    Decision::Continuation { count, idle } => {
+                        };
                         let input = text::evaluated_continuation(
                             &self.branch_id,
                             count,
@@ -2079,18 +2107,11 @@ impl Owner {
                         if self.state.lock().unwrap().written.contains(&sequence) {
                             return Ok(());
                         }
-                        self.write(input).await?;
-                        self.state.lock().unwrap().written.insert(sequence);
-                    }
-                    Decision::Pause { reason } => {
-                        drop(write);
-                        self.record(
-                            sequence,
-                            Some(text::State::Paused(reason.to_owned())),
-                            false,
-                        )
-                        .await?;
-                    }
+                        if self.write_if_head(input, through).await?.is_some() {
+                            self.state.lock().unwrap().written.insert(sequence);
+                            return Ok(());
+                        }
+                    },
                 }
             }
         }

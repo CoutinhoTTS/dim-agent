@@ -675,7 +675,20 @@ BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是
   - 每个事件单独一个批次：线上的 `branch/end`，以及关闭之后父分支上的 `branch/ended`。工具结束的最终消息是父线上的第二个事件，写在 `branch/end` 之后、关闭之前，带由该指令推出的 id。
   - `host` 或 `user` 来源的结束，或因祖先而结束，经 `Branch::close()` 中断这条线。
   - 重载时适用上面的恢复规则。Session 在恢复完成后才发布，所以在加载时结束一条线的部件，例如 Goal 的核对（[Pursuit §13](plugins/Pursuit.md#13-结束评审者随-427)），要等 `SessionLifecycle::activated()`，此后它看到的每条线（目录里有的）都已发布。
-  - Timeline 多一道线自己的准入检查：`Timeline::input` 变为 `input_checked(data, admit)`，在提交锁内运行 `admit`，于是 `branch/end` 之后提交的输入以 `branch_ended` 被拒绝，而不是与关闭竞争。Dispatcher 和批次都不变。
+  - Timeline 多一道线自己的准入检查：`Timeline::input` 变为 `input_checked(data, expected, admit)`，在提交锁内运行 `admit`，于是 `branch/end` 之后提交的输入以 `branch_ended` 被拒绝，而不是与关闭竞争。Dispatcher 和批次都不变。
+
+**R2. 条件输入提交**（所有者：dim 运行时，即 Timeline 与 `TreeCommands`；#1989）。
+
+- **被挡住的功能与规则。**
+  - Goal 依据已折叠的事实在决定之后经 `TreeCommands.input` 写入续行（Goal A.4 C4、C5）。在决定的最后一次核对与写入之间，`Timeline::input_checked` 在拿提交锁之前先查一次提交 id（[timeline.rs](../../../crates/dim-agent-runtime/src/core/timeline.rs)）；这期间提交的输入排在续行之前，而没有规则拒绝这条过时的续行。
+  - 调用方自己的核对关不掉这条缝：核对与写入不是一步（[设计规则 §4](../../architecture/rust-agent/principles.md#4-通过时间线扩展行为) 第 8 条）。
+- **考虑过的现有机制。**
+  - `Timeline::lock_tail` 持有提交锁，但要求时间线空闲、会冻结后续写入，也不能等待存储读取，带不了决定。
+  - `before` 回调在提交锁内运行，但只能变换草稿，不能拒绝写入（第 3 条）。
+  - 准入检查 `input_checked(data, expected, admit)` 在提交锁内运行，但只按线自己的状态（`branch/end`）判断；把调用方的前提放进运行时就等于把功能的含义写进核心（第 4 条）。
+  - 提交 id 回答幂等，不回答先后：续行每次决定都带新的 id。
+- **通用能力。** 输入提交带上传入方作出决定时的最后分配序号：`TreeCommands::input_if_head(id, input, head)`（与 `input` 一样按名导出，所有语言调用同一操作）、`Branch::input_if_head`、`TimelineContext::input_if_head` 与 `Timeline::input_checked(data, expected, admit)`。提交锁内 `Timeline::committed() != expected` 时不写入、不分配序号，返回 `Appended::Moved`；否则与原 `input` 一样提交。不带业务含义：调用方给出一个序号，其后任何事实都拒绝这次提交。
+- **对序号、批次、中断、重载的影响。** 被拒的提交不分配序号、不发布。批次不变：一条输入就是一个事件，拒绝发生在提交之前。`admit` 仍在写入之前运行，`branch_ended` 的答复不变。不落盘，重载不变。
 
 ## 18. 安全
 
@@ -697,7 +710,7 @@ BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是
 | §4.1 指令事件 | 结束是 `branch/end`，由 TimelineTree 决定并写 `branch/ended`。消息是输入，由接收方的 InputQueue 和 Loop 决定。结束一条已结束的线、或被拒绝的消息，什么也不写，回复说明原因 |
 | §4.2 交接后不撤回 | 已提交的消息属于接收方。`branch/end` 不撤回 |
 | §4.3 before 回调 | 无 |
-| §4.4 核心不带业务含义 | Dispatcher、`before` 和批次不变；Timeline 的准入检查是通用的（§17 R1）。身份文本属于 TimelineTree 自己的领域，即一个 Session 的各条线。工具线的协议写在 `first_input` 现在写工具专用文本的地方，也就是拥有该工具的模块里 |
+| §4.4 核心不带业务含义 | Dispatcher、`before` 和批次不变；Timeline 的准入检查与条件提交都是通用的（§17 R1、R2）。身份文本属于 TimelineTree 自己的领域，即一个 Session 的各条线。工具线的协议写在 `first_input` 现在写工具专用文本的地方，也就是拥有该工具的模块里 |
 | §4.5 批次 | `branch/end` 单独一个批次，工具结束时带着它的最终消息。消息本身是父线上更晚的一条 `input/message`，id 由那次结束推出，所以两者有次序但不是同一个批次，补全这对的是恢复（§10）。`branch/ended` 在关闭之后最后写入。名册和结束通知是同一条输入。根上的 `branch/default` 单独一个批次，每条状态说明都是它之后的一条 Append |
 | §4.6 上下文 | 身份、名册、消息、通知和状态说明都是被采用的输入。`read` 返回工具结果。没有别的东西进入上下文 |
 | §4.7 公开事件与服务 | BranchLine 折叠的是它自己那条线的公开事件。工具读 BranchLine（同一插件）和 TreeCommands。`read` 像 Collaboration 的 `read` 一样，把已提交的事件作为工具结果返回，没有哪个部件折叠另一条线的事实。Goal 按它自己公开的 A5 约定判定开启输入（§7.4）。BranchLine 和 Goal 经公开服务 TreeCommands 读取 `TimelineInfo.source` |

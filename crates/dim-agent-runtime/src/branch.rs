@@ -78,6 +78,15 @@ impl Branch {
     pub async fn input(&self, data: InputMessageData) -> Result<Arc<AgentEvent>> {
         self.0.input(data).await
     }
+    /// [`Self::input`] only while the branch's last assigned sequence is still
+    /// `head`: a fact behind `head` writes nothing and answers `None`.
+    pub async fn input_if_head(
+        &self,
+        data: InputMessageData,
+        head: u64,
+    ) -> Result<Option<Arc<AgentEvent>>> {
+        self.0.input_if_head(data, head).await
+    }
     /// [`Self::input`], also saying whether this call wrote the input. The
     /// append under the commit lock decides, so concurrent duplicates cannot
     /// both answer [`InputCommit::Written`].

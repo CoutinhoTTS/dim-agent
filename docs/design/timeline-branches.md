@@ -800,7 +800,20 @@ The format decision for them is recorded in the storage contract: [#427 v20 deci
   - Each event is its own batch: `branch/end` on the line, and `branch/ended` on the parent after the close. A tool end's final message is a second event on the parent, after `branch/end` and before the close, under an id derived from the command.
   - An end with a `host` or `user` source, or because of an ancestor, interrupts the line through `Branch::close()`.
   - On reload, the restore rule above applies. A Session publishes after its restore, so a part that ends a line at load, such as Goal's reconcile ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)), waits for `SessionLifecycle::activated()` and then finds every line the directory holds published.
-  - The Timeline gains the line's own admission check: `Timeline::input` becomes `input_checked(data, admit)`, which runs `admit` under the commit lock, so an input that commits after `branch/end` is refused with `branch_ended` instead of racing the close. The Dispatcher and batching are unchanged.
+  - The Timeline gains the line's own admission check: `Timeline::input` becomes `input_checked(data, expected, admit)`, which runs `admit` under the commit lock, so an input that commits after `branch/end` is refused with `branch_ended` instead of racing the close. The Dispatcher and batching are unchanged.
+
+**R2. A conditional input append** (owner: dim runtime, Timeline and `TreeCommands`; #1989).
+
+- **Blocked feature and rule.**
+  - Goal decides a continuation from the facts it has folded and then appends it through `TreeCommands.input` (Goal A.4 C4, C5). Between the decision's last check and the append, `Timeline::input_checked` looks the submission id up in the store before it takes the commit lock ([timeline.rs](../../crates/dim-agent-runtime/src/core/timeline.rs)); an input committed in that gap is ordered before the continuation, and nothing refuses the stale continuation.
+  - The caller's own check cannot close the gap: the check and the append are not one step ([design rules §4](../architecture/rust-agent/principles.md#4-通过时间线扩展行为) rule 8).
+- **Existing mechanisms considered.**
+  - `Timeline::lock_tail` holds the commit lock but requires an idle timeline, freezes further appends and cannot await a store read, so it cannot carry a decision.
+  - A `before` callback runs under the commit lock but may only transform the draft, never refuse the write (rule 3).
+  - The admission check `input_checked(data, expected, admit)` runs under the commit lock but decides by the line's own state (`branch/end`); a caller's precondition there would put a feature's meaning into the runtime (rule 4).
+  - A submission id answers idempotency, not precedence: a continuation carries a new id on every decision.
+- **Generic capability.** An input append carries the last assigned sequence the caller decided on: `TreeCommands::input_if_head(id, input, head)`, `Branch::input_if_head`, `TimelineContext::input_if_head` and `Timeline::input_checked(data, expected, admit)`. `input_if_head` is exported like `input`, so every language calls the same operation. Under the commit lock, when `Timeline::committed() != expected`, it writes nothing, allocates no sequence and answers `Appended::Moved`; otherwise it appends as `input` does. No business meaning: the caller names a sequence, and any fact behind it refuses the append.
+- **Effect on sequences, batches, interrupt and reload.** A refused append allocates no sequence and publishes nothing. Batches are unchanged: an input is one event, and the refusal happens before the commit. `admit` still runs before the write, so `branch_ended` keeps its answer. Nothing is persisted, so reload is unchanged.
 
 ## 18. Security
 
@@ -822,7 +835,7 @@ Rules: [design rules §1, §2 and §4](../architecture/rust-agent/principles.md)
 | §4.1 Command events | An end is `branch/end`. TimelineTree decides and writes `branch/ended`. A message is input whose receiver's InputQueue and Loop decide. An end of an ended line, or a refused message, writes nothing, and the reply says why |
 | §4.2 No recall after handoff | A committed message belongs to the receiver. A `branch/end` is not withdrawn |
 | §4.3 Before callbacks | None |
-| §4.4 No business meaning in core | Dispatcher, `before` and batches are unchanged; the Timeline's admission check is generic (§17 R1). The identity text is TimelineTree's own domain, the lines of a Session. A tool line's protocol is written where `first_input` already writes tool-specific text, in the module that owns the tool |
+| §4.4 No business meaning in core | Dispatcher, `before` and batches are unchanged; the Timeline's admission check and its conditional append are generic (§17 R1, R2). The identity text is TimelineTree's own domain, the lines of a Session. A tool line's protocol is written where `first_input` already writes tool-specific text, in the module that owns the tool |
 | §4.5 Batches | `branch/end` stands alone, carrying a tool end's final message. The message itself is one later `input/message` on the parent, under an id derived from that end, so the two are ordered and are not one batch, and restore completes the pair (§10). `branch/ended` comes last, after the close. The roster and the ended notice are one input. `branch/default` on the root stands alone, and each status note is one Append after it |
 | §4.6 Context | Identity, roster, messages, notices and the status note are adopted inputs. `read` returns a tool result. Nothing else enters the context |
 | §4.7 Public events and services | BranchLine folds its own line's public events. The tool reads BranchLine (same plugin) and TreeCommands. `read` returns committed events as a tool result, the way Collaboration's `read` does, and no part folds another line's facts. Goal classifies the opening input by its own published A5 convention (§7.4). BranchLine and Goal read `TimelineInfo.source` through TreeCommands, a public service |

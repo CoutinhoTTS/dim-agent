@@ -621,6 +621,12 @@ export interface TreeCommands {
    */
   input(id: string, input: InputMessageData): Promise<import('./plugin.js').BranchEvent>
   /**
+   * Commits `input` to branch `id` only while its last assigned sequence is
+   * still `head`: a fact behind `head` writes nothing and answers `null`.
+   * @throws {AgentErrorThrown}
+   */
+  inputIfHead(id: string, input: InputMessageData, head: number | bigint): Promise<import('./plugin.js').BranchEvent | null>
+  /**
    * Ends the line `id` with `source`; only the target is checked (§10).
    * @throws {AgentErrorThrown}
    */

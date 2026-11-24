@@ -514,6 +514,16 @@ impl TreeCommands {
     ) -> std::result::Result<Arc<AgentEvent>, AgentError> {
         self.get(&id)?.input(input).await
     }
+    /// Commits `input` to branch `id` only while its last assigned sequence is
+    /// still `head`: a fact behind `head` writes nothing and answers `null`.
+    pub async fn input_if_head(
+        &self,
+        id: String,
+        input: InputMessageData,
+        head: u64,
+    ) -> std::result::Result<Option<Arc<AgentEvent>>, AgentError> {
+        self.get(&id)?.input_if_head(input, head).await
+    }
     /// Commits `inputs` to branch `id` as one atomic batch through its
     /// validating `Branch::inputs`: the given order, contiguous sequences and
     /// one publication. Rust only: no other language has a consumer.

@@ -48,7 +48,7 @@ every instance of that group; a row gets the nearest enclosing instance. Its met
 
 | Name | Group | Rust type | Methods used by parts |
 | --- | --- | --- | --- |
-| `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `create(parent, at, options, cancelled)`, `end(id, source)`, `page(id, after, limit)` |
+| `treeCommands` | `session` | `TreeCommands` | `list()`, `info(id)`, `input(id, input)`, `inputIfHead(id, input, head)`, `create(parent, at, options, cancelled)`, `end(id, source)`, `page(id, after, limit)` |
 | `dispatcher` | `branch` | `Dispatcher` | `consume(name, keys, rebuild, handler)`, `listen(name, keys, handler)`, `committed()`, `notify()`, `sequence()`, `changed()` |
 | `branchLifecycle` | `branch` | `BranchLifecycle` | `activated()`, `closing()`. `registerOpening` registers work that branch opening waits for. |
 | `timeline` | `branch` | `Timeline` | `append({type, name, data, tags?})` → the committed event; `query(query)` (the one bounded read, `include_publishing` for the branch's not-yet-published facts), `ancestors()`, `sequence()`, `committed()`, `hasPending()` |
@@ -57,10 +57,11 @@ every instance of that group; a row gets the nearest enclosing instance. Its met
 The data methods were added for this purpose; the existing ones that return handles or take Rust
 closures stay as they are for Rust callers:
 
-- `TreeCommands::info`, `input`, `create`, `end` and `page` address branches by id and return
-  data: `TimelineInfo` (with `source`, and answered for an ended line as well), the committed
-  `AgentEvent`, the new branch's id, and one page of an open or ended line's committed batches.
-  `create` takes the caller's cancellation explicitly (§Cancellation); `end` is
+- `TreeCommands::info`, `input`, `input_if_head`, `create`, `end` and `page` address branches by
+  id and return data: `TimelineInfo` (with `source`, and answered for an ended line as well), the
+  committed `AgentEvent`, `null` when a fact committed behind `input_if_head`'s `head`, the new
+  branch's id, and one page of an open or ended line's committed batches. `create` takes the
+  caller's cancellation explicitly (§Cancellation); `end` is
   [timeline branches](timeline-branches.md#10-ending-a-line).
 - `Dispatcher::listen` is `subscribe` in data form. Its `&Ctx` parameter is the calling row's
   context, so the subscription belongs to that row and ends when it unloads or restarts. The

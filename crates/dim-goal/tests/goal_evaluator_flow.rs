@@ -918,6 +918,59 @@ async fn pursuit_2_a_continue_conclusion_reads_the_latest_committed_cutoff() {
     env.close().await;
 }
 
+/// A Queue that commits inside the evaluated continuation's submission lookup,
+/// then is consumed by the next turn while `turn_end` still names the judged
+/// end: the recheck sees the started turn and the append refuses the head that
+/// moved behind it (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_consumed_queue_that_started_a_turn_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let (entered, release) = env.gated().hold_query("input/message");
+    let conclusion = texts::conclusion(
+        "main",
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    env.write_message(
+        "main",
+        vec![raw(&conclusion, None, false)],
+        InputMode::Append,
+    );
+    tokio::time::timeout(Duration::from_secs(15), entered)
+        .await
+        .expect("the evaluated continuation's submission lookup starts")
+        .expect("the held lookup is the continuation's");
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    env.consume("main", &queued.id);
+    release.send(()).expect("the lookup answers");
+    let writes = env.settled("main").await;
+    let stale: Vec<String> = writes
+        .iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"evaluation="{evaluation}""#))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened a new turn inside the lookup window, yet it wrote {stale:?}",
+        queued.sequence
+    );
+    env.close().await;
+}
+
 /// A `continue` conclusion that arrives while a background task is open waits
 /// for the task: its cancelled end takes the conclusion once, and a second
 /// cancelled end writes nothing more (Pursuit §5).
