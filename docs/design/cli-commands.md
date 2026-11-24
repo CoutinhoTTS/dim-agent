@@ -2436,8 +2436,9 @@ Sessions are all active prints the sentence above instead.
 
 ### Migration interaction
 
-`dim` and the alpha package's `dima` invoke these same native commands. Bare
-`migration` selects its source and target by the build's release channel:
+`dim-nightly migration` requires an explicit `--home TARGET` for every operation.
+Neither `--source` nor `DIMCODE_HOME` selects a migration target for nightly.
+For other builds, bare `migration` selects its source and target by channel:
 
 | Build | Distribution | Legacy source | Native target home |
 | --- | --- | --- | --- |

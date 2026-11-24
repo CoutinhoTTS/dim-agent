@@ -2,8 +2,8 @@
 
 `dimcode` is a thin Rust client for the local App Server. It owns command-line input, scrollback output, approvals, questions and account prompts. The App Server owns model execution, tools, session state and persistence. The npm wrapper exposes the same program as `dim` and `dimcode`; the alpha wrapper exposes `dima`.
 
-`migration` and `./dev migration` follow the build's release channel: alpha imports
-CN `.dimcode/v2` into `.dimcode-alpha`; non-alpha imports Global `.dim/v2` into
+`migration` and `./dev migration` follow the build's release channel: nightly requires
+`--home TARGET`; alpha imports CN `.dimcode/v2` into `.dimcode-alpha`; other builds import Global `.dim/v2` into
 `.dim` and CN `.dimcode/v2` into `.dimcode` independently. Default task queries
 search the channel's target homes. A terminal asks once to confirm writers have
 stopped. Run/retry settle the native daemon through normal shutdown and write its
