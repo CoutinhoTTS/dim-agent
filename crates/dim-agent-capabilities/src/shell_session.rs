@@ -491,6 +491,7 @@ impl ShellSession {
                     task_id: task_id.clone(),
                 })
                 .await;
+            let _ = std::fs::remove_file(&reply.output_path);
             return Err(HostError::failed(error));
         }
         let dialect = match runtime.edition {
@@ -1409,6 +1410,12 @@ impl ShellSession {
                             result,
                         };
                         this.settle(data);
+                        let _ = this
+                            .host
+                            .settle(TaskRequest {
+                                task_id: task_id.clone(),
+                            })
+                            .await;
                         return;
                     }
                 }
@@ -1427,7 +1434,7 @@ impl ShellSession {
     }
 
     /// Stops a task by id.
-    pub async fn stop(&self, task_id: &str) -> Result<ExecEndedData, TaskError> {
+    pub async fn stop(self: &Arc<Self>, task_id: &str) -> Result<ExecEndedData, TaskError> {
         let occupying = {
             let mut inner = self.inner.lock().await;
             if inner
@@ -1522,11 +1529,42 @@ impl ShellSession {
                 .await;
             if matches!(killed, Err(HostPlatformError::TaskRunning)) {
                 let task_id = task.task_id.clone();
+                let output_path = task.output_path.clone();
                 self.inner
                     .lock()
                     .await
                     .background
                     .insert(task_id.clone(), task);
+                let this = self.clone();
+                let host = self.host.clone();
+                let watched = task_id.clone();
+                self.tasks.lock().await.spawn(async move {
+                    let reply = host
+                        .wait(
+                            WaitRequest {
+                                task_id: watched.clone(),
+                                timeout_ms: None,
+                            },
+                            never_cancelled(),
+                        )
+                        .await;
+                    if reply.is_ok() {
+                        let _ = host
+                            .settle(TaskRequest {
+                                task_id: watched.clone(),
+                            })
+                            .await;
+                        this.inner.lock().await.background.remove(&watched);
+                        this.settle(ExecEndedData {
+                            task_id: watched.clone(),
+                            status: ExecStatus::Cancelled,
+                            result: ToolResult::text(format!(
+                                "Background command stopped.\nOutput: {}",
+                                output_path.display()
+                            )),
+                        });
+                    }
+                });
                 return Ok(ExecEndedData {
                     task_id,
                     status: ExecStatus::Cancelled,

@@ -897,6 +897,10 @@ impl HostPlatform {
         request: SpawnWithStdinRequest,
         cancelled: crate::host::CancelledFn,
     ) -> Result<SpawnWithStdinReply, HostPlatformError> {
+        let started = Instant::now();
+        let stdin = STANDARD
+            .decode(request.stdin.unwrap_or_default())
+            .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
         let cancel = CancellationToken::new();
         let waiter = {
             let cancel = cancel.clone();
@@ -905,10 +909,6 @@ impl HostPlatform {
                 cancel.cancel();
             })
         };
-        let started = Instant::now();
-        let stdin = STANDARD
-            .decode(request.stdin.unwrap_or_default())
-            .map_err(|error| HostPlatformError::Invalid(error.to_string()))?;
         let command = ConfiguredCommand {
             command: request.command,
             cwd: PathBuf::from(request.cwd),
@@ -922,23 +922,21 @@ impl HostPlatform {
             stdout_limit: request.limits.stdout,
             stderr_limit: request.limits.stderr,
         };
-        let end = self
-            .configured(command, &cancel, None)
-            .await
-            .map_err(|error| match error {
-                ConfiguredError::Prepare(error) => Self::process_error(error),
-                ConfiguredError::Unloaded => HostPlatformError::Closed,
-                ConfiguredError::Spawn(error) => HostPlatformError::Io(error.to_string()),
-                ConfiguredError::Wait(error, stderr) => {
-                    let reason = format!("wait failed: {error}");
-                    HostPlatformError::Io(if stderr.is_empty() {
-                        reason
-                    } else {
-                        format!("{reason}: {}", String::from_utf8_lossy(&stderr))
-                    })
-                }
-            })?;
+        let end = self.configured(command, &cancel, None).await;
         waiter.abort();
+        let end = end.map_err(|error| match error {
+            ConfiguredError::Prepare(error) => Self::process_error(error),
+            ConfiguredError::Unloaded => HostPlatformError::Closed,
+            ConfiguredError::Spawn(error) => HostPlatformError::Io(error.to_string()),
+            ConfiguredError::Wait(error, stderr) => {
+                let reason = format!("wait failed: {error}");
+                HostPlatformError::Io(if stderr.is_empty() {
+                    reason
+                } else {
+                    format!("{reason}: {}", String::from_utf8_lossy(&stderr))
+                })
+            }
+        })?;
         let duration_ms = started.elapsed().as_millis() as u64;
         let (status, exit_code, signal, stdout, stderr, stdout_truncated, stderr_truncated) =
             match end {
@@ -1096,10 +1094,17 @@ impl HostPlatform {
         }
     }
 
-    /// The directory the persistent shell owns: `<home>/.dim/exec`.
-    pub fn exec_root(&self) -> PathBuf {
+    fn exec_root_path(&self) -> PathBuf {
         let root = self.home.join(".dim").join("exec");
         std::fs::canonicalize(&root).unwrap_or(root)
+    }
+
+    /// The directory the persistent shell owns: `<home>/.dim/exec`.
+    pub fn exec_root(&self) -> Result<String, HostPlatformError> {
+        self.exec_root_path()
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| HostPlatformError::Invalid("the exec root path is not UTF-8".into()))
     }
     /// The process facts a consumer needs, in one call. Resolves the exec
     /// shell; in-process callers that need only captured facts read the fields.
@@ -1108,7 +1113,7 @@ impl HostPlatform {
             .home
             .to_str()
             .ok_or_else(|| HostPlatformError::Invalid("the user home path is not UTF-8".into()))?;
-        let exec_root = self.exec_root();
+        let exec_root = self.exec_root_path();
         let exec_root = exec_root
             .to_str()
             .ok_or_else(|| HostPlatformError::Invalid("the exec root path is not UTF-8".into()))?;
@@ -1550,6 +1555,30 @@ impl HostPlatform {
         }
         if let Some((_, record)) = &job {
             record.start();
+            if let Some((result_path, _)) = self.job_completion(&record.id) {
+                let record = record.clone();
+                self.command_workers.spawn(async move {
+                    loop {
+                        if record.is_terminal() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        if record.is_terminal() {
+                            return;
+                        }
+                        let Ok(text) = tokio::fs::read_to_string(&result_path).await else {
+                            continue;
+                        };
+                        let TaskKind::Job(job) = &record.kind else {
+                            return;
+                        };
+                        if let Some(code) = shell::completion_code(&text, &job.end_marker) {
+                            record.finish(shell::job_completion_terminal(&record, job, &code));
+                            return;
+                        }
+                    }
+                });
+            }
         }
         Ok(())
     }
@@ -3547,7 +3576,8 @@ impl HostPlatform {
                 "not a persistent shell output directory",
             ));
         }
-        let root = std::fs::canonicalize(self.exec_root()).unwrap_or_else(|_| self.exec_root());
+        let root =
+            std::fs::canonicalize(self.exec_root_path()).unwrap_or_else(|_| self.exec_root_path());
         let target = canonicalize_existing_prefix(path)?;
         if target == root || !target.starts_with(&root) {
             return Err(io::Error::new(
@@ -3965,9 +3995,7 @@ pub(crate) mod shell {
         let mut parts = tail.split_whitespace();
         let pid = parts.next()?.parse().ok()?;
         let task_id = parts.next()?;
-        task_id
-            .starts_with("exec-")
-            .then(|| (task_id.to_owned(), pid))
+        Some((task_id.to_owned(), pid))
     }
 
     fn shell_event_len(event: &super::ShellEvent) -> usize {
@@ -4671,6 +4699,56 @@ pub(crate) mod shell {
             duration_ms: record.started.elapsed().as_millis() as u64,
             failure,
             output: command.output_record(),
+            note: None,
+        }
+    }
+
+    pub(crate) fn completion_code(text: &str, marker: &str) -> Option<String> {
+        text.lines().find_map(|line| {
+            line.split_once(marker)
+                .map(|(_, rest)| rest.trim().to_owned())
+                .filter(|rest| !rest.is_empty())
+        })
+    }
+
+    pub(crate) fn job_completion_terminal(
+        record: &super::TaskRecord,
+        job: &ShellJob,
+        code: &str,
+    ) -> super::Terminal {
+        let (output, read_failure) = job.output_record();
+        let (status, exit_code, failure) = match code {
+            "failed" => (
+                super::TaskStatus::Failed,
+                None,
+                Some(super::TaskFailure::CommandFailed),
+            ),
+            "unknown" => (
+                super::TaskStatus::Failed,
+                None,
+                Some(super::TaskFailure::UnknownExit),
+            ),
+            code => match code.parse::<i32>() {
+                Ok(0) => (super::TaskStatus::Exited, Some(0), None),
+                Ok(code) => (
+                    super::TaskStatus::Failed,
+                    Some(code),
+                    Some(super::TaskFailure::CommandFailed),
+                ),
+                Err(_) => (
+                    super::TaskStatus::Failed,
+                    None,
+                    Some(super::TaskFailure::UnknownExit),
+                ),
+            },
+        };
+        super::Terminal {
+            status,
+            exit_code,
+            signal: None,
+            duration_ms: record.started.elapsed().as_millis() as u64,
+            failure: read_failure.or(failure),
+            output,
             note: None,
         }
     }
