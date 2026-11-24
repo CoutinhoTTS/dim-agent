@@ -741,9 +741,26 @@ export const useChatStore = defineStore("chat", () => {
     return { ended, turnEnded }
   }
 
+  /**
+   * The requests whose queued start is newer than the window's cutoff: the read
+   * that returned `through` cannot hold their progress.
+   */
+  function startedRequests(branch: BranchStream, channel: Channel, branchId: string, through: number): Set<string> {
+    const started = new Set<string>()
+    const record = (event: SessionEvent) => {
+      if (event.sequence > through && event.content.kind === "model-start") started.add(event.content.requestId)
+    }
+    for (const item of branch.queued) if (item.kind === "event") record(item.event)
+    for (const notification of channel.queued) {
+      if ((notification.method === "session.event" || notification.method === "session.display") && notification.branchId === branchId) record(notification.event)
+    }
+    return started
+  }
+
   /** Whether a window's facts already superseded a snapshot taken before it. */
-  function staleProgress(progress: ModelProgress, window: { ended: Set<string>; turnEnded: boolean }, active: string | undefined): boolean {
+  function staleProgress(progress: ModelProgress, window: { ended: Set<string>; turnEnded: boolean }, active: string | undefined, started: ReadonlySet<string>): boolean {
     if (progress.requestId === undefined) return window.turnEnded
+    if (started.has(progress.requestId)) return false
     return window.ended.has(progress.requestId) || (window.turnEnded && progress.requestId !== active)
   }
 
@@ -768,20 +785,18 @@ export const useChatStore = defineStore("chat", () => {
         branch.projection = loaded.projection
         branch.before = loaded.window.before
         branch.through = through
-        for (const event of loaded.events) {
-          const content = event.content
-          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use-start" || content.kind === "tool-use") && content.requestId === branch.progress?.requestId)) branch.progress = undefined
-        }
         const settled = supersededRequests(loaded.events)
         const active = loaded.projection.activeRequestId()
+        const started = startedRequests(branch, channel, branchId, through)
+        if (branch.progress !== undefined && staleProgress(branch.progress, settled, active, started)) branch.progress = undefined
         const head = branch.queued.slice(0, queuedAtWindow)
         const tail = branch.queued.slice(queuedAtWindow)
         branch.queued = [
-          ...head.filter(item => item.kind === "event" ? item.event.sequence > through : !staleProgress(item.progress, settled, active)),
+          ...head.filter(item => item.kind === "event" ? item.event.sequence > through : !staleProgress(item.progress, settled, active, started)),
           ...tail.filter(item => item.kind === "event" ? item.event.sequence > through : true),
         ]
         channel.queued = [
-          ...channel.queued.slice(0, channelAtWindow).filter(notification => notification.method !== "session.model.progress" || notification.progress.branchId !== branchId || !staleProgress(notification.progress, settled, active)),
+          ...channel.queued.slice(0, channelAtWindow).filter(notification => notification.method !== "session.model.progress" || notification.progress.branchId !== branchId || !staleProgress(notification.progress, settled, active, started)),
           ...channel.queued.slice(channelAtWindow),
         ]
         branch.syncing = false
