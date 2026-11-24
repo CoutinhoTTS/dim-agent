@@ -281,7 +281,7 @@ key 与模式互不相关（[history.rs](../../../crates/dim-agent-capabilities/
 
 各线只在尾部不同：
 
-- 根线确定 system 和模型，子分支不改它们（[prompt](../../architecture/rust-agent/prompt.md)）。
+- 链上没有已采用配置的线在开场时采用会话的初始 system 与模型：根线、恢复的根线，以及切点早于父线采用的线。其余各线从切点继承配置（[prompt](../../architecture/rust-agent/prompt.md)）。
 - 提示词来源按根的作用域加载，由子分支继承（[PromptSources](../../architecture/rust-agent/plugins/PromptSources.md)）。
 - 每个 Session 只有一个 ToolRegistry，所以每条线的工具列表都一样。这就是不能开线的线上的 `create` 由工具结果拒绝、而不是拿掉工具的原因。
 - 协议只缓存显式标记内容时，请求会给这份前缀打上缓存断点：最多两个，System 末尾一个，最后一条用户或工具结果消息的最后一个块一个，且只在各自条件成立时才放置（[Anthropic 提示缓存断点](../../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)）。
