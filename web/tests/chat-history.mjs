@@ -2093,3 +2093,41 @@ test("an unopened line drops transient progress instead of caching it", async t 
   const rows = chat.views.session.branches.worker.rows
   assert.equal(rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(rows))
 })
+
+test("an opening window keeps the progress of a request that started after its cutoff", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise)
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: "old tail", textOffset: 0, thinking: "", thinkingOffset: 0 } })
+  receive(chat, "main", event(2, { kind: "model-start", requestId: "r2" }))
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r2", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1, retry: { attempt: 2, maxAttempts: 3, retryAtMs: 5, kind: "network" } } })
+  held.resolve(page([event(1, { kind: "turn-end", outcome: "completed" })], 1))
+  await flush()
+  const rows = chat.views.session.rows
+  assert.equal(rows.find((row) => row.kind === "thinking")?.text, "weigh", JSON.stringify(rows))
+  assert.equal(chat.views.session.retry?.attempt, 2, "the retrying request's countdown stays")
+  assert.deepEqual(rows.filter((row) => row.kind === "assistant").map((row) => row.text), [], "the superseded request's progress is dropped")
+})
+
+test("a moved line's window keeps the progress of a request that started after its cutoff", async t => {
+  const held = deferred()
+  let workerRead = false
+  const chat = session(t, params => {
+    if (params.branchId !== "worker") return page([input(1, "on the root")], 1)
+    workerRead = true
+    return held.promise
+  }, { "session.branch_set_default": () => "worker" })
+  await flush()
+  const moving = chat.setDefaultBranch("session", "worker")
+  await until(() => workerRead)
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r1", text: "old tail", textOffset: 0, thinking: "", thinkingOffset: 0 } })
+  receive(chat, "worker", event(2, { kind: "model-start", requestId: "r2" }))
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r2", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1, retry: { attempt: 2, maxAttempts: 3, retryAtMs: 5, kind: "network" } } })
+  held.resolve(page([event(1, { kind: "turn-end", outcome: "completed" })], 1))
+  await moving
+  await flush()
+  const rows = chat.views.session.rows
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.equal(rows.find((row) => row.kind === "thinking")?.text, "weigh", JSON.stringify(rows))
+  assert.equal(chat.views.session.retry?.attempt, 2, "the retrying request's countdown stays")
+  assert.deepEqual(rows.filter((row) => row.kind === "assistant").map((row) => row.text), [], "the superseded request's progress is dropped")
+})
