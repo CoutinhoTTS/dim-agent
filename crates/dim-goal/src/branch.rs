@@ -363,8 +363,12 @@ enum Answers {
     Change,
     /// The pause the turn end at `after` decides.
     TurnEnd,
-    /// The pause the `continue` conclusion at `after` of `evaluation` decides.
+    /// The pause the conclusion at `after` of `evaluation` decides: a
+    /// `continue` at the limit, or a `failed` report.
     Conclusion(u64),
+    /// The pause the failed evaluation states: its creation failed or its
+    /// line ended before a conclusion.
+    EvaluationFailed(u64),
     /// The fact `after` names, decided once by its caller.
     Fact,
 }
@@ -409,6 +413,7 @@ impl State {
             Answers::Change => self.fold.pending_change() != Some(after),
             Answers::TurnEnd => !self.fold.pauses_at_end(after),
             Answers::Conclusion(evaluation) => !self.fold.pauses_at_conclusion(after, evaluation),
+            Answers::EvaluationFailed(evaluation) => !self.fold.pauses_at_failure(evaluation),
             Answers::Fact => false,
         }
     }
@@ -872,9 +877,26 @@ impl Owner {
     fn append_business(
         &self,
         inputs: Vec<InputMessageData>,
-        mut business: recovery::BusinessState,
+        business: recovery::BusinessState,
         trigger: Option<usize>,
     ) -> Result<Vec<Arc<AgentEvent>>, AgentError> {
+        let events = self.append_business_if_head(inputs, business, trigger, None)?;
+        Ok(events.expect("an unconditional batch is written"))
+    }
+
+    /// [`Self::append_business`] only while the branch's last assigned
+    /// sequence is still `head`: a fact that committed behind it leaves
+    /// nothing written, and the caller decides again (D3, C4, C5). A record is
+    /// a batch — the model's state input and the recovery event — and
+    /// `input_if_head` takes one input, so the condition rides the batch's own
+    /// registration under the commit lock instead.
+    fn append_business_if_head(
+        &self,
+        inputs: Vec<InputMessageData>,
+        mut business: recovery::BusinessState,
+        trigger: Option<usize>,
+        head: Option<u64>,
+    ) -> Result<Option<Vec<Arc<AgentEvent>>>, AgentError> {
         let mut drafts = Vec::with_capacity(inputs.len() + 1);
         for input in inputs {
             input
@@ -889,7 +911,14 @@ impl Owner {
             business.input_id = drafts[index].id.clone();
         }
         drafts.push(business.draft()?);
+        // The sentinel error only cancels the batch; `moved` answers the
+        // caller, which decides again from the fold that moved.
+        let moved = std::cell::Cell::new(false);
         let events = self.timeline.append_batch_registered(drafts, |events| {
+            if head.is_some_and(|head| self.timeline.committed() != head) {
+                moved.set(true);
+                return Err(AgentError::Cancelled("Goal record superseded".into()));
+            }
             for event in &events[..events.len() - 1] {
                 let EventKind::InputMessage(data) = &event.kind else {
                     unreachable!("before preserves input kind")
@@ -959,8 +988,12 @@ impl Owner {
             self.state.lock().unwrap().last_write =
                 events.last().expect("business result").sequence;
             Ok(())
-        })?;
-        Ok(events)
+        });
+        match events {
+            Ok(events) => Ok(Some(events)),
+            Err(_) if moved.get() => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     async fn pause_closing(&self) -> Result<(), AgentError> {
@@ -1369,13 +1402,13 @@ impl Owner {
         let owner = self.clone();
         self.tasks.spawn(async move {
             let result = owner.record_inner(after, status, answers).await;
-            let written = matches!(result, Ok(true));
             owner.state.lock().unwrap().terminating = false;
             // A record the fold no longer asked for leaves the goal running
             // with a decision still due: a fact that committed while the
             // settlement held the decisions asked for one, and nothing else
-            // takes it again.
-            if !written && owner.write_status.borrow().is_ok() {
+            // takes it again. A write that failed goes to its caller's error
+            // path instead, which takes no decision again without a new fact.
+            if matches!(result, Ok(false)) && owner.write_status.borrow().is_ok() {
                 owner.resume_decisions();
             }
             if let Err(Err(error)) = reply.send(result.map(|_| ())) {
@@ -1455,7 +1488,12 @@ impl Owner {
                 after,
             )
             .await;
-            self.append_business(vec![input], business, None)?;
+            if self
+                .append_business_if_head(vec![input], business, None, Some(through))?
+                .is_none()
+            {
+                continue;
+            }
             let mut state = self.state.lock().unwrap();
             state.written.insert(after);
             state.recorded = state.recorded.max(after);
@@ -1719,7 +1757,7 @@ impl Owner {
             self.record(
                 after,
                 Some(text::State::Paused("evaluation_failed".to_owned())),
-                Answers::Fact,
+                Answers::EvaluationFailed(after),
             )
             .await?;
         }
@@ -2109,7 +2147,7 @@ impl Owner {
                     .record(
                         at,
                         Some(text::State::Paused("evaluation_failed".to_owned())),
-                        Answers::Fact,
+                        Answers::EvaluationFailed(evaluation),
                     )
                     .await
             })
@@ -2159,7 +2197,7 @@ impl Owner {
                 self.record(
                     sequence,
                     Some(text::State::Paused("evaluation_failed".to_owned())),
-                    Answers::Fact,
+                    Answers::Conclusion(evaluation),
                 )
                 .await?;
             }

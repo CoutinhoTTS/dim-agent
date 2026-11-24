@@ -937,7 +937,9 @@ impl Fold {
         }
         self.interrupted()
             || end.status == TurnStatus::Failed
-            || (!self.turn_open() && !self.pending_driving())
+            || (end.status == TurnStatus::Completed
+                && !self.turn_open()
+                && !self.pending_driving())
     }
     /// Whether the `continue` conclusion at `sequence` still decides the pause a
     /// record states: the checks [`decide_evaluated_continuation`] makes before
@@ -955,6 +957,16 @@ impl Fold {
                 .turn_end
                 .as_ref()
                 .is_none_or(|end| end.sequence < sequence)
+    }
+    /// Whether the failed evaluation `evaluation` still pauses the goal: it is
+    /// current, no conclusion answers it, and no driving input or newer turn
+    /// supersedes it (C4, C5, Pursuit §4.1). An evaluation the settlement
+    /// ended for a pause the Queue abandoned is not its own failure.
+    pub(crate) fn pauses_at_failure(&self, evaluation: u64) -> bool {
+        self.is_current(evaluation)
+            && !self.conclusions.contains_key(&evaluation)
+            && !self.turn_open()
+            && !self.pending_driving()
     }
     /// Whether evaluation `N` still wants its evaluator: the goal runs, no
     /// conclusion answers it and it is still current (Pursuit §13 E2).
