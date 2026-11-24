@@ -44,15 +44,23 @@ impl Owner {
     /// decisions were suspended ran no task, and no later input may be needed
     /// for it (Pursuit §4.1, §13 E2).
     pub(super) fn resume_settlement(self: &Arc<Self>) {
+        if let Some(interrupt) = self.release_settlement() {
+            self.interrupted(interrupt);
+        }
+    }
+
+    /// Releases task admission without taking up the interrupt the settlement
+    /// deferred, and answers that interrupt. A state write that failed states
+    /// nothing, so it does not decide that pause again: it stays with the fold
+    /// until a later settlement takes it up (Pursuit §4.1, §13 E2, #2119).
+    pub(super) fn release_settlement(self: &Arc<Self>) -> Option<u64> {
         let interrupt = {
             let mut state = self.state.lock().unwrap();
             state.terminating = false;
             state.fold.pending_interrupt()
         };
         self.settle();
-        if let Some(interrupt) = interrupt {
-            self.interrupted(interrupt);
-        }
+        interrupt
     }
 
     pub(super) fn resume_decisions(self: &Arc<Self>) {

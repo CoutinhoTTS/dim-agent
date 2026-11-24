@@ -1027,6 +1027,221 @@ async fn a_failed_state_record_takes_no_second_decision() {
     env.close().await;
 }
 
+/// A state record whose append fails releases the settlement it held without
+/// taking up the interrupt that settlement deferred: no new fact, so the
+/// interrupt states no pause of its own, and a live read still answers the goal
+/// the branch holds in memory (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_state_record_takes_up_no_interrupt_it_deferred() {
+    let env = Env::start().await;
+    let set = env.set("make the tests pass").await;
+    let end = env.turn("main", &[&set]);
+    let evaluation = end.sequence;
+    let evaluator = env
+        .open_branch(
+            "main",
+            "check the result",
+            BranchSource::Host {
+                operation_id: format!("goal:evaluate:{evaluation}"),
+            },
+        )
+        .await;
+    env.dispatched("main", env.timeline("main").committed())
+        .await;
+
+    // The failure report's record writer is held where it settled the
+    // decisions, before it composes its record.
+    let mut record = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let conclusion = texts::conclusion(
+        "main",
+        &evaluator,
+        evaluation,
+        "failed",
+        "the evaluator failed",
+    );
+    let conclusion = env
+        .write_message(
+            "main",
+            vec![raw(&conclusion, None, false)],
+            InputMode::Append,
+        )
+        .sequence;
+    assert_eq!(
+        record.arrived().await,
+        conclusion,
+        "the failure report's record writer answers the conclusion at {conclusion}"
+    );
+
+    // An operator interrupt commits in that window: task admission is
+    // suspended, so its decision waits in the fold.
+    let interrupt = env.interrupt("main");
+    env.dispatched("main", interrupt.sequence).await;
+
+    // The failure report's append fails. The interrupt's own record is held
+    // where it would state its pause, so the case sees whether it is taken up,
+    // and the writer that failed is held after it released the settlement and
+    // before it answers its caller, so the interrupt's record has every chance
+    // to run while nothing says the writer failed yet. The bound only keeps the
+    // case from waiting forever: reaching either hold is what it must not do.
+    let mut again = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        interrupt.sequence,
+        Some(interrupt.sequence),
+    );
+    let mut released = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Released,
+        conclusion,
+        Some(conclusion),
+    );
+    let failure = env.probe.fail_next_state();
+    record.release();
+    failure
+        .await
+        .expect("the writer refuses the failure report");
+    assert_eq!(
+        env.probe.failed_states(),
+        1,
+        "the writer's own check refuses the failure report at {conclusion}"
+    );
+    assert_eq!(
+        released.arrived().await,
+        conclusion,
+        "the writer that failed holds its answer after it released the settlement"
+    );
+    let taken = tokio::time::timeout(std::time::Duration::from_millis(750), again.arrived()).await;
+    assert!(
+        taken.is_err(),
+        "a failed record takes up the interrupt it deferred, yet it answered {:?}",
+        taken.ok()
+    );
+    released.release();
+    let pauses: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| block.marker.contains(r#"status="paused""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        pauses.is_empty(),
+        "a failed record states no pause of its own, yet it wrote {pauses:?}"
+    );
+
+    // The settlement cancelled the writer's caller, so the failure is published
+    // to the branch as it was before this fix: a live read reports it instead
+    // of a state the branch could not state.
+    let error = env
+        .goal("get", json!({}))
+        .await
+        .expect_err("a failed record whose caller the settlement cancelled is published");
+    assert_eq!(
+        error.data.as_ref().map(|data| data.app_error.as_str()),
+        Some("session_invalid_input"),
+        "the read reports the refused write: {error:?}"
+    );
+    env.close().await;
+}
+
+/// A change whose state record fails reports the failure to its caller and
+/// releases the settlement it held without taking up the interrupt that
+/// settlement deferred: the interrupt reaches no append, and a live read still
+/// answers the goal the branch holds in memory (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_change_takes_up_no_interrupt_it_deferred() {
+    let env = Env::start().await;
+    let set = env.set("make the tests pass").await;
+    let _end = env.turn("main", &[&set]);
+    env.wait_for("main", r#"kind="continuation""#).await;
+    let head = env.timeline("main").committed();
+    env.dispatched("main", head).await;
+
+    // The pause's writer is held where it settled the decisions, before it
+    // composes its record.
+    let mut change = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Change,
+        head,
+        Some(head),
+    );
+    let pause = env.goal("pause", json!({}));
+    let (pause, taken) = tokio::join!(pause, async {
+        assert_eq!(
+            change.arrived().await,
+            head,
+            "the pause's writer is held at the cutoff it read"
+        );
+
+        // An operator interrupt commits in that window: task admission is
+        // suspended, so its decision waits in the fold, and its own record is
+        // held where it would state its pause.
+        let interrupt = env.interrupt("main");
+        env.dispatched("main", interrupt.sequence).await;
+        let mut again = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Record,
+            interrupt.sequence,
+            Some(interrupt.sequence),
+        );
+
+        // The pause's append fails: its published status no longer matches the
+        // state its writer states, which the writer checks under the commit.
+        let failure = env.probe.fail_next_state();
+        change.release();
+        failure.await.expect("the writer refuses the pause");
+        tokio::time::timeout(std::time::Duration::from_millis(750), again.arrived())
+            .await
+            .ok()
+    });
+    assert!(
+        pause.is_err(),
+        "the call whose state record was refused reports the failure: {pause:?}"
+    );
+    assert_eq!(
+        env.probe.failed_states(),
+        1,
+        "the writer's own check refuses the pause"
+    );
+    assert!(
+        taken.is_none(),
+        "a failed change takes up the interrupt it deferred, yet it answered {taken:?}"
+    );
+    let pauses: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| block.marker.contains(r#"status="paused""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        pauses.is_empty(),
+        "a failed change states no pause, yet it wrote {pauses:?}"
+    );
+
+    // The failure is the caller's, not the branch's: a live read answers the
+    // goal in memory.
+    let read = env
+        .goal("get", json!({}))
+        .await
+        .expect("a live read answers the goal in memory");
+    assert_eq!(
+        read["goal"]["status"]["kind"], "active",
+        "a failed change leaves the state the branch holds: {read}"
+    );
+    env.close().await;
+}
+
 /// The pause a turn end decides is stated with the reason the fold gives at
 /// the record's own cutoff: an ordinary Append resets the continuation count
 /// without opening a turn, so the limit pause is no longer the answer (#2119).

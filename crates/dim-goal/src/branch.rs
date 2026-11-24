@@ -604,6 +604,14 @@ impl Owner {
             self.resume_settlement();
             return Err(error);
         }
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
+            &self.branch_id,
+            crate::testing::Stage::Change,
+            self.timeline.committed(),
+        )
+        .await;
         let result = async {
             if matches!(change, Change::Set { .. } | Change::Resume) {
                 self.load_current_work().await?;
@@ -689,7 +697,16 @@ impl Owner {
             Ok(sequence)
         }
         .await;
-        self.resume_settlement();
+        match &result {
+            Ok(_) => self.resume_settlement(),
+            // A change that failed states no state, so the interrupt the
+            // settlement deferred waits for a later settlement that succeeds
+            // instead of reaching an append of its own (Pursuit §4.1, §13 E2,
+            // #2119).
+            Err(_) => {
+                self.release_settlement();
+            }
+        }
         result
     }
 
@@ -1441,15 +1458,32 @@ impl Owner {
         let owner = self.clone();
         self.tasks.spawn(async move {
             let result = owner.record_inner(after, status, answers).await;
-            owner.resume_settlement();
-            // A record the fold no longer asked for leaves the goal running
-            // with a decision still due: a fact that committed while the
-            // settlement held the decisions asked for one, and nothing else
-            // takes it again. A write that failed goes to its caller's error
-            // path instead, which takes no decision again without a new fact.
-            if matches!(result, Ok(false)) && owner.write_status.borrow().is_ok() {
-                owner.resume_decisions();
+            match &result {
+                Ok(answered) => {
+                    owner.resume_settlement();
+                    // A record the fold no longer asked for leaves the goal running
+                    // with a decision still due: a fact that committed while the
+                    // settlement held the decisions asked for one, and nothing else
+                    // takes it again.
+                    if !answered && owner.write_status.borrow().is_ok() {
+                        owner.resume_decisions();
+                    }
+                }
+                // A write that failed states nothing, so it takes up neither the
+                // interrupt the settlement deferred nor a later decision: a
+                // later settlement decides again (Pursuit §4.1, §13 E2, #2119).
+                Err(_) => {
+                    owner.release_settlement();
+                }
             }
+            #[cfg(feature = "testing")]
+            crate::testing::stage_held(
+                &owner.session_id,
+                &owner.branch_id,
+                crate::testing::Stage::Released,
+                after,
+            )
+            .await;
             if let Err(Err(error)) = reply.send(result.map(|_| ())) {
                 tracing::warn!(%error, "Goal terminal state could not be saved");
                 let _ = owner.write_status.send_replace(Err(error));
