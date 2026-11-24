@@ -937,9 +937,7 @@ impl Fold {
         }
         self.interrupted()
             || end.status == TurnStatus::Failed
-            || (end.status == TurnStatus::Completed
-                && !self.turn_open()
-                && !self.pending_driving())
+            || (end.status == TurnStatus::Completed && !self.turn_open() && !self.pending_driving())
     }
     /// Whether the `continue` conclusion at `sequence` still decides the pause a
     /// record states: the checks [`decide_evaluated_continuation`] makes before

@@ -786,7 +786,9 @@ async fn pursuit_5_an_abandoned_pause_does_not_fail_an_in_flight_evaluation() {
     // The Queue's own turn end decides the pause the abandoned record left
     // open; the evaluator's end states nothing over it.
     let next = env.turn_ids("main", &[&second.id]);
-    let pause = env.wait_for("main", r#"kind="state" status="paused""#).await;
+    let pause = env
+        .wait_for("main", r#"kind="state" status="paused""#)
+        .await;
     assert_eq!(
         pause.text,
         texts::evaluated_pause(
