@@ -317,6 +317,10 @@ impl TimelineContext {
         crate::names::in_group::<T>(&self.catalog, crate::BRANCH_GROUP)?;
         self.port::<T>(std::any::type_name::<T>())
     }
+    pub(crate) fn public_opt<T: ?Sized + Send + Sync + 'static>(&self) -> Result<Option<Arc<T>>> {
+        crate::names::in_group::<T>(&self.catalog, crate::BRANCH_GROUP)?;
+        Ok(self.ctx.get_at::<T>(&self.scope.key::<T>()))
+    }
     pub(crate) fn port<T: ?Sized + Send + Sync + 'static>(&self, name: &str) -> Result<Arc<T>> {
         self.ctx
             .get_at::<T>(&self.scope.key::<T>())

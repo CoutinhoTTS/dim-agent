@@ -146,8 +146,10 @@ the foreground or after the background handoff, appends HostPlatform's failure
 note to the result text when the shown output matches; stops, timeouts and
 offload failures get none. Codes and structured content are unchanged.
 
-`exec_stop {taskId}` stops a detached command owned by the calling branch through
-BackgroundExec. It waits for cleanup and returns the committed terminal
+`exec_stop {taskId}` stops a detached command owned by the calling branch. The
+App Server resolves the branch's `dyn ExecStop` when the profile provides it (ShellSession in the
+minimal profile) and otherwise uses BackgroundExec; both map `unknown`/`closed`/`read` to the same
+RPC errors. It waits for cleanup and returns the committed terminal
 `{task_id, status, result}` in the model-readable content. An already-ended task
 keeps its result. Only `cancelled` confirms cancellation; `failed` remains an error,
 including when the process tree could not be released. An unknown task fails

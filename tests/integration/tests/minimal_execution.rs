@@ -978,11 +978,16 @@ async fn stop_background_task() {
     let pid = pid_in(&pid_file).await;
 
     let stop = session
-        .service::<dyn dim_agent_capabilities::exec_stop::ExecStop>("main")
-        .unwrap();
-    let ended = stop.stop(task_id.clone()).await.unwrap();
+        .service_opt::<dyn dim_agent_capabilities::exec_stop::ExecStop>("main")
+        .unwrap()
+        .expect("the minimal profile provides the branch stop owner");
+    let ended = stop.clone().stop(task_id.clone()).await.unwrap();
     assert_eq!(ended.status, ExecStatus::Cancelled);
     assert!(gone(&pid).await);
+    assert!(matches!(
+        stop.stop(task_id).await,
+        Err(dim_agent_capabilities::exec_stop::TaskError::Unknown)
+    ));
     session.close().await.unwrap();
     harness.shutdown().await;
 }
