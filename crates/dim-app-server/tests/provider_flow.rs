@@ -5425,6 +5425,155 @@ async fn vendor_routes_agree_across_selection_and_actual_http_execution() {
     std::fs::remove_dir_all(home).unwrap();
 }
 
+/// The built-in `xai` catalog entry is an xAI destination served over the
+/// compatible protocol: its connection names the `xai` vendor package, a GIF in
+/// a conversation becomes its reference, and a standalone call refuses it before
+/// sending anything.
+#[tokio::test]
+async fn the_builtin_xai_route_takes_only_the_native_xai_image_formats() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = Router::new()
+        .route("/{*path}", post(completion))
+        .with_state(seen.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let home = temp_home("xai-image-flow");
+    let (root, provider) = provider_root(&home).await;
+    let resolver = root.get::<ProviderConnectionResolver>().unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let auxiliary = root.get::<AuxiliaryModel>().unwrap();
+    let cancel = CancellationToken::new();
+    let base = format!("http://{address}");
+    let view = provider
+        .management("xai".into(), None, &cancel)
+        .await
+        .unwrap();
+    provider
+        .update(
+            "xai".into(),
+            view.providers[0]
+                .info
+                .version
+                .expect("the built-in xai record"),
+            serde_json::from_value(json!({
+                "baseUrl":format!("{base}/v1"),
+                "credential":{"action":"set","value":"xai-fixture-key"},
+                "enabled":true
+            }))
+            .unwrap(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let target = ModelId {
+        provider_id: "xai".into(),
+        model_id: "grok-4.7".into(),
+    };
+    let selection = provider
+        .configuration(
+            Some(target.clone()),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let gif = dim_agent_types::ImageSource {
+        source_type: dim_agent_types::ImageSourceType::Base64,
+        media_type: "image/gif".into(),
+        data: Some("aGVsbG8=".into()),
+        url: None,
+        file_id: None,
+    };
+    let png = dim_agent_types::ImageSource {
+        media_type: "image/png".into(),
+        ..gif.clone()
+    };
+    let mut request = ModelRequest::new(
+        "xai",
+        "grok-4.7",
+        vec![Message {
+            role: Role::User,
+            content: dim_agent_types::MessageContent::Parts(vec![
+                dim_agent_types::MessagePart::Image {
+                    source: gif.clone(),
+                },
+                dim_agent_types::MessagePart::Image { source: png },
+            ]),
+        }],
+    );
+    request.capability_snapshot = selection.capability_snapshot;
+    request.config = selection.config;
+    let request = Arc::new(request);
+    let resolved = resolver
+        .0
+        .resolve(request.clone(), cancel.clone())
+        .await
+        .unwrap();
+    let ModelConnection::Http(connection) = &resolved.connection else {
+        panic!("the built-in xai connection is HTTP")
+    };
+    assert_eq!(
+        connection.preset.as_deref(),
+        Some("xai"),
+        "the built-in xai route names its vendor package"
+    );
+    let mut output = host
+        .0
+        .invoke(request, resolved.connection, cancel.clone())
+        .await
+        .unwrap();
+    while let Some(chunk) = output.next().await {
+        chunk.unwrap();
+    }
+    {
+        let requests = seen.lock().unwrap();
+        let sent = requests
+            .last()
+            .expect("the xai request reaches the endpoint");
+        let wire = sent.body.to_string();
+        assert!(wire.contains("image/png"), "the PNG stays pixels: {wire}");
+        assert!(
+            !wire.contains("image/gif"),
+            "no GIF reaches the wire: {wire}"
+        );
+        assert!(
+            wire.matches("img:").count() == 1,
+            "the GIF becomes its reference: {wire}"
+        );
+    }
+    let sent = seen.lock().unwrap().len();
+    let error = auxiliary
+        .0
+        .complete(
+            target,
+            AuxiliaryRequest {
+                system: None,
+                messages: vec![Message {
+                    role: Role::User,
+                    content: dim_agent_types::MessageContent::Parts(vec![
+                        dim_agent_types::MessagePart::Image { source: gif },
+                    ]),
+                }],
+                max_output_tokens: None,
+            },
+            cancel.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, AuxiliaryErrorCode::InvalidRequest, "{error:?}");
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        sent,
+        "the xai route refuses the GIF before sending"
+    );
+    root.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test]
 async fn new_api_metadata_routes_and_builtin_routes_survive_restart() {
     let seen = Arc::new(Mutex::new(Vec::new()));

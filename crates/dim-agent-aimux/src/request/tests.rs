@@ -949,6 +949,115 @@ async fn an_unsupported_image_reaches_native_xai_as_its_reference() {
     }
 }
 
+/// A compatible xAI body for `request` as it reaches the wire: the generic
+/// Chat model the `xai` preset builds.
+async fn compatible_xai_capture(request: ModelRequest, preset: Option<&str>) -> Value {
+    capture(
+        |url| {
+            Arc::new(
+                create_openai_compatible(OpenAICompatibleProviderSettings {
+                    name: "xai".into(),
+                    base_url: url,
+                    ..OpenAICompatibleProviderSettings::default()
+                })
+                .unwrap()
+                .chat("grok-4"),
+            )
+        },
+        convert(&request, &ProviderKind::OpenaiCompatible, preset)
+            .unwrap()
+            .options,
+    )
+    .await
+}
+
+/// One request with a WebP in user content and a GIF in a tool result.
+fn compatible_image_request() -> ModelRequest {
+    serde_json::from_value(json!({
+        "providerId": "application-alias", "modelId": "grok-4",
+        "messages": [
+            {"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "mediaType": "image/png", "data": "aGVsbG8="}},
+                {"type": "image", "source": {"type": "base64", "mediaType": "image/webp", "data": WEBP}}
+            ]},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call-1", "name": "read", "input": {}}
+            ]},
+            {"role": "tool_result", "content": [
+                {"type": "tool_result", "tool_use_id": "call-1", "is_error": false,
+                 "content": [
+                    {"type": "text", "text": "caption"},
+                    {"type": "image", "source": {"type": "base64", "mediaType": "image/gif", "data": GIF}}
+                 ]}
+            ]},
+            {"role": "user", "content": "continue"}
+        ],
+        "tools": [tool("read")]
+    }))
+    .unwrap()
+}
+
+/// The `xai` preset on the compatible protocol takes PNG and JPEG only: a WebP
+/// in user content and a GIF in a tool result become their references and reach
+/// no wire as pixels.
+#[tokio::test]
+async fn a_compatible_xai_request_turns_an_unsupported_image_into_its_reference() {
+    let body = compatible_xai_capture(compatible_image_request(), Some("xai")).await;
+    let wire = body.to_string();
+    assert!(wire.contains("image/png"), "{body}");
+    assert!(
+        !wire.contains("image/webp"),
+        "no WebP reaches the wire: {body}"
+    );
+    assert!(
+        !wire.contains("image/gif"),
+        "no GIF reaches the wire: {body}"
+    );
+    assert_eq!(
+        wire.matches("img:").count(),
+        2,
+        "both unsupported images reach the wire as references: {body}"
+    );
+}
+
+/// The `xai` preset changes the image parts and nothing else: a request without
+/// images reaches the wire byte for byte as it does without the preset, and the
+/// same image request without the preset still sends the WebP and the GIF.
+#[tokio::test]
+async fn a_compatible_xai_preset_changes_no_request_without_images() {
+    let text: ModelRequest = serde_json::from_value(json!({
+        "providerId": "application-alias", "modelId": "grok-4",
+        "system": "be brief",
+        "messages": [
+            {"role": "user", "content": "look"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "call-1", "name": "read", "input": {"path": "notes.txt"}}
+            ]},
+            {"role": "tool_result", "content": [
+                {"type": "tool_result", "tool_use_id": "call-1", "is_error": false,
+                 "content": [{"type": "text", "text": "caption"}]}
+            ]},
+            {"role": "user", "content": "continue"}
+        ],
+        "tools": [tool("read")],
+        "config": {"maxTokens": 64, "temperature": 0.25}
+    }))
+    .unwrap();
+    let without = compatible_xai_capture(text.clone(), None).await;
+    let with = compatible_xai_capture(text, Some("xai")).await;
+    assert_eq!(
+        with, without,
+        "the preset changes no request without images"
+    );
+
+    let images = compatible_xai_capture(compatible_image_request(), None).await;
+    let wire = images.to_string();
+    assert!(
+        wire.contains("image/webp") && wire.contains("image/gif"),
+        "a compatible destination without the preset still takes both: {images}"
+    );
+}
+
 /// The line a failed result's text starts with where the destination's wire
 /// form reports no status field.
 const TOOL_ERROR_MARKER_TEXT: &str = "[Error: this tool result reports a failed tool call.]";

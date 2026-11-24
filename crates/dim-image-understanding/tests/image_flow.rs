@@ -449,6 +449,27 @@ impl Fixture {
         .await;
         provider
     }
+    /// Points the built-in `xai` provider at this fixture's endpoint: the
+    /// catalog entry serves xAI over the compatible protocol, so this keeps its
+    /// identity and driver while the wire goes to the fixture.
+    async fn builtin_xai(&self) {
+        let view = self
+            .rpc("provider.management", json!({"providerId":"xai"}))
+            .await;
+        let version = view["providers"][0]["version"].as_u64().unwrap();
+        self.rpc(
+            "provider.update",
+            json!({
+                "providerId":"xai","expectedVersion":version,
+                "patch":{
+                    "baseUrl":self.endpoint,
+                    "credential":{"action":"set","value":"xai-fixture-key"},
+                    "enabled":true
+                }
+            }),
+        )
+        .await;
+    }
     /// A New API route that serves `openai` at first: its model's protocol is
     /// the route metadata, which a model edit can move without changing the
     /// provider or the model id.
@@ -1577,6 +1598,93 @@ async fn an_image_the_native_xai_target_cannot_take_fails_without_a_request() {
             "the {driver} route receives no request without the image"
         );
     }
+    fixture.close().await;
+}
+
+/// The built-in `xai` target is an xAI destination served over the compatible
+/// protocol, so a WebP fails the standalone call before it sends anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_image_the_builtin_xai_target_cannot_take_fails_without_a_request() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    attach_image(
+        &fixture,
+        &session,
+        "main",
+        session_model(&session),
+        "attached.webp",
+        WEBP,
+        "image/webp",
+    )
+    .await;
+    fixture.builtin_xai().await;
+    fixture.configure_to("xai", Some("grok-4.7")).await;
+    let result = fixture
+        .ask(
+            &session,
+            "main",
+            "webp",
+            json!({"image":webp_reference(),"question":"What is visible?"}),
+        )
+        .await;
+    assert_eq!(result.is_error, Some(true), "{result:?}");
+    assert!(
+        text(&result).starts_with("image_understand_failed:"),
+        "{result:?}"
+    );
+    assert!(
+        fixture.script.auxiliary.lock().unwrap().is_empty(),
+        "the built-in xai route receives no request without the image"
+    );
+    fixture.close().await;
+}
+
+/// An answer already committed for the built-in `xai` target is not reused for
+/// an image the destination does not take: the reference names the content, so
+/// the same bytes re-attached as a WebP still find the committed answer, and the
+/// format rule of the route that serves the target judges it first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answer_committed_for_the_builtin_xai_target_is_not_reused_for_an_unsupported_format() {
+    let fixture = Fixture::new().await;
+    let session = fixture.session().await;
+    attach_image(
+        &fixture,
+        &session,
+        "main",
+        session_model(&session),
+        "attached.png",
+        PNG,
+        "image/png",
+    )
+    .await;
+    fixture.builtin_xai().await;
+    fixture.configure_to("xai", Some("grok-4.7")).await;
+    assert_eq!(
+        text(&fixture.ask(&session, "main", "png", question()).await),
+        "answer from grok-4.7"
+    );
+    assert_eq!(fixture.script.auxiliary.lock().unwrap().len(), 1);
+    attach_image(
+        &fixture,
+        &session,
+        "main",
+        session_model(&session),
+        "attached.webp",
+        PNG,
+        "image/webp",
+    )
+    .await;
+    let refused = fixture.ask(&session, "main", "webp", question()).await;
+    assert_eq!(refused.is_error, Some(true), "{refused:?}");
+    assert!(
+        text(&refused).starts_with("image_understand_failed:"),
+        "{refused:?}"
+    );
+    assert_eq!(
+        fixture.script.auxiliary.lock().unwrap().len(),
+        1,
+        "the refused reuse sends no request"
+    );
     fixture.close().await;
 }
 
