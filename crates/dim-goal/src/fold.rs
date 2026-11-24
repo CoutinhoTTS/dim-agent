@@ -924,6 +924,43 @@ impl Fold {
     pub fn pending_change(&self) -> Option<u64> {
         (self.last_change > self.state_after).then_some(self.last_change)
     }
+    /// Whether the turn end at `after` still decides the pause a record states:
+    /// the checks [`decide_turn_end`] makes before it returns one. A driving
+    /// input or a newer turn that folds while the record is written leaves the
+    /// pause to that turn (C4, C5).
+    pub(crate) fn pauses_at_end(&self, after: u64) -> bool {
+        let Some(end) = self.turn_end.as_ref().filter(|end| end.sequence == after) else {
+            return false;
+        };
+        if self.is_decided(after) || !self.running() || self.open_tasks() {
+            return false;
+        }
+        self.interrupted()
+            || end.status == TurnStatus::Failed
+            || (!self.turn_open() && !self.pending_driving())
+    }
+    /// Whether the `continue` conclusion at `sequence` still decides the pause a
+    /// record states: the checks [`decide_evaluated_continuation`] makes before
+    /// it returns one, and no newer turn (Pursuit §4.1, §5).
+    pub(crate) fn pauses_at_conclusion(&self, sequence: u64, evaluation: u64) -> bool {
+        self.conclusions
+            .get(&evaluation)
+            .map(|record| record.sequence)
+            == Some(sequence)
+            && self.running()
+            && !self.pending_driving()
+            && !self.open_tasks()
+            && !self.turn_open()
+            && self
+                .turn_end
+                .as_ref()
+                .is_none_or(|end| end.sequence < sequence)
+    }
+    /// Whether evaluation `N` still wants its evaluator: the goal runs, no
+    /// conclusion answers it and it is still current (Pursuit §13 E2).
+    pub(crate) fn wants_evaluator(&self, evaluation: u64) -> bool {
+        self.running() && !self.conclusions.contains_key(&evaluation) && self.is_current(evaluation)
+    }
 }
 
 fn block_text(block: &InputBlock) -> &str {

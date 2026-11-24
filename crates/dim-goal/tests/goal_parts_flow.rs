@@ -4,7 +4,7 @@
 //! test. Every expectation is a literal text or a written input.
 use crate::support;
 
-use dim_agent_types::{EventKind, InputMode, ToolContent, ToolResult};
+use dim_agent_types::{BranchSource, EventKind, InputMode, ToolContent, ToolResult};
 use serde_json::json;
 use support::parts::*;
 use support::texts;
@@ -735,6 +735,195 @@ async fn a_queue_committed_before_the_decision_holds_the_continuation() {
                     .contains(&format!(r#"after="{}""#, second_end.sequence))
         }),
         "a Queue the fold holds before the decision writes no continuation: {writes:#?}"
+    );
+    env.close().await;
+}
+
+/// The pause a turn end decides is stated at the fold the record writer
+/// composes from: a Queue that commits in the settlement window is still
+/// pending there, so the pause waits for that Queue's own turn end instead of
+/// stating the state it already replaced (#2119, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queue_committed_before_the_pause_record_holds_the_pause() {
+    let env = Env::start_gated().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    let _set_end = env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    // The limit is reached, so this turn end decides a pause. Its record
+    // writer is held where it settles the decisions and composes the record.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        first.sequence,
+        None,
+    );
+    let second_end = env.tool_turn("main", &[&first]);
+    assert_eq!(
+        held.arrived().await,
+        second_end.sequence,
+        "the pause's record writer answers the turn end at {}",
+        second_end.sequence
+    );
+
+    // A driving input commits and folds behind it, and the goal's decisions
+    // are settled, so nothing else states the state that input opens. It is no
+    // operator input, so the count that reached the limit stands.
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    assert!(
+        queued.sequence > second_end.sequence,
+        "the Queue at {} commits after the turn end at {}",
+        queued.sequence,
+        second_end.sequence
+    );
+    env.dispatched("main", queued.sequence).await;
+    held.release();
+
+    let end = env.turn_ids("main", &[&queued.id]);
+    env.dispatched("main", end.sequence).await;
+    let stale = tokio::time::timeout(std::time::Duration::from_millis(750), async {
+        loop {
+            let stale: Vec<String> = env
+                .settled("main")
+                .await
+                .iter()
+                .filter(|block| {
+                    block.marker.contains(r#"kind="state""#)
+                        && block.marker.contains(r#"status="paused""#)
+                        && block
+                            .marker
+                            .contains(&format!(r#"after="{}""#, second_end.sequence))
+                })
+                .map(|block| format!("{} at {}", block.marker, block.sequence))
+                .collect();
+            if !stale.is_empty() {
+                return stale;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        stale.is_err(),
+        "the turn end at {} writes no pause once the Queue at {} is pending in the fold, yet it wrote {:?}",
+        second_end.sequence,
+        queued.sequence,
+        stale.unwrap_or_default()
+    );
+
+    let pause = env.wait_for("main", r#"reason="limit""#).await;
+    assert_eq!(
+        pause.text,
+        texts::automatic_pause(
+            "main",
+            "make the tests pass",
+            "limit",
+            "the automatic continuation limit was reached",
+            end.sequence
+        ),
+        "the Queue's own turn end decides the pause"
+    );
+    env.close().await;
+}
+
+/// The closing pause is stated at the fold, not at the snapshot the close
+/// started from: a change that committed before it and is still waiting for the
+/// fold wins, and no record is written while the fold is behind (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_closing_pause_writes_nothing_while_a_committed_change_is_unfolded() {
+    let env = Env::start_gated().await;
+    env.set("ship it").await;
+
+    // The clear commits, and its record's publication is held: the fold has
+    // not seen the branch lose its goal when the close starts.
+    let (written, release) = env.gated().hold_state(None);
+    env.goal("clear", json!({})).await.expect("clear writes");
+    tokio::time::timeout(std::time::Duration::from_secs(15), written)
+        .await
+        .expect("the clear's record commits")
+        .expect("the held record is the clear's");
+
+    // The publication is released once the close has had its chance to state
+    // the pause: whichever way its catch-up ends, the clear is what stands.
+    let (env, ()) = tokio::join!(env.restore(), async {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        release.send(()).expect("the record publishes");
+    });
+    let read = env.goal("get", json!({})).await.unwrap();
+    assert!(
+        read["goal"].is_null(),
+        "the clear wins over the closing pause: {read}"
+    );
+    let pauses: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| block.marker.contains(r#"reason="interrupted_unload""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        pauses.is_empty(),
+        "the close states no pause the clear already replaced, yet it wrote {pauses:?}"
+    );
+    env.close().await;
+}
+
+/// A creation that folds after the pause belongs to a goal that is not running:
+/// the settle ends that evaluator line instead of leaving it open (#2119,
+/// Pursuit §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creation_that_folds_after_the_pause_is_ended() {
+    let env = Env::start().await;
+    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
+        .await
+        .expect("set writes");
+    env.wait_for("main", r#"op="set""#).await;
+    env.goal("pause", json!({})).await.expect("pause writes");
+    env.wait_for("main", r#"op="pause""#).await;
+
+    // A creation committed for a goal that already stopped commits its
+    // `branch/create` after the pause: nothing evaluates it any more.
+    let at = env.timeline("main").sequence();
+    let evaluator = env
+        .open_branch(
+            "main",
+            "check the result",
+            BranchSource::Host {
+                operation_id: format!("goal:evaluate:{at}"),
+            },
+        )
+        .await;
+    // The pause's own answer record can still hold the decisions when the
+    // creation folds, and one more fact takes the settle over a fold that holds
+    // both.
+    env.emit(
+        "main",
+        message(vec![raw("a note", None, false)], InputMode::Append),
+    );
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if env
+                .ended("main")
+                .await
+                .iter()
+                .any(|end| end.branch == evaluator)
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        ended.is_ok(),
+        "the creation for a paused goal is ended, not left open"
     );
     env.close().await;
 }

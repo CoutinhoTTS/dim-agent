@@ -632,6 +632,94 @@ async fn pursuit_13_e2_a_superseded_evaluation_ends_its_evaluator() {
     env.close().await;
 }
 
+/// The pause an evaluated continuation decides is stated at the fold the record
+/// writer composes from: a Queue that commits in the settlement window is still
+/// pending there, so the pause waits for that Queue's own turn end (#2119,
+/// Pursuit §4.1, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pursuit_5_a_queue_committed_before_the_evaluated_pause_holds_it() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // The limit is reached, so the conclusion decides a pause. Its record
+    // writer is held where it settles the decisions and composes the record.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- one test fails: <output>",
+    );
+    assert_eq!(
+        held.arrived().await,
+        conclusion,
+        "the pause's record writer answers the conclusion at {conclusion}"
+    );
+
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    assert!(
+        queued.sequence > conclusion,
+        "the Queue at {} commits after the conclusion at {conclusion}",
+        queued.sequence
+    );
+    env.dispatched("main", queued.sequence).await;
+    held.release();
+
+    let end = env.turn_ids("main", &[&queued.id]);
+    env.dispatched("main", end.sequence).await;
+    let stale = tokio::time::timeout(Duration::from_millis(750), async {
+        loop {
+            let stale: Vec<String> = env
+                .settled("main")
+                .await
+                .iter()
+                .filter(|block| {
+                    block.marker.contains(r#"kind="state""#)
+                        && block.marker.contains(r#"status="paused""#)
+                        && block.marker.contains(&format!(r#"after="{conclusion}""#))
+                })
+                .map(|block| format!("{} at {}", block.marker, block.sequence))
+                .collect();
+            if !stale.is_empty() {
+                return stale;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        stale.is_err(),
+        "the conclusion at {conclusion} writes no pause once the Queue at {} is pending in the fold, yet it wrote {:?}",
+        queued.sequence,
+        stale.unwrap_or_default()
+    );
+
+    let pause = env.wait_for("main", r#"reason="limit""#).await;
+    assert_eq!(
+        pause.text,
+        texts::evaluated_pause(
+            "main",
+            "ship it",
+            "limit",
+            "the automatic continuation limit was reached",
+            end.sequence
+        ),
+        "the Queue's own turn end decides the pause"
+    );
+    env.close().await;
+}
+
 #[tokio::test]
 async fn pursuit_13_e3_an_outside_end_before_the_conclusion_fails_the_evaluation() {
     let env = Env::start().await;

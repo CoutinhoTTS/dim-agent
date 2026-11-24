@@ -24,6 +24,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     num::NonZeroU64,
     sync::{Arc, Mutex, Weak},
+    time::Duration,
 };
 use tokio::sync::watch;
 use tokio_util::{sync::CancellationToken, task::TaskTracker};
@@ -32,6 +33,11 @@ pub(crate) mod recovery;
 mod restore;
 
 const SOURCE: &str = "goal";
+
+/// How long the closing pause waits for the fold to step the facts already
+/// committed before it composes the branch's last record. A branch that
+/// stopped folding writes none, so the close never waits on one.
+const CLOSING_GRACE: Duration = Duration::from_millis(250);
 
 /// One change Goal's callers ask for (D3). The branch part writes its trigger
 /// and the record that states it as one atomic batch, so the first model
@@ -349,6 +355,20 @@ enum Retry {
     Settle,
 }
 
+/// The fact a state record answers, and the check that fact still makes at the
+/// fold the record is composed from (D3, C4, C5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answers {
+    /// The newest change trigger, which `after` names.
+    Change,
+    /// The pause the turn end at `after` decides.
+    TurnEnd,
+    /// The pause the `continue` conclusion at `after` of `evaluation` decides.
+    Conclusion(u64),
+    /// The fact `after` names, decided once by its caller.
+    Fact,
+}
+
 #[derive(Default)]
 struct State {
     fold: Fold,
@@ -374,6 +394,24 @@ struct State {
     /// branch. A change composes its record only once the fold has stepped it
     /// (R5).
     last_write: u64,
+    /// The closing pause already gave its delivery the grace.
+    closing_grace: bool,
+}
+
+impl State {
+    /// Whether the record answering `after` with `answers` must not be written:
+    /// the fold has moved past it.
+    fn stale(&self, after: u64, answers: Answers) -> bool {
+        if self.fold.last_change > after || after < self.recorded || self.written.contains(&after) {
+            return true;
+        }
+        match answers {
+            Answers::Change => self.fold.pending_change() != Some(after),
+            Answers::TurnEnd => !self.fold.pauses_at_end(after),
+            Answers::Conclusion(evaluation) => !self.fold.pauses_at_conclusion(after, evaluation),
+            Answers::Fact => false,
+        }
+    }
 }
 
 struct Owner {
@@ -638,7 +676,11 @@ impl Owner {
         if self.stopped() {
             return;
         }
-        let decision_task = {
+        // The tracker token and the cancellation token are one generation: a
+        // settlement that swaps them between two reads would admit this task
+        // with the old tracker and a token no settlement cancels, leaving
+        // `settle_decisions` waiting for work it cannot stop.
+        let (decision_task, decisions) = {
             let mut state = self.state.lock().unwrap();
             if state.terminating {
                 return;
@@ -649,11 +691,10 @@ impl Owner {
                 }
                 return;
             }
-            state.decision_tasks.token()
+            (state.decision_tasks.token(), state.decisions.clone())
         };
         let owner = self.clone();
         let phase = self.phase.clone();
-        let decisions = self.state.lock().unwrap().decisions.clone();
         self.work.spawn(async move {
             let _decision_task = decision_task;
             let active = tokio::select! {
@@ -924,6 +965,13 @@ impl Owner {
 
     async fn pause_closing(&self) -> Result<(), AgentError> {
         let _write = self.write.lock().await;
+        // A change committed before this lock can still be waiting for the
+        // fold, and a record composed before it would state the state that
+        // change replaced: the close catches up first, and states no pause
+        // while the fold is behind.
+        if !self.catch_up().await? {
+            return Ok(());
+        }
         let (objective, judge, live, evaluations) = {
             let state = self.state.lock().unwrap();
             if !state.fold.running() {
@@ -1301,7 +1349,11 @@ impl Owner {
                     }
                 };
                 owner
-                    .record(at, Some(text::State::Paused(reason.to_owned())), false)
+                    .record(
+                        at,
+                        Some(text::State::Paused(reason.to_owned())),
+                        Answers::Fact,
+                    )
                     .await
             })
         });
@@ -1311,14 +1363,22 @@ impl Owner {
         self: &Arc<Self>,
         after: u64,
         status: Option<text::State>,
-        answer: bool,
+        answers: Answers,
     ) -> Result<(), AgentError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         let owner = self.clone();
         self.tasks.spawn(async move {
-            let result = owner.record_inner(after, status, answer).await;
+            let result = owner.record_inner(after, status, answers).await;
+            let written = matches!(result, Ok(true));
             owner.state.lock().unwrap().terminating = false;
-            if let Err(Err(error)) = reply.send(result) {
+            // A record the fold no longer asked for leaves the goal running
+            // with a decision still due: a fact that committed while the
+            // settlement held the decisions asked for one, and nothing else
+            // takes it again.
+            if !written && owner.write_status.borrow().is_ok() {
+                owner.resume_decisions();
+            }
+            if let Err(Err(error)) = reply.send(result.map(|_| ())) {
                 tracing::warn!(%error, "Goal terminal state could not be saved");
                 let _ = owner.write_status.send_replace(Err(error));
             }
@@ -1328,59 +1388,104 @@ impl Owner {
             .map_err(|_| AgentError::Closed("Goal".into()))?
     }
 
+    /// States `status` as the answer to the fact at `after`, and answers
+    /// whether it did. The record is composed only from a fold that has caught
+    /// up to the branch's committed cutoff, and only while that fact still
+    /// decides it: a driving input or a newer turn that folds while the
+    /// decisions settle leaves the state to that turn (C4, C5, D3).
     async fn record_inner(
         self: &Arc<Self>,
         after: u64,
         status: Option<text::State>,
-        answer: bool,
-    ) -> Result<(), AgentError> {
+        answers: Answers,
+    ) -> Result<bool, AgentError> {
         let _write = self.write_guard().await?;
-        {
-            let state = self.state.lock().unwrap();
-            if answer && state.fold.pending_change() != Some(after)
-                || state.fold.last_change > after
-                || after < state.recorded
-                || state.written.contains(&after)
-            {
-                return Ok(());
-            }
+        if self.state.lock().unwrap().stale(after, answers) {
+            return Ok(false);
         }
         self.settle_decisions().await?;
         self.write_status.borrow().clone()?;
-        let (objective, status, judge, live) = {
-            let state = self.state.lock().unwrap();
-            if state.fold.last_change > after || after < state.recorded {
-                return Ok(());
-            }
-            (
-                state.fold.objective.clone(),
-                status.unwrap_or_else(|| state.fold.state.clone()),
-                state.fold.judge,
-                state.fold.live,
-            )
-        };
-        let operation = match &status {
-            text::State::Active => "resume",
-            text::State::Paused(_) => "pause",
-            text::State::Completed(_) => "completed",
-            text::State::Blocked(_) => "blocked",
-            text::State::None => "clear",
-        };
-        let input = text::state(
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
             &self.branch_id,
-            objective.as_deref(),
-            status.clone(),
-            judge,
-            text::Answered::Sequence(after),
-            live,
-            &self.texts,
-        );
-        let business = recovery::BusinessState::new(operation, objective, status, judge, None);
-        self.append_business(vec![input], business, None)?;
-        let mut state = self.state.lock().unwrap();
-        state.written.insert(after);
-        state.recorded = state.recorded.max(after);
-        Ok(())
+            crate::testing::Stage::Record,
+            after,
+        )
+        .await;
+        loop {
+            let through = self.await_dispatched().await?;
+            let (objective, status, judge, live) = {
+                let state = self.state.lock().unwrap();
+                if self.timeline.committed() != through {
+                    continue;
+                }
+                if state.stale(after, answers) {
+                    return Ok(false);
+                }
+                (
+                    state.fold.objective.clone(),
+                    status.clone().unwrap_or_else(|| state.fold.state.clone()),
+                    state.fold.judge,
+                    state.fold.live,
+                )
+            };
+            let operation = match &status {
+                text::State::Active => "resume",
+                text::State::Paused(_) => "pause",
+                text::State::Completed(_) => "completed",
+                text::State::Blocked(_) => "blocked",
+                text::State::None => "clear",
+            };
+            let input = text::state(
+                &self.branch_id,
+                objective.as_deref(),
+                status.clone(),
+                judge,
+                text::Answered::Sequence(after),
+                live,
+                &self.texts,
+            );
+            let business = recovery::BusinessState::new(operation, objective, status, judge, None);
+            self.append_business(vec![input], business, None)?;
+            let mut state = self.state.lock().unwrap();
+            state.written.insert(after);
+            state.recorded = state.recorded.max(after);
+            return Ok(true);
+        }
+    }
+
+    /// Waits until the fold has stepped the branch's committed cutoff and
+    /// answers whether it did. A closing branch states the state it ended on,
+    /// so it reads the facts already committed before it composes its last
+    /// record. `false` means the fold is still behind, and the caller writes
+    /// nothing: the newest committed change stays in effect, and the load
+    /// mapping covers the missing pause. The wait is bounded by the grace a
+    /// closing branch gives its own delivery, and spent once: the branch runs
+    /// its closing pause on both its lifecycle and its cleanup, and the second
+    /// reads the fold as it stands instead of waiting again.
+    async fn catch_up(&self) -> Result<bool, AgentError> {
+        if self.state.lock().unwrap().closing_grace {
+            return Ok(self.dispatcher.sequence() >= self.timeline.committed());
+        }
+        let through = self.timeline.committed();
+        let mut dispatched = self.dispatcher.watch();
+        let stepped = async {
+            while self.dispatcher.sequence() < through {
+                if let Some(error) = self.dispatcher.failure() {
+                    return Err(error);
+                }
+                if dispatched.changed().await.is_err() {
+                    return Ok(false);
+                }
+            }
+            Ok(self.timeline.committed() == through)
+        };
+        let result = tokio::time::timeout(CLOSING_GRACE, stepped)
+            .await
+            .unwrap_or(Ok(false));
+        self.state.lock().unwrap().closing_grace = true;
+        result
     }
 
     async fn settle_decisions(&self) -> Result<(), AgentError> {
@@ -1431,7 +1536,7 @@ impl Owner {
             return;
         };
         self.task(format!("state:{last}"), None, move |owner| {
-            Box::pin(async move { owner.record(last, None, true).await })
+            Box::pin(async move { owner.record(last, None, Answers::Change).await })
         });
     }
 
@@ -1632,7 +1737,7 @@ impl Owner {
                     self.record(
                         after,
                         Some(text::State::Paused("evaluation_failed".to_owned())),
-                        false,
+                        Answers::Fact,
                     )
                     .await?;
                 }
@@ -1699,8 +1804,12 @@ impl Owner {
         match decision {
             Decision::Pause { reason } => {
                 drop(write);
-                self.record(after, Some(text::State::Paused(reason.to_owned())), false)
-                    .await?;
+                self.record(
+                    after,
+                    Some(text::State::Paused(reason.to_owned())),
+                    Answers::TurnEnd,
+                )
+                .await?;
             }
             Decision::Continuation { .. } => loop {
                 let through = self.await_dispatched().await?;
@@ -1971,7 +2080,7 @@ impl Owner {
                     .record(
                         at,
                         Some(text::State::Paused("evaluation_failed".to_owned())),
-                        false,
+                        Answers::Fact,
                     )
                     .await
             })
@@ -2008,16 +2117,16 @@ impl Owner {
                 self.record(
                     sequence,
                     Some(text::State::Paused("evaluation_failed".to_owned())),
-                    false,
+                    Answers::Fact,
                 )
                 .await?;
             }
             ConclusionAction::Completed(text) => {
-                self.record(sequence, Some(text::State::Completed(text)), false)
+                self.record(sequence, Some(text::State::Completed(text)), Answers::Fact)
                     .await?;
             }
             ConclusionAction::Blocked(text) => {
-                self.record(sequence, Some(text::State::Blocked(text)), false)
+                self.record(sequence, Some(text::State::Blocked(text)), Answers::Fact)
                     .await?;
             }
             ConclusionAction::Continue => {
@@ -2069,7 +2178,7 @@ impl Owner {
                         self.record(
                             sequence,
                             Some(text::State::Paused(reason.to_owned())),
-                            false,
+                            Answers::Conclusion(evaluation),
                         )
                         .await?;
                     }
@@ -2130,14 +2239,13 @@ impl Owner {
                 .collect()
         };
         for (evaluation, evaluator) in evaluations {
-            let settled = {
+            let wanted = {
                 let state = self.state.lock().unwrap();
-                state.fold.ended.contains(&evaluator)
-                    || state.fold.failed.contains(&evaluator)
-                    || !(state.fold.conclusions.contains_key(&evaluation)
-                        || !state.fold.is_current(evaluation))
+                !state.fold.ended.contains(&evaluator)
+                    && !state.fold.failed.contains(&evaluator)
+                    && state.fold.wants_evaluator(evaluation)
             };
-            if settled {
+            if wanted {
                 continue;
             }
             self.task(format!("settle:{evaluation}"), None, move |owner| {
@@ -2149,8 +2257,7 @@ impl Owner {
                     let skip = {
                         let state = owner.state.lock().unwrap();
                         state.fold.ended.contains(&evaluator)
-                            || !(state.fold.conclusions.contains_key(&evaluation)
-                                || !state.fold.is_current(evaluation))
+                            || state.fold.wants_evaluator(evaluation)
                     };
                     if owner.stopped() || skip {
                         return Ok(());

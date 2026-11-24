@@ -101,6 +101,9 @@ pub enum Stage {
     Create,
     /// After `do_turn_end` took every decision it carries.
     Done,
+    /// After the state record writer took the write guard and settled the
+    /// decisions, before it composes the record it answers `after` with.
+    Record,
 }
 
 type StageHold = (
