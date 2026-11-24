@@ -1,11 +1,13 @@
 use std::{
     collections::VecDeque,
+    future::Future,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll},
+    time::Duration,
 };
 
 use aimux_core::result::Source;
@@ -100,6 +102,60 @@ async fn collect_or_stall(stream: ModelStream, case: &str) -> Vec<Result<ModelCh
     )
     .await
     .unwrap_or_else(|_| panic!("{case}: the stream stalled instead of ending"))
+}
+
+/// A fixture that delivers only the parts the test feeds it and stalls while
+/// its queue is empty, so a test can let virtual time pass inside one wait.
+fn feedable() -> (ModelStream, Feed) {
+    let parts = Arc::new(Mutex::new(VecDeque::new()));
+    let result = StreamResult {
+        stream: Box::pin(FeedStream {
+            parts: parts.clone(),
+        }),
+        request: None,
+        response: None,
+    };
+    let stream = convert(
+        result,
+        ToolNames::default(),
+        ModelProtocol::OpenaiChat,
+        CancellationToken::new(),
+        AbortSignal::new(),
+        CancellationToken::new(),
+        tokio_util::task::TaskTracker::new().token(),
+    );
+    (stream, Feed(parts))
+}
+
+struct Feed(Arc<Mutex<VecDeque<Result<StreamPart, AiMuxError>>>>);
+
+impl Feed {
+    fn push(&self, parts: Vec<Result<StreamPart, AiMuxError>>) {
+        self.0.lock().unwrap().extend(parts);
+    }
+}
+
+struct FeedStream {
+    parts: Arc<Mutex<VecDeque<Result<StreamPart, AiMuxError>>>>,
+}
+
+impl Stream for FeedStream {
+    type Item = Result<StreamPart, AiMuxError>;
+
+    fn poll_next(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.parts.lock().unwrap().pop_front() {
+            Some(part) => Poll::Ready(Some(part)),
+            None => Poll::Pending,
+        }
+    }
+}
+
+/// One poll of the next chunk, so a test can hold a wait open while it advances
+/// the clock and feeds a part, then poll again where the idle deadline decides.
+fn poll_once(stream: &mut ModelStream) -> Poll<Option<Result<ModelChunk, HostError>>> {
+    let mut next = Box::pin(stream.next());
+    let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+    next.as_mut().poll(&mut context)
 }
 
 fn start() -> StreamPart {
@@ -1533,4 +1589,109 @@ async fn recorded_reasoning_tokens_reach_the_agent_usage() {
         Some(2.0),
         "{recorded}"
     );
+}
+
+/// The documented allowance: five minutes without a part is a lost connection.
+const IDLE_ALLOWANCE: Duration = Duration::from_secs(300);
+
+/// A text block and one delta of it, as the parts a provider delivers.
+fn text_part(delta: &str) -> Vec<Result<StreamPart, AiMuxError>> {
+    vec![
+        Ok(StreamPart::TextStart {
+            id: "text".into(),
+            provider_metadata: None,
+        }),
+        Ok(StreamPart::TextDelta {
+            id: "text".into(),
+            delta: delta.into(),
+            provider_metadata: None,
+        }),
+    ]
+}
+
+/// The idle failure of one poll, asserted to carry the network kind and the
+/// facts the retry policy reads.
+fn idle_failure(
+    outcome: Poll<Option<Result<ModelChunk, HostError>>>,
+) -> (String, ModelFailureFacts) {
+    let Poll::Ready(Some(Err(HostError::Failed {
+        kind,
+        message,
+        model,
+        ..
+    }))) = outcome
+    else {
+        panic!("a stream silent for the idle allowance fails");
+    };
+    assert_eq!(kind, HostErrorKind::Transport);
+    let facts = model.expect("the idle failure carries facts");
+    assert_eq!(facts.kind, ModelFailureKind::Network);
+    (message, *facts)
+}
+
+/// Five minutes without a part is a lost connection: the request fails as a
+/// network failure, which the retry policy retries while nothing was committed.
+#[tokio::test(start_paused = true)]
+async fn a_stream_silent_for_the_idle_allowance_fails_as_a_network_failure() {
+    let (mut stream, feed) = feedable();
+    feed.push(vec![Ok(start())]);
+    assert!(matches!(
+        poll_once(&mut stream),
+        Poll::Ready(Some(Ok(ModelChunk::MessageStart { .. })))
+    ));
+    let mut waiting = Box::pin(stream.next());
+    let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+    assert!(waiting.as_mut().poll(&mut context).is_pending());
+    tokio::time::advance(IDLE_ALLOWANCE).await;
+    let (message, facts) = idle_failure(waiting.as_mut().poll(&mut context));
+    assert_eq!(
+        facts.reason.as_deref(),
+        Some("the stream delivered nothing for 300 seconds")
+    );
+    assert!(
+        message.ends_with(ModelFailureKind::Network.action()),
+        "{message}"
+    );
+}
+
+/// A part that arrives inside the allowance restarts it, so a reply that keeps
+/// streaming is never cut however long it takes.
+#[tokio::test(start_paused = true)]
+async fn a_part_inside_the_idle_allowance_keeps_the_stream_open() {
+    let (mut stream, feed) = feedable();
+    feed.push(vec![Ok(start())]);
+    assert!(matches!(
+        poll_once(&mut stream),
+        Poll::Ready(Some(Ok(ModelChunk::MessageStart { .. })))
+    ));
+    let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+    let inside = IDLE_ALLOWANCE - Duration::from_millis(1);
+    for delta in ["first", "second"] {
+        let mut waiting = Box::pin(stream.next());
+        assert!(waiting.as_mut().poll(&mut context).is_pending());
+        tokio::time::advance(inside).await;
+        feed.push(text_part(delta));
+        assert!(matches!(
+            waiting.as_mut().poll(&mut context),
+            Poll::Ready(Some(Ok(ModelChunk::Text(text)))) if text == delta
+        ));
+    }
+}
+
+/// A deadline that has passed outranks a part ready at the same moment: the
+/// connection was silent for the whole allowance even though data arrived.
+#[tokio::test(start_paused = true)]
+async fn an_idle_deadline_outranks_a_part_that_is_ready_at_the_same_time() {
+    let (mut stream, feed) = feedable();
+    feed.push(vec![Ok(start())]);
+    assert!(matches!(
+        poll_once(&mut stream),
+        Poll::Ready(Some(Ok(ModelChunk::MessageStart { .. })))
+    ));
+    let mut waiting = Box::pin(stream.next());
+    let mut context = Context::from_waker(futures_util::task::noop_waker_ref());
+    assert!(waiting.as_mut().poll(&mut context).is_pending());
+    feed.push(text_part("ready"));
+    tokio::time::advance(IDLE_ALLOWANCE).await;
+    idle_failure(waiting.as_mut().poll(&mut context));
 }
