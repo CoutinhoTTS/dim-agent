@@ -35,9 +35,11 @@ nothing for five minutes is `network`, with the reason `the stream delivered
 nothing for 300 seconds`. The bound is per wait, not per request, so a reply
 that keeps streaming is never cut; an expired bound outranks a part that is
 ready at the same moment, and cancelling the request outranks both. The wait for
-the response headers carries the same bound and the reason `the response headers
-did not arrive within 300 seconds`. The connection's optional total timeout is
-unchanged and is still separate from this idle bound.
+the response headers carries the same bound and the reason `no response headers
+arrived within 300 seconds of sending the request`; it starts when the request
+is sent, so sending the body and following redirects count against it. The
+connection's optional total timeout is unchanged and is still separate from
+this idle bound.
 
 Codes are compared trimmed and ASCII-lowercased.
 

@@ -735,7 +735,7 @@ impl ModelDriver for AimuxDriver {
                 _ = tokio::time::sleep(stream::STREAM_IDLE_TIMEOUT) => {
                     abort.abort();
                     let error = stream::idle_failure(format!(
-                        "the response headers did not arrive within {} seconds",
+                        "no response headers arrived within {} seconds of sending the request",
                         stream::STREAM_IDLE_TIMEOUT.as_secs()
                     ));
                     if let Some(pending) = pending.as_mut() { pending.failed(&error.to_string()); }

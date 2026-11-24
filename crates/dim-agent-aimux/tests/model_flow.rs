@@ -1804,7 +1804,7 @@ async fn a_wait_for_response_headers_past_the_idle_allowance_fails_as_a_network_
     assert_eq!(model.kind, ModelFailureKind::Network);
     assert_eq!(
         model.reason.as_deref(),
-        Some("the response headers did not arrive within 300 seconds")
+        Some("no response headers arrived within 300 seconds of sending the request")
     );
     server.abort();
     root.shutdown().await.unwrap();

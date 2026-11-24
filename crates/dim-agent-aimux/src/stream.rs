@@ -32,11 +32,12 @@ use crate::request::ToolNames;
 /// connection counts as lost.
 ///
 /// Five minutes matches the allowance other harnesses give a slow model step.
-/// It bounds the wait for the response headers and, once they arrive, the wait
-/// between parts: a reply that keeps streaming is never cut, however long it
-/// takes, while a half-open connection fails as a network failure instead of
-/// holding the turn until an external deadline. The same failure is retried in
-/// place while the attempt committed nothing.
+/// It bounds one exchange from sending the request until the response headers
+/// arrive (the request body and any redirects count against it) and, once they
+/// arrive, the wait between parts: a reply that keeps streaming is never cut,
+/// however long it takes, while a half-open connection fails as a network
+/// failure instead of holding the turn until an external deadline. The same
+/// failure is retried in place while the attempt committed nothing.
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) fn convert(

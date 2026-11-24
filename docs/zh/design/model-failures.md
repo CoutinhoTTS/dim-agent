@@ -23,7 +23,7 @@ aimux 桥接层是唯一持有提供方结构化错误、并看得到完整响�
 
 HTTP 连接或流的超时以传输 `ApiCall` 到达桥接层，是 `network`。`AiMuxError::Timeout` 在聊天调用中没有产生者；若它到达桥接层，是 `unknown`，且不重试。
 
-桥接层自己也给两次流事件之间的等待设上限：连续五分钟没有任何事件是 `network`，reason 为 `the stream delivered nothing for 300 seconds`。这个上限按每次等待计，不按整个请求计，所以持续有事件的回复不会被截断；上限到点时它优先于同时就绪的事件，取消请求又优先于两者。等响应头的等待用同一个上限，reason 为 `the response headers did not arrive within 300 seconds`。连接原来可选的整请求超时不变，与这个空闲上限是两件事。
+桥接层自己也给两次流事件之间的等待设上限：连续五分钟没有任何事件是 `network`，reason 为 `the stream delivered nothing for 300 seconds`。这个上限按每次等待计，不按整个请求计，所以持续有事件的回复不会被截断；上限到点时它优先于同时就绪的事件，取消请求又优先于两者。等响应头的等待用同一个上限，从发出请求开始计，发送请求体和跟随重定向都算在内，reason 为 `no response headers arrived within 300 seconds of sending the request`。连接原来可选的整请求超时不变，与这个空闲上限是两件事。
 
 code 比较前先 trim 并转 ASCII 小写。
 
