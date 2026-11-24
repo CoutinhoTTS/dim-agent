@@ -94,6 +94,24 @@ mean something, not a simplification.
 | `codemode` | `codemode` only | one program uses `tools.list` / `tools.describe` / `tools.call` |
 | `shell` | `execute` only | commands in one persistent shell |
 
+### The product profile's tool list
+
+The product profile mounts the same tool set in every Session; the mode decides what is declared and
+what a program may call. These are the lists the assembly yields today. The rule in §4 derives them,
+so a mount list, an Agent profile's tool list, an absent part, a disabled source or an unavailable
+tool narrows them; this table is a reading, not a second source.
+
+| Mode | Declared (model-visible) | Delegated to Code Mode |
+| --- | --- | --- |
+| `normal` | `read`, `write`, `edit`, `glob`, `grep`, `exec`, `exec_stop`, `wait`, `recall`, `skill`, `branch`, `settings`, `ask_user`, `goal_update`, `events`, `schedule`, `wakeup`, `loop`, `image_understand`, `agent`, `plugin`, `web_fetch` | — |
+| `codemode` | `codemode` | the `normal` list and `execute` |
+| `shell` | `execute` | — |
+
+`normal` is today's list without `codemode`; `execute` is mounted by this change and stays hidden
+there, so switching to `shell` or `codemode` uses the already-registered tool. `web_search`, when a
+search service is usable, and every MCP tool follow the same rule: declared in `normal`, delegated
+in `codemode`, hidden in `shell`.
+
 Rules that hold in every mode:
 
 - Approval and Permission are unchanged. Each call is admitted under the called tool's own risk,
