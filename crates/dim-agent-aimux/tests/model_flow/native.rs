@@ -5999,3 +5999,436 @@ async fn chatgpt_plan_replays_namespaced_tool_calls_without_stored_responses() {
     root.shutdown().await.unwrap();
     server.close().await;
 }
+
+/// Every chunk of one reply, read through dim's model host at `protocol`, so
+/// the assertions cover dim's own mapping of what the provider streams.
+async fn host_reply(
+    protocol: ModelProtocol,
+    base_url: String,
+) -> Vec<std::result::Result<ModelChunk, HostError>> {
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol,
+                base_url,
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: Some("test-key".into()),
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        chunks.push(chunk);
+    }
+    root.shutdown().await.unwrap();
+    chunks
+}
+
+/// The reply text `chunks` carry, or the first failure as its text.
+fn reply_text(
+    chunks: Vec<std::result::Result<ModelChunk, HostError>>,
+) -> std::result::Result<String, String> {
+    let mut text = String::new();
+    for chunk in chunks {
+        match chunk {
+            Ok(ModelChunk::Text(delta)) => text.push_str(&delta),
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(text)
+}
+
+/// A signed Gemini text part closes its block, so the next part opens a new
+/// one and the signature is replayed on the part that carried it
+/// (arcships/aimux@b7479351, #467). The chunk is the one the provider's own
+/// test reads (`aimux-providers/src/google/tests/language_model.rs`, case
+/// `a_signed_part_closes_its_text_block`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_a_signed_part_closes_its_text_block_and_replays_the_split() {
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Endpoint {
+        requests: Arc<Mutex<Vec<(Uri, Value)>>>,
+    }
+    async fn respond(
+        State(endpoint): State<Endpoint>,
+        uri: Uri,
+        Json(request): Json<Value>,
+    ) -> Response {
+        let turn = {
+            let mut requests = endpoint.requests.lock().unwrap();
+            requests.push((uri, request));
+            requests.len()
+        };
+        let chunks = if turn == 1 {
+            vec![json!({"candidates":[{"content":{"role":"model","parts":[
+                {"text":"first"},
+                {"text":" block","thoughtSignature":"sig-1"},
+                {"text":"second"}
+            ]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}})]
+        } else {
+            vec![
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"finished"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+            ]
+        };
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(sse(chunks)))
+            .unwrap()
+    }
+
+    let endpoint = Endpoint::default();
+    let router = Router::new()
+        .route("/v1beta/{*path}", post(respond))
+        .with_state(endpoint.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1beta", listener.local_addr().unwrap());
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let join = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let models = Arc::new(
+        AimuxModels::from_config(
+            serde_json::from_value(json!({
+                "defaultModel":{"providerId":"local","modelId":"test-model"},
+                "providers":[{"id":"local","kind":"gemini","baseUrl":url,"headers":{"x-goog-api-key":"test-key"},"models":[{"id":"test-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let agent = model_agent(models, None).await;
+    let session = agent.create_session(session_config()).await.unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let content = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelContent(data) => Some(data.content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert_eq!(content.len(), 2, "{content:?}");
+    assert!(
+        matches!(
+            &content[0],
+            MessagePart::Text {
+                text,
+                provider_metadata: Some(ContentMetadata::Gemini { thought_signature }),
+                ..
+            } if text == "first block" && thought_signature == "sig-1"
+        ),
+        "{content:?}"
+    );
+    assert!(
+        matches!(&content[1], MessagePart::Text { text, .. } if text == "second"),
+        "{content:?}"
+    );
+    session
+        .submit("second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = endpoint.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "{}", requests.len());
+    let parts = requests[1].1["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "model")
+        .unwrap()["parts"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        parts,
+        vec![
+            json!({"text":"first block","thoughtSignature":"sig-1"}),
+            json!({"text":"second"}),
+        ],
+        "{}",
+        requests[1].1
+    );
+    drop(session);
+    cancel.cancel();
+    join.await.unwrap();
+}
+
+/// A Gemini stream finishes once it has seen both a finish reason and usage,
+/// in either order: a usage chunk followed by the finish reason ends the turn
+/// while the body stays open (arcships/aimux@b7479351, #469).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_usage_before_the_finish_reason_finishes_the_stream() {
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let count = socket.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0);
+            request.extend_from_slice(&chunk[..count]);
+        }
+        let body = sse(vec![
+            json!({"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+            json!({"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}]}),
+        ]);
+        socket
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n{body}"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    });
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::Gemini,
+                base_url: format!("http://{address}/v1beta"),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: Some("test-key".into()),
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut text = String::new();
+        while let Some(chunk) = stream.next().await {
+            if let Ok(ModelChunk::Text(delta)) = chunk {
+                text.push_str(&delta);
+            }
+        }
+        text
+    })
+    .await;
+    server.abort();
+    root.shutdown().await.unwrap();
+    assert_eq!(
+        outcome.ok(),
+        Some("done".to_owned()),
+        "the usage and the finish reason must end the stream while the body stays open"
+    );
+}
+
+/// A `usageMetadata` the schema cannot read is ignored instead of failing the
+/// chunk (arcships/aimux#469 follow-up, `lenient_stream_usage`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_a_malformed_usage_metadata_does_not_fail_the_chunk() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![json!({
+        "candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP","index":0}],
+        "usageMetadata":{"promptTokenCount":"many","candidatesTokenCount":1,"totalTokenCount":2}
+    })]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let chunks = host_reply(ModelProtocol::Gemini, format!("{}/v1beta", server.uri())).await;
+    assert_eq!(reply_text(chunks), Ok("done".to_owned()));
+}
+
+/// A Chat Completions `usage` the schema cannot read is ignored instead of
+/// failing the chunk that carries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openai_chat_a_malformed_usage_does_not_fail_the_chunk() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![json!({
+        "id":"chat-1",
+        "choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":"many","completion_tokens":1,"total_tokens":2}
+    })]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let chunks = host_reply(ModelProtocol::OpenaiChat, format!("{}/v1", server.uri())).await;
+    assert_eq!(reply_text(chunks), Ok("done".to_owned()));
+}
+
+/// A refusal content part opens its own text block beside an `output_text`
+/// part (arcships/aimux#466, #468).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_a_refusal_beside_output_text_keeps_its_own_block() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![
+        json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","phase":"final_answer","content":[]}}),
+        json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":0,"delta":"before"}),
+        json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":1,"part":{"type":"refusal","refusal":""}}),
+        json!({"type":"response.refusal.delta","item_id":"msg-1","output_index":0,"content_index":1,"delta":"denied"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","phase":"final_answer","content":[]}}),
+        json!({"type":"response.completed","response":{"id":"resp-1","created_at":1,"model":"test-model","usage":{"input_tokens":1,"output_tokens":2}}}),
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: format!("{}/v1", server.uri()),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: Some("test-key".into()),
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut content = Vec::new();
+    let mut text = String::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk.unwrap() {
+            ModelChunk::Text(delta) => text.push_str(&delta),
+            ModelChunk::Content(parts) => content = parts,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "beforedenied");
+    assert_eq!(content.len(), 2, "{content:?}");
+    assert!(
+        matches!(&content[0], MessagePart::Text { text, .. } if text == "before"),
+        "{content:?}"
+    );
+    assert!(
+        matches!(&content[1], MessagePart::Text { text, .. } if text == "denied"),
+        "{content:?}"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// A Responses provider option outside the namespace schema fails before the
+/// request is sent: the whole `openai` namespace is parsed against the
+/// provider's own schema (arcships/aimux#328, RFC-0046 R1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_a_service_tier_outside_the_schema_fails_before_sending() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut request = ModelRequest::new(
+        "local",
+        "test-model",
+        vec![Message::text(Role::User, "question")],
+    );
+    request.config = Some(
+        serde_json::from_value(json!({
+            "providerOptions": {"openai": {"serviceTier": "turbo"}}
+        }))
+        .unwrap(),
+    );
+    let outcome = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: format!("{}/v1", server.uri()),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: Some("test-key".into()),
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await;
+    let mut failure = None;
+    match outcome {
+        Err(error) => failure = Some(error.to_string()),
+        Ok(mut stream) => {
+            while let Some(chunk) = stream.next().await {
+                if let Err(error) = chunk {
+                    failure = Some(error.to_string());
+                }
+            }
+        }
+    }
+    root.shutdown().await.unwrap();
+    let failure = failure.unwrap_or_else(|| "the request was not refused".into());
+    assert!(failure.contains("provider options"), "{failure}");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "the request must not be sent"
+    );
+}

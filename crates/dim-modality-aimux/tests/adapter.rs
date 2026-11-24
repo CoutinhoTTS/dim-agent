@@ -1608,3 +1608,103 @@ async fn video_server(body: Vec<u8>) -> (String, Arc<Mutex<Vec<Vec<(String, Stri
     });
     (format!("http://{address}/video.mp4"), seen)
 }
+
+/// A `providerOptions.openai.responseFormat` outside the schema fails before
+/// anything is sent: the transcription options are parsed against the
+/// provider's own schema (arcships/aimux#328, RFC-0046 R1).
+#[tokio::test]
+async fn transcription_rejects_a_response_format_the_schema_does_not_declare() {
+    let dir = work_dir("transcription-format");
+    let audio = input(&dir, "clip.mp3", "audio/mpeg", MP3_HEADER);
+    let (adapter, requests) = scripted(move |_| ok_json(json!({"text": "hello there"})));
+    let error = run(
+        &adapter,
+        job(
+            "openai",
+            "gpt-4o-transcribe",
+            "speech",
+            "transcribe",
+            json!({"providerOptions": {"openai": {"responseFormat": "text"}}}),
+            vec![audio],
+            &dir,
+        ),
+        "https://api.openai.com/v1",
+        "gpt-4o-transcribe",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, AdapterErrorCode::ProviderError);
+    assert!(
+        error.message.contains("provider options"),
+        "{}",
+        error.message
+    );
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        0,
+        "the request must not be sent"
+    );
+}
+
+/// A generation that broke after it was sent is not replayed: a synchronous
+/// image exchange that the server accepted is billed once, whatever happens
+/// to its body (arcships/aimux#527).
+#[tokio::test]
+async fn an_image_generation_that_broke_after_sending_is_not_replayed() {
+    use futures_util::StreamExt;
+    use futures_util::stream::BoxStream;
+
+    struct BrokenBody {
+        requests: Arc<Mutex<usize>>,
+    }
+    #[async_trait]
+    impl Fetch for BrokenBody {
+        async fn fetch(&self, request: FetchRequest) -> Result<FetchResponse, FetchError> {
+            *self.requests.lock().unwrap() += 1;
+            let body: BoxStream<'static, Result<Bytes, FetchError>> =
+                futures_util::stream::once(async {
+                    Err(FetchError::Other(
+                        "the connection closed while the body was read"
+                            .to_string()
+                            .into(),
+                    ))
+                })
+                .boxed();
+            Ok(FetchResponse {
+                status: StatusCode::OK,
+                headers: HeaderMap::new(),
+                url: request.url,
+                body,
+            })
+        }
+    }
+
+    let dir = work_dir("image-not-replayed");
+    let requests = Arc::new(Mutex::new(0));
+    let fetch: FetchFunction = Arc::new(BrokenBody {
+        requests: requests.clone(),
+    });
+    let adapter = Arc::new(MediaAdapter::scripted(fetch));
+    let error = run(
+        &adapter,
+        job(
+            "openai",
+            "gpt-image-1",
+            "image",
+            "generate",
+            json!({"prompt": "a cat"}),
+            Vec::new(),
+            &dir,
+        ),
+        "https://api.openai.com/v1",
+        "gpt-image-1",
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, AdapterErrorCode::ProviderError);
+    assert_eq!(
+        *requests.lock().unwrap(),
+        1,
+        "a generation that may have reached the server must not be sent again"
+    );
+}

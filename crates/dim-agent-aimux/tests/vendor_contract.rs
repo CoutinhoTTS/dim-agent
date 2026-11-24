@@ -105,6 +105,17 @@ async fn collect<M: LanguageModel + ?Sized>(model: &M, options: CallOptions) -> 
     parts
 }
 
+/// The text the reply streamed, concatenated.
+fn text_of(parts: &[Outcome]) -> String {
+    parts
+        .iter()
+        .filter_map(|part| match part {
+            Ok(StreamPart::TextDelta { delta, .. }) => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn chat_model(base: &str, name: &str) -> impl LanguageModel {
     create_openai_compatible(OpenAICompatibleProviderSettings {
         name: name.into(),
@@ -468,4 +479,70 @@ async fn malformed_converse_frames_never_finish_successfully() {
             "{case}: {parts:?}"
         );
     }
+}
+
+/// A `refusal` that is not a text is no refusal: a compatible server that
+/// sends `false` or `{}` there no longer fails the chunk or the reply
+/// (arcships/aimux#461, #468).
+#[tokio::test]
+async fn chat_a_refusal_that_is_not_text_is_no_refusal() {
+    for name in ["openai", "xai"] {
+        let body = sse(&[
+            json!({"choices":[{"index":0,"delta":{"refusal":false},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"refusal":{}},"finish_reason":null}]}),
+            json!({"choices":[{"index":0,"delta":{"content":"answer"},"finish_reason":"stop"}]}),
+        ]);
+        let (base, _) = serve(body, "text/event-stream").await;
+        let parts = collect(&chat_model(&base, name), CallOptions::new(vec![])).await;
+        let text: String = text_of(&parts);
+        assert_eq!(text, "answer", "{name}: {parts:?}");
+        assert!(
+            !parts
+                .iter()
+                .any(|part| matches!(part, Err(_) | Ok(StreamPart::Error { .. }))),
+            "{name}: {parts:?}"
+        );
+        assert!(
+            matches!(parts.last(), Some(Ok(StreamPart::Finish { finish_reason, .. }))
+                if finish_reason.unified == FinishReasonUnified::Stop),
+            "{name}: {parts:?}"
+        );
+    }
+}
+
+/// A `contentBlockDelta` that names more than one known member takes the
+/// first one instead of failing the frame (arcships/aimux#476, #489).
+#[tokio::test]
+async fn converse_a_delta_with_two_known_members_takes_the_first() {
+    let body = [
+        frame("messageStart", json!({"role":"assistant"})),
+        frame(
+            "contentBlockDelta",
+            json!({"contentBlockIndex":0,"delta":{"text":"answer","citation":{"generatedContent":{}}}}),
+        ),
+        frame("contentBlockStop", json!({"contentBlockIndex":0})),
+        frame("messageStop", json!({"stopReason":"end_turn"})),
+    ]
+    .concat();
+    let (base, _) = serve(body, "application/vnd.amazon.eventstream").await;
+    let provider = create_amazon_bedrock(AmazonBedrockProviderSettings {
+        api_key: Some(Resolvable::Value("test-key".into())),
+        region: Some("us-east-1".into()),
+        base_url: Some(base),
+        ..Default::default()
+    })
+    .unwrap();
+    let parts = collect(&provider.chat("anthropic.test"), CallOptions::new(vec![])).await;
+    assert_eq!(text_of(&parts), "answer", "{parts:?}");
+    assert!(
+        !parts
+            .iter()
+            .any(|part| matches!(part, Err(_) | Ok(StreamPart::Error { .. }))),
+        "{parts:?}"
+    );
+    assert!(
+        matches!(parts.last(), Some(Ok(StreamPart::Finish { finish_reason, .. }))
+            if finish_reason.unified != FinishReasonUnified::Error),
+        "{parts:?}"
+    );
 }
