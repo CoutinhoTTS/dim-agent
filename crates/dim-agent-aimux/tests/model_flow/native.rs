@@ -6180,80 +6180,33 @@ async fn gemini_a_signed_part_closes_its_text_block_and_replays_the_split() {
 }
 
 /// A Gemini stream finishes once it has seen both a finish reason and usage,
-/// in either order: a usage chunk followed by the finish reason ends the turn
-/// while the body stays open (arcships/aimux@b7479351, #469).
+/// in either order: a usage chunk followed by the finish reason ends the turn,
+/// and a text chunk behind the finish reason is not read (arcships/aimux@b7479351,
+/// #469; the provider pins the same shape in
+/// `the_stream_ends_at_the_finish_reason_after_the_usage`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gemini_usage_before_the_finish_reason_finishes_the_stream() {
-    use std::time::Duration;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
-        let mut request = Vec::new();
-        let mut chunk = [0u8; 4096];
-        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-            let count = socket.read(&mut chunk).await.unwrap();
-            assert_ne!(count, 0);
-            request.extend_from_slice(&chunk[..count]);
-        }
-        let body = sse(vec![
-            json!({"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
-            json!({"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}]}),
-        ]);
-        socket
-            .write_all(
-                format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n{body}"
-                )
-                .as_bytes(),
-            )
-            .await
-            .unwrap();
-        socket.flush().await.unwrap();
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    });
-    let root = rutis::Ctx::root().unwrap();
-    root.plugin(AimuxPlugin::default()).await.unwrap();
-    let host = root.get::<ModelHost>().unwrap();
-    let mut stream = host
-        .0
-        .invoke(
-            Arc::new(ModelRequest::new(
-                "local",
-                "test-model",
-                vec![Message::text(Role::User, "question")],
-            )),
-            ModelConnection::Http(HttpModelConnection {
-                protocol: ModelProtocol::Gemini,
-                base_url: format!("http://{address}/v1beta"),
-                network: Default::default(),
-                headers: Default::default(),
-                bearer: None,
-                api_key: Some("test-key".into()),
-                preset: None,
-            }),
-            CancellationToken::new(),
+    let server = MockServer::start().await;
+    let body = sse(vec![
+        json!({"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+        json!({"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}]}),
+        json!({"candidates":[{"content":{"role":"model","parts":[{"text":"late"}]},"index":0}]}),
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
         )
-        .await
-        .unwrap();
-    let outcome = tokio::time::timeout(Duration::from_secs(2), async {
-        let mut text = String::new();
-        while let Some(chunk) = stream.next().await {
-            if let Ok(ModelChunk::Text(delta)) = chunk {
-                text.push_str(&delta);
-            }
-        }
-        text
-    })
-    .await;
-    server.abort();
-    root.shutdown().await.unwrap();
+        .mount(&server)
+        .await;
+    let chunks = host_reply(ModelProtocol::Gemini, format!("{}/v1beta", server.uri())).await;
     assert_eq!(
-        outcome.ok(),
-        Some("done".to_owned()),
-        "the usage and the finish reason must end the stream while the body stays open"
+        reply_text(chunks),
+        Ok("done".to_owned()),
+        "the stream must end at the finish reason after the usage, before the trailing text"
     );
 }
 
