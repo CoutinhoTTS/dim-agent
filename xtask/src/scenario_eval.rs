@@ -63,7 +63,10 @@
 //!
 //! The judge's window is read from the judge's selection snapshot or from the
 //! `--model-config` file, and an evaluation whose judge declares no window
-//! fails before its first call. A run's view is judged in one call, and a
+//! fails before its first call. The view keeps every event in order, gives
+//! each request against the previous request of its line, and renders a
+//! request's consecutive thinking deltas as one line with their text joined.
+//! A run's view is judged in one call, and a
 //! view that does not fit the window less the reply's `maxTokens` leaves the
 //! run unjudged without a call: there is no judging in parts, because a probe
 //! that counts, orders or holds over a whole run cannot be answered from one
@@ -8157,12 +8160,23 @@ async fn idle(
 /// The export as the judge reads it (issue #635): every line in order, with
 /// each request-bearing event's request rendered against the previous request
 /// of the same line, so a run does not carry a request's unchanged history
-/// once per model call.
+/// once per model call. A request's consecutive `step/thinking` deltas render
+/// as one line with their text joined, because a delta line carries mostly an
+/// id and field names and the judge reads the run as a whole (issue #2139).
 fn judge_view(export: &str) -> String {
+    type ThinkingKey = (String, String, String);
+    let flush = |view: &mut String, thinking: &mut Option<(ThinkingKey, Value)>| {
+        if let Some((_, line)) = thinking.take() {
+            view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
+            view.push('\n');
+        }
+    };
     let mut view = String::new();
     let mut previous: BTreeMap<String, Value> = BTreeMap::new();
+    let mut thinking: Option<(ThinkingKey, Value)> = None;
     for raw in export.lines() {
         let Ok(mut line) = serde_json::from_str::<Value>(raw) else {
+            flush(&mut view, &mut thinking);
             view.push_str(raw);
             view.push('\n');
             continue;
@@ -8173,10 +8187,45 @@ fn judge_view(export: &str) -> String {
             line["event"]["data"]["request"] = rendered_request(&request, previous.get(&branch));
             previous.insert(branch, request);
         }
-        view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
-        view.push('\n');
+        let Some(key) = thinking_key(&line) else {
+            flush(&mut view, &mut thinking);
+            view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
+            view.push('\n');
+            continue;
+        };
+        if let Some((open, merged)) = thinking.as_mut()
+            && *open == key
+        {
+            let delta = line["event"]["data"]["delta"].as_str().unwrap_or_default();
+            let text = merged["event"]["data"]["delta"]
+                .as_str()
+                .unwrap_or_default();
+            merged["event"]["data"]["delta"] = json!(format!("{text}{delta}"));
+            continue;
+        }
+        flush(&mut view, &mut thinking);
+        thinking = Some((key, line));
     }
+    flush(&mut view, &mut thinking);
     view
+}
+
+/// The request a `step/thinking` line belongs to: the line, the turn and the
+/// request. A delta joins the open thinking line only when all three match.
+fn thinking_key(line: &Value) -> Option<(String, String, String)> {
+    (line["event"]["type"] == "step" && line["event"]["name"] == "thinking").then(|| {
+        (
+            line["branch_id"].as_str().unwrap_or_default().to_owned(),
+            line["event"]["data"]["turn_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            line["event"]["data"]["request_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    })
 }
 
 /// One request as [`judge_view`] renders it, starting from the request object
@@ -11763,6 +11812,63 @@ mod tests {
         assert!(
             other["event"]["data"]["request"]["messages"].is_array(),
             "the other line's first request is given in full: {other}"
+        );
+    }
+
+    /// A request's thinking is judged as one line: a delta line spends most of
+    /// its bytes on an id and field names, and the judge reads the run as a
+    /// whole (model-prompts §8.1). The merged line keeps the first delta's id
+    /// and position and the text of every delta in order; a delta of another
+    /// request or line, or one after another event, starts its own line.
+    #[test]
+    fn a_requests_thinking_deltas_render_as_one_line() {
+        let thinking = |id: &str, sequence: u64, branch: &str, request: &str, delta: &str| {
+            json!({
+                "kind": "event",
+                "branch_id": branch,
+                "event": {"id": id, "sequence": sequence, "type": "step", "name": "thinking",
+                          "data": {"turn_id": "t1", "request_id": request, "delta": delta}},
+            })
+            .to_string()
+        };
+        let export = [
+            thinking("e1", 1, "main", "r1", "one "),
+            thinking("e2", 2, "main", "r1", "two"),
+            thinking("e3", 3, "main", "r1", " three"),
+            thinking("e4", 4, "main", "r2", "other request"),
+            thinking("e5", 5, "other", "r1", "other line"),
+            r#"{"kind":"event","branch_id":"main","event":{"id":"e6","sequence":6,"type":"turn","name":"end","data":{"status":"completed"}}}"#.to_owned(),
+            thinking("e7", 7, "main", "r1", "after a break"),
+            r#"{"kind":"end","branches":2,"events":7}"#.to_owned(),
+        ]
+        .join("\n");
+        let view = judge_view(&export);
+        let lines: Vec<Value> = view
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            lines.len(),
+            6,
+            "one line per request's thinking run and one per other event"
+        );
+        assert_eq!(
+            lines[0]["event"]["id"], "e1",
+            "the first delta names the merged line"
+        );
+        assert_eq!(
+            lines[0]["event"]["sequence"], 1,
+            "the merged line keeps the first delta's position"
+        );
+        assert_eq!(
+            lines[0]["event"]["data"]["delta"], "one two three",
+            "the merged line carries every delta's text in order"
+        );
+        assert_eq!(lines[1]["event"]["data"]["delta"], "other request");
+        assert_eq!(lines[2]["event"]["data"]["delta"], "other line");
+        assert_eq!(
+            lines[4]["event"]["data"]["delta"], "after a break",
+            "another event ends the run a delta joins"
         );
     }
 
