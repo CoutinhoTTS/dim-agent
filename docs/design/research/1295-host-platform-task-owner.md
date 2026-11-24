@@ -30,7 +30,7 @@ reserve(id, log)               process started / wrapper written / PTY spawned
 ```
 
 ```rust
-struct TaskRecord { id: String, generation: u64, started: Instant,
+struct TaskRecord { id: String, started: Instant,
     state: Mutex<TaskState>, // Reserved | Running | Terminal(Arc<Terminal>)
     changed: watch::Sender<Option<Arc<Terminal>>>, kind: TaskKind }
 enum TaskKind { Command(CommandTask), ShellCommand(ShellCommand), Job(JobTask), Shell(ShellTask) }
@@ -42,7 +42,9 @@ struct Terminal { status: TaskStatus, exit_code: Option<i32>, signal: Option<Str
 capture. `JobTask`: `Arc<ShellTask>`, markers, paths, pid, stop. `ShellTask`: PTY, reader,
 display, log, `Weak<TaskRecord>` active/children. Only `ShellTask` has an active slot, only
 `Command`/`ShellCommand` have inline text, only `Job` has a pid; shell holds `Weak`, child
-holds `Arc`, so no cycle. `finish(terminal)` returns if already terminal, stores the `Arc`
+holds `Arc`, so no cycle. The owner's active slot is authoritative for `kill`: `ShellSession.occupying`
+is a client-side projection and never changes which record `kill` may interrupt; when they
+disagree, the owner wins and the session drops the stale occupancy. `finish(terminal)` returns if already terminal, stores the `Arc`
 in `state` and `changed` (wakes all), then clears active/sweeps; only `LogRecord.retained`
 and `JobTask.stop_requested` remain. The `Terminal` (including its `OutputRecord`) is
 immutable; `retainOutput` never mutates it (see §2.2).
@@ -60,17 +62,19 @@ terminal record is a no-op.
 | timeout / unload | `spawn.timeout` → `timed_out`; `wait` never kills; unload `cancelled{owner_unloaded}` | deadline is `kill`; unload same | no timeout; unload same after sweep | no timeout; unload same |
 
 A shell's terminal marks every child terminal; `settle(shellId)` removes the shell and its
-remaining children. `settle` keeps registered logs; the shell PTY log is removed on release
-unless retained.
+remaining children. `settle` keeps registered logs; the shell log exposed by the `shell`
+reply is registered and kept until `removeOutputDirectory` or Session deletion; only the
+internal init log is removed on release.
 ### 1.4 Interrupt, pid, pwsh, Windows
 `kill(commandId)` checks the shell active slot and non-terminal under its lock, then writes
 ETX; Reserved answers `task_running`, and a terminal, superseded or repeated interrupt is a
 no-op. A shell command's terminal comes from its end marker; a shell exit sweeps it; a 2 s
-expiry kills the shell. A job pid is scoped to its shell and a registered id in a `watch`
-read before `kill` waits; a pid after terminal is ignored, a kill before it sets
-`stop_requested`, no pid in 2 s answers `task_running`. pwsh completion writes its marker
-to `completionFile`, watched for 200 ms. Windows uses the existing PTY/job code; a stopped
-job is `cancelled`.
+expiry kills the shell. A job pid arrives through a `watch<Option<u32>>`; `kill`
+subscribes before reading the pid and waits for it. The pid is accepted only when its job id
+is registered and the record belongs to the same shell. A pid after terminal is ignored; a
+kill before it sets `stop_requested`; no pid in 2 s answers `task_running`. pwsh completion
+writes its marker to `completionFile`, watched for 200 ms. Windows uses the existing PTY/job
+code; a stopped job is `cancelled`.
 ### 1.5 Wake and binding
 `wait` subscribes to `changed` before reading state, so a terminal in the window is seen.
 The task methods are `&self`; no `spawn_in`, no `Arc<Self>` receiver, no `Weak<Self>`. The
@@ -93,17 +97,18 @@ table, worker tracker and shutdown token are `Arc`/cloneable fields created by
 | Field | Exec command | Shell command | Job | Shell |
 | --- | --- | --- | --- | --- |
 | `text` | complete output when the snapshot is inline; absent when the log is the source | absent | absent | absent |
-| `outputPath` | path the log would have; file may not exist | file | wrapper file | shell log |
+| `outputPath` | data-face snapshot path; a model result exposes it only when the file exists | file | wrapper file | shell log; exposed path is registered |
 | `outputBytes` / `outputTruncated` | produced; log cap, false with no file | produced; log cap | file length; false (uncapped) | produced; log cap |
 | `preview`/`previewTruncated` | `bounded_preview` tail | same | bounded tail read | same |
 | `failure` | `TaskFailure` | `TaskFailure` | `TaskFailure` | `TaskFailure` |
 | `status` | running/exited/signaled/timed_out/cancelled/failed | running/exited/failed | running/exited/failed/cancelled | running/exited/signaled/cancelled/failed |
 | `exitCode`/`signal` | when exited/signaled | numeric token; no signal | numeric token; no signal | when exited/signaled |
-| `durationMs` / `failureNote` | reservation→now/terminal; isolation hint | same; absent | same; absent | same; absent |
+| `durationMs` / `failureNote` | `now - started` while running, `terminal_at - started` when terminal; isolation hint | same; absent | same; absent | same; absent |
 
 * `text` present means the current snapshot is inline and `output` serves it; absent means
-  the log is the source. A terminal snapshot is immutable. `outputPath` is always present
-  and not stat'ed. `retainOutput` on a Running inline task creates the log and switches the
+  the log is the source. A terminal snapshot is immutable. A model-facing result includes
+  `outputPath` only when the file exists and is registered; the data-face `wait` may report
+  the planned path for introspection, but that path is not handed to the model. `retainOutput` on a Running inline task creates the log and switches the
   capture to file mode; on a Terminal inline task it only creates a side copy, so the
   snapshot and `output` stay inline and the returned path is for a caller that wants it.
 
@@ -131,14 +136,15 @@ table, worker tracker and shutdown token are `Arc`/cloneable fields created by
 `bytes` is consumed; `nextCursor` is present iff the source read reached `limit` and
 `bytes > 0`; a page never splits a character; `truncated` is the source log cap.
 ### 2.4 Errors and failure kinds
-`HostPlatformError`: `invalid`, `invalid_path`, `task_unknown`, `task_exists`,
+`HostPlatformError`: `invalid`, `invalid_path`, `timed_out`, `output_limit`, `task_unknown`, `task_exists`,
 `task_running`, `task_ended`, `output_unavailable`, `cancelled`, `closed`, `io`,
 `isolation_config_invalid`, `isolation_unavailable`, `exec_shell_config_invalid`,
 `exec_shell_unavailable`, `exec_shell_cwd_unsupported`, `cwd_not_found`,
 `exec_shell_path_mapping_failed`, `failed`. One typed enum, one variant per code; the wire
 tag is the code, so `xtask types` generates it. `ProcessSpecError{code,reason}` maps by an
 exhaustive match; a new code fails to compile until classified. `spawnWithStdin`/
-`spawnConfined` keep `InvalidPath` as `invalid_path`; exec maps `Invalid`/the exec-shell
+`spawnConfined` keep `InvalidPath` as `invalid_path`; `ConfinedError::TimedOut` and
+`OutputLimit { stream }` keep `timed_out` and `output_limit` with the stream field; exec maps `Invalid`/the exec-shell
 errors to its own codes.
 
 `TaskFailure` is a typed enum, used identically by `Terminal.failure` and
@@ -177,9 +183,9 @@ and display output. Markers are validated at `write`: `__DIM_START_<8 hex>_<8 he
 `__DIM_END_<8 hex>_<8 hex>__`, non-empty, one per line, token 1–12 ASCII alphanumerics. A
 marker inside other text is not one; the wrapper splits its literal so the echo does not
 match. A caller that prints its own marker ends its own capture; it is not a secret.
-`output(shellId)` reads the last 64 KiB of regularized text; `retainedFrom` is its absolute
-start; `reset` when the cursor is below it. `tail` previews it; no other reader touches the
-PTY. The worker orders the shell terminal: after the process exits it waits for the reader
+`output(shellId)` reads the last 64 KiB of regularized text; `retainedFrom` is the absolute
+start of that 64 KiB window, not the start of the 1 MiB display capture. A cursor below the
+window is reset to `retainedFrom`; `tail` previews it; no other reader touches the PTY. The worker orders the shell terminal: after the process exits it waits for the reader
 (bounded by `EXIT_STDIO_GRACE`), the reader calls `finish`, then the shell terminal sweeps
 children. The final unterminated line is in the command capture, its log and the display
 capture exactly once.
@@ -258,9 +264,10 @@ fail their own call; SessionStore removes a non-UTF-8 candidate with FileStorage
 Shell command/shell/job logs are `create_new`; a failed PTY start removes the log; a job
 completion file is checked for absence. `retainOutput` is idempotent: exec creates the file
 and switches to file mode; shell marks the PTY log retained until `removeOutputDirectory`.
-Registration is the branch's: `ToolDriver` registers any `outputPath` before the result
-leaves; ShellSession registers the `write` reply path after start. Command logs are
-registered; the shell PTY log and init log are not.
+Registration is the branch's: `ToolDriver` registers an `outputPath` only when the model
+result carries it and the file exists; it never registers a planned exec path. `ShellSession`
+registers the shell `outputPath` before the `shell` reply leaves and the `write` reply path
+after start. Command logs are registered; the init log is internal and is not.
 ### 5.2 Markers, pid, state
 Shape/validation/scope: §3.1; `write` rejects a malformed/empty marker with `invalid`. The
 pid line is `__DIM_END_...__<pid> <taskId>`, scoped to its shell and a registered id; a job
@@ -292,23 +299,26 @@ parent when absent, and require a strict descendant of the canonical root (equal
 `WorkspaceTools.md` owns exec/BackgroundExec and links; `service-faces.md` §3.4 lists
 operations and attributes the PTY to `ShellSession`; npm declarations regenerate.
 ## 6. Verification
-| Case | Test | File |
-| --- | --- | --- |
-| display >1 MiB never stalls the PTY | `a_shell_burst_never_stalls_the_pty_and_resets_stale_cursors` | `host_platform_flow.rs` |
-| inline < threshold, >2,000 lines | `foreground_output_is_canonical_and_offloaded_like_ts` + `seq 1 5000` | `local_execution.rs` |
-| output failure with exit 0 | `an_output_write_failure_fails_a_zero_exit_command` | `host_platform_flow.rs` |
-| kill reserved/terminal/then wait; repeated settle/lost wake | `kill_on_reserved_answers_task_running` (focused task test), `kill_after_any_terminal_is_a_noop`, `kill_then_wait_answers_cancelled`, `a_second_settle_answers_task_unknown`, `wait_started_before_terminal_never_misses_it` | `host_platform.rs` tests, `host_platform_flow.rs` |
-| retainOutput keeps the inline snapshot | `retain_output_after_terminal_keeps_text` | `host_platform_flow.rs` |
-| shell exit partial line / retained log / job tail/page | `a_partial_line_at_shell_exit_is_retained_once`, `a_retained_shell_log_survives_settle`, `a_large_job_file_tail_and_page_are_bounded`, `an_empty_page_and_a_stale_cursor` | `minimal_execution.rs`, `host_platform_flow.rs` |
-| non-UTF-8 | `info_rejects_a_non_utf8_home`; `exec_rejects_a_non_utf8_root` | `host_platform_flow.rs`, `local_execution.rs` |
-| pwsh terminal | `a_pwsh_job_reaches_terminal_from_its_result_file` | `host_platform_windows_flow.rs` |
-| shell command duration/status | `a_shell_command_wait_reports_duration_and_status` | `host_platform_flow.rs` |
-| duplicate id after settle | `a_reserved_id_rejects_a_second_spawn_and_a_settled_log_rejects_reuse` | `host_platform_flow.rs` |
-| failure kinds | `OutputWriteFailed`, `TerminateFailed`, `ShellExited/Reset`, `CommandFailed`, `UnknownExit`, `JobUnavailable`, `OwnerUnloaded` via the rows above and unload/stop tests | `host_platform_flow.rs`, `minimal_execution.rs` |
-| second capture / marker / interrupt / dead-shell write | `a_second_command_while_one_runs_answers_task_running`, `an_echoed_or_cross_shell_marker_does_not_end_a_task`, `kill_interrupts_only_the_active_command`, `write_to_a_terminated_shell_answers_task_ended` | `host_platform_flow.rs` |
-| `session.exec.stop` owner route | live shell command/job stop; normal exec stop unchanged; unknown id | `transport_flow/shell_input.rs`, `minimal_execution.rs`, `local_execution.rs` |
-| removal / MCP PATH / confined / isolation hint | `output_removal_refuses_traversal_and_links`, four PATH outcomes, `ocr_plugin_helper...`, `execution_settings...` extended | `host_platform_flow.rs`, `stdio.rs`, `dim-modality`, `execution_settings.rs` |
-| docs/types | `xtask check`, `types`, `graph` | CI |
+Only `foreground_output_is_canonical_and_offloaded_like_ts` and
+`output_removal_refuses_traversal_and_links` exist at this head; every other row is added by
+its step.
+| Case | Test | File | Status |
+| --- | --- | --- | --- |
+| display >1 MiB never stalls the PTY | `a_shell_burst_never_stalls_the_pty_and_resets_stale_cursors` | `host_platform_flow.rs` | step 4 |
+| inline < threshold, >2,000 lines | `foreground_output_is_canonical_and_offloaded_like_ts` + `seq 1 5000` | `local_execution.rs` | existing; recheck step 3 |
+| output failure with exit 0 | `an_output_write_failure_fails_a_zero_exit_command` | `host_platform_flow.rs` | step 3 |
+| kill reserved/terminal/then wait; repeated settle/lost wake | `kill_on_reserved_answers_task_running` (focused task test), `kill_after_any_terminal_is_a_noop`, `kill_then_wait_answers_cancelled`, `a_second_settle_answers_task_unknown`, `wait_started_before_terminal_never_misses_it` | `host_platform.rs` tests, `host_platform_flow.rs` | step 1/2 |
+| retainOutput keeps the inline snapshot | `retain_output_after_terminal_keeps_text` | `host_platform_flow.rs` | step 2 |
+| shell exit partial line / retained log / job tail/page | `a_partial_line_at_shell_exit_is_retained_once`, `a_retained_shell_log_survives_settle`, `a_large_job_file_tail_and_page_are_bounded`, `an_empty_page_and_a_stale_cursor` | `minimal_execution.rs`, `host_platform_flow.rs` | step 4 |
+| non-UTF-8 | `info_rejects_a_non_utf8_home`; `exec_rejects_a_non_utf8_root` | `host_platform_flow.rs`, `local_execution.rs` | step 5 |
+| pwsh terminal | `a_pwsh_job_reaches_terminal_from_its_result_file` | `host_platform_windows_flow.rs` | step 4 |
+| shell command duration/status | `a_shell_command_wait_reports_duration_and_status` | `host_platform_flow.rs` | step 4 |
+| duplicate id after settle | `a_reserved_id_rejects_a_second_spawn_and_a_settled_log_rejects_reuse` | `host_platform_flow.rs` | step 1 |
+| failure kinds | `OutputWriteFailed`, `TerminateFailed`, `ShellExited/Reset`, `CommandFailed`, `UnknownExit`, `JobUnavailable`, `OwnerUnloaded` via the rows above and unload/stop tests | `host_platform_flow.rs`, `minimal_execution.rs` | step 2/4 |
+| second capture / marker / interrupt / dead-shell write | `a_second_command_while_one_runs_answers_task_running`, `an_echoed_or_cross_shell_marker_does_not_end_a_task`, `kill_interrupts_only_the_active_command`, `write_to_a_terminated_shell_answers_task_ended` | `host_platform_flow.rs` | step 4 |
+| `session.exec.stop` owner route | live shell command/job stop; normal exec stop unchanged; unknown id | `transport_flow/shell_input.rs`, `minimal_execution.rs`, `local_execution.rs` | step 6 |
+| removal / MCP PATH / confined / isolation hint | `output_removal_refuses_traversal_and_links`, four PATH outcomes, `ocr_plugin_helper...`, `execution_settings...` extended | `host_platform_flow.rs`, `stdio.rs`, `dim-modality`, `execution_settings.rs` | existing/step 5 |
+| docs/types | `xtask check`, `types`, `graph` | CI | step 7 |
 
 Existing flows stay (`host_platform_flow`, `local_execution`, `minimal_execution`,
 `transport_flow/shell_input`); delete the backpressure test and fold private helper tests.
@@ -328,8 +338,8 @@ Existing flows stay (`host_platform_flow`, `local_execution`, `minimal_execution
 ### 7.2 Patch mapping
 | Change | Keep | Rewrite |
 | --- | --- | --- |
-| `922be1c3`/`2c06fca5` job reads, acks, exec ids | jobs readable by id; retention explicit; exec uses `spawn`/`wait`/`kill`/`settle` | job records in the one table; `wait`/`output`/`tail`/`retainOutput`; terminal record replaces `ExecProcess`; `hostTaskId`; no rebuilt `ExitStatus` |
-| `862b774a`/`0002580` stream | no marker may be lost; display never backpressures | owner is the only line consumer; queue/cursor/ack deleted; one text capture is the display read |
+| Job reads, acks, exec ids | jobs readable by id; retention explicit; exec uses `spawn`/`wait`/`kill`/`settle` | job records in the one table; `wait`/`output`/`tail`/`retainOutput`; terminal record replaces `ExecProcess`; `hostTaskId`; no rebuilt `ExitStatus` |
+| Stream | no marker may be lost; display never backpressures | owner is the only line consumer; queue/cursor/ack deleted; one text capture is the display read |
 
 ### 7.3 Scope and follow-up
 `task_ended` is in this PR: step 2 adds it, step 4 makes `write`/`resize` return it, and
