@@ -925,9 +925,11 @@ impl Fold {
         (self.last_change > self.state_after).then_some(self.last_change)
     }
     /// Whether the turn end at `after` still decides the pause a record states:
-    /// the checks [`decide_turn_end`] makes before it returns one. A driving
-    /// input or a newer turn that folds while the record is written leaves the
-    /// pause to that turn (C4, C5).
+    /// the checks [`decide_turn_end`] makes before it returns one, and no
+    /// evaluator-first decision over them (Pursuit §4.1). A driving input or a
+    /// newer turn that folds while the record is written leaves the pause to
+    /// that turn (C4, C5); a driving input withdrawn in that window returns the
+    /// end to the evaluator, which the pause no longer answers.
     pub(crate) fn pauses_at_end(&self, after: u64) -> bool {
         let Some(end) = self.turn_end.as_ref().filter(|end| end.sequence == after) else {
             return false;
@@ -937,7 +939,10 @@ impl Fold {
         }
         self.interrupted()
             || end.status == TurnStatus::Failed
-            || (end.status == TurnStatus::Completed && !self.turn_open() && !self.pending_driving())
+            || (end.status == TurnStatus::Completed
+                && !self.turn_open()
+                && !self.pending_driving()
+                && !decide_evaluation(self, after))
     }
     /// Whether the `continue` conclusion at `sequence` still decides the pause a
     /// record states: the checks [`decide_evaluated_continuation`] makes before

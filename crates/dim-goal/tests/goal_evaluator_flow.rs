@@ -1434,6 +1434,135 @@ async fn pursuit_1_a_withdrawn_queue_returns_the_turn_end_to_the_evaluator() {
     env.close().await;
 }
 
+/// A Queue that held the evaluator-first decision back is withdrawn while the
+/// turn end waits for its progress query: the limit pause the writer decided is
+/// no longer the answer, and the turn end creates the evaluator (Pursuit §4.1,
+/// #2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queue_withdrawn_before_the_pause_record_keeps_the_evaluator() {
+    let env = Env::start_gated().await;
+    env.set_limit(1);
+    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
+        .await
+        .expect("set writes");
+    let set = env.wait_for("main", r#"op="set""#).await;
+    let first = env.turn("main", &[&set]);
+    let continuation = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="continuation" count="1" limit="1" after="{}""#,
+                first.sequence
+            ),
+        )
+        .await;
+    env.turn_start("main", "work");
+    env.consume("main", &continuation.id);
+    env.tool(
+        "main",
+        json!({"status": "completed", "summary": "all tests pass"}),
+    )
+    .await;
+    // The Queue holds the evaluator-first decision back, so the turn end is
+    // about to state the limit pause instead.
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+
+    let (progress, release_progress) = env.gated().hold_query("step/tool-call");
+    let ended = env.end_turn("main", "work", "completed");
+    progress.await.expect("the turn-end progress query starts");
+
+    // The two ends this window can take: the record writer states the pause at
+    // its append, or the turn end is decided again for the evaluator.
+    let mut pause = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Append,
+        ended.sequence,
+        Some(ended.sequence),
+    );
+    let mut retaken = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        ended.sequence,
+        Some(ended.sequence),
+    );
+    env.delete_id("main", &queued.id);
+    let deleted = env.timeline("main").committed();
+    env.dispatched("main", deleted).await;
+    release_progress
+        .send(())
+        .expect("the progress query answers");
+
+    let recorded = tokio::select! {
+        _ = pause.arrived() => true,
+        _ = retaken.arrived() => false,
+    };
+    assert!(
+        !recorded,
+        "the withdrawn Queue at {} leaves the turn end at {} to the evaluator, but its limit pause reached the append",
+        queued.sequence, ended.sequence
+    );
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        ended.sequence,
+        Some(ended.sequence),
+    );
+    retaken.release();
+    assert_eq!(
+        done.arrived().await,
+        ended.sequence,
+        "the retaken decision creates the evaluator for the turn end at {}",
+        ended.sequence
+    );
+    done.release();
+
+    let creates = env.creates("main").await;
+    assert_eq!(
+        creates.len(),
+        1,
+        "the withdrawn Queue at {} keeps one evaluator for the turn end at {}: {creates:#?}",
+        queued.sequence,
+        ended.sequence
+    );
+    assert_eq!(
+        creates[0].source,
+        BranchSource::Host {
+            operation_id: format!("goal:evaluate:{}", ended.sequence)
+        },
+        "the evaluator was created for the turn end at {}",
+        ended.sequence
+    );
+    let paused = env
+        .writes("main")
+        .await
+        .into_iter()
+        .filter(|block| {
+            block
+                .marker
+                .contains(r#"kind="state" status="paused" reason="limit""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"after="{}""#, ended.sequence))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect::<Vec<_>>();
+    assert!(
+        paused.is_empty(),
+        "the withdrawn Queue at {} leaves the turn end at {} to the evaluator, but the limit pause was recorded: {paused:?}",
+        queued.sequence,
+        ended.sequence
+    );
+    env.close().await;
+}
+
 /// A `continue` conclusion that arrives while a background task is open waits
 /// for the task: its cancelled end takes the conclusion once, and a second
 /// cancelled end writes nothing more (Pursuit §5).
