@@ -6110,7 +6110,9 @@ fn switch_note_failure(driven: &Driven, export: &str) -> Option<String> {
 /// turn-budget stop ended, whose reason `cap_stop` carries: that stop, not the
 /// note, kept it from the model (issue #2140). Every other request that never
 /// reached the model is reported, because no request of the line carried the
-/// text being evaluated.
+/// text being evaluated. A request whose `step/model-start` carries no turn id
+/// is exempted by neither: without the turn, neither the steer that replaced
+/// it nor the stop that ended it can be placed.
 fn switch_notes_unseen(
     export: &str,
     notes: &[SwitchNote],
@@ -6123,9 +6125,10 @@ fn switch_notes_unseen(
         note: Option<NoteSeen>,
     }
     /// One `step/model-start`: the request it began, and its line and turn.
+    /// `turn` is `None` when the start carries no turn id.
     struct Start {
         branch: String,
-        turn: String,
+        turn: Option<String>,
         sequence: u64,
         request: String,
     }
@@ -6167,10 +6170,7 @@ fn switch_notes_unseen(
             (Some("step"), Some("model-start")) => {
                 if let Some(request) = event["data"]["request_id"].as_str() {
                     starts.push(Start {
-                        turn: event["data"]["turn_id"]
-                            .as_str()
-                            .unwrap_or_default()
-                            .to_owned(),
+                        turn: event["data"]["turn_id"].as_str().map(str::to_owned),
                         branch,
                         sequence,
                         request: request.to_owned(),
@@ -6228,9 +6228,12 @@ fn switch_notes_unseen(
             .filter(|start| &start.branch == branch && start.sequence < *at)
             .filter(|start| {
                 let request = (start.branch.clone(), start.request.clone());
-                let turn = (start.branch.clone(), start.turn.clone());
+                let turn = start
+                    .turn
+                    .as_ref()
+                    .map(|turn| (start.branch.clone(), turn.clone()));
                 !ended.get(&request).is_some_and(|end| end < at)
-                    && !ended_turns.get(&turn).is_some_and(|end| end < at)
+                    && !turn.is_some_and(|turn| ended_turns.get(&turn).is_some_and(|end| end < at))
             })
             .max_by_key(|start| start.sequence)
         {
@@ -6266,7 +6269,8 @@ fn switch_notes_unseen(
         // A steer replaces a request inside the turn that began it, so the
         // requests that can answer for this note are that turn's own: a later
         // turn's request carries the note as context and cannot stand in for a
-        // request that never reached the model.
+        // request that never reached the model. A start without a turn id
+        // joins no other start's turn, and the loop below exempts none of them.
         let turn = first.turn.clone();
         requests.retain(|start| start.turn == turn);
         // A steer can replace the request a line began before it reaches the
@@ -6281,11 +6285,13 @@ fn switch_notes_unseen(
                 call = Some(found);
                 break;
             }
-            if replaced.contains(&key) {
-                continue;
-            }
-            if cut.contains(&key) {
-                continue 'notes;
+            if start.turn.is_some() {
+                if replaced.contains(&key) {
+                    continue;
+                }
+                if cut.contains(&key) {
+                    continue 'notes;
+                }
             }
             break;
         }
@@ -9946,14 +9952,14 @@ mod tests {
                                  "data": {"input_id": "f1"}}}),
                 json!({"kind": "event", "branch_id": "2",
                        "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
-                                 "data": {"request_id": "r1"}}}),
+                                 "data": {"turn_id": "t1", "request_id": "r1"}}}),
                 json!({"kind": "event", "branch_id": "2",
                        "event": {"id": "o1", "sequence": 5, "type": "step", "name": "model-output-end",
                                  "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
                                           "reason": "replaced by steer"}}}),
                 json!({"kind": "event", "branch_id": "2",
                        "event": {"id": "s2", "sequence": 6, "type": "step", "name": "model-start",
-                                 "data": {"request_id": "r2"}}}),
+                                 "data": {"turn_id": "t1", "request_id": "r2"}}}),
                 json!({"kind": "event", "branch_id": "2",
                        "event": {"id": "m2", "sequence": 7, "type": "model", "name": "call",
                                  "data": {"request_id": "r2",
@@ -10267,6 +10273,55 @@ mod tests {
                 .expect("a request that ended before the stop still needs its note");
             assert!(unseen.contains("never reached the model"), "{unseen}");
         }
+    }
+
+    /// A start that carries no turn id is not exempted by the turn-budget stop
+    /// the way a placed request is: without the turn, nothing says the stop
+    /// found this request in flight, and grouping every such start under one
+    /// turn would drop the turn the check reads (Timeline branches §12.4).
+    #[test]
+    fn a_start_without_a_turn_id_is_exempted_by_no_stop() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let export = [
+            event(
+                1,
+                "n1",
+                ["input", "message"],
+                json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+            ),
+            event(2, "f1", ["input", "message"], json!({})),
+            event(3, "c1", ["input", "consumed"], json!({"input_id": "f1"})),
+            event(
+                4,
+                "s1",
+                ["step", "model-start"],
+                json!({"request_id": "r1"}),
+            ),
+            event(
+                5,
+                "i1",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "turn"}),
+            ),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"))
+            .expect("an unplaced request is not exempted by the stop");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
     }
 
     /// A turn-budget stop does not hide a request that reached the model
