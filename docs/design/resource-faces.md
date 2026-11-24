@@ -770,9 +770,9 @@ resolved root as being removed, then releases it and awaits the callback, which 
 the checked root path; the exclusion is taken again only to delete the directory row after
 the callback returns. No SQL or Timeline commit lock is held while awaiting it. The
 registration ends in the removal's own task, so dropping the caller stops neither the
-deletion nor the registration. While it runs, `createOwnedSession`, `fork`, `delete`,
-`removeWorktreeDirectory`, `removeWorktree`, `removeUnregisteredDirectory` and
-`store.associateWorktree` are refused with `invalid` for a path at, under or above the
+deletion nor the registration. While it runs, `createOwnedSession`, `fork`,
+`store.associateWorktree`, `removeWorktreeDirectory`, `removeWorktree` and
+`removeUnregisteredDirectory` are refused with `invalid` for a path at, under or above the
 registered one, and proceed for unrelated paths. The callback may refuse with `invalid`,
 `cancelled` or `storage`; unexpected callback or transport failures are `storage`. A
 callback failure leaves the directory row in place and no registration. The registration
