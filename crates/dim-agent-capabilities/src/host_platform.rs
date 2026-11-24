@@ -1292,6 +1292,41 @@ impl HostPlatform {
                     return Ok(());
                 }
                 let Some(pid) = current else {
+                    let record = task.clone();
+                    let job = job.clone();
+                    self.command_workers.spawn(async move {
+                        let mut pid = job.pid.subscribe();
+                        loop {
+                            if record.is_terminal() {
+                                return;
+                            }
+                            let current = *pid.borrow_and_update();
+                            if let Some(pid) = current {
+                                let failure = kill_job(pid).await.err().map(|error| {
+                                    TaskFailure::TerminateFailed {
+                                        message: error.to_string(),
+                                    }
+                                });
+                                record.finish(Terminal {
+                                    status: if failure.is_some() {
+                                        TaskStatus::Failed
+                                    } else {
+                                        TaskStatus::Cancelled
+                                    },
+                                    exit_code: None,
+                                    signal: None,
+                                    duration_ms: record.started.elapsed().as_millis() as u64,
+                                    failure,
+                                    output: job.output_record().0,
+                                    note: None,
+                                });
+                                return;
+                            }
+                            if pid.changed().await.is_err() {
+                                return;
+                            }
+                        }
+                    });
                     return Err(HostPlatformError::TaskRunning);
                 };
                 kill_job(pid)
@@ -1507,6 +1542,13 @@ impl HostPlatform {
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf();
             let output_path = PathBuf::from(&start.output_path);
+            if output_path.file_stem().and_then(|stem| stem.to_str())
+                != Some(start.task_id.as_str())
+            {
+                return Err(HostPlatformError::Invalid(
+                    "job outputPath stem must equal its taskId".into(),
+                ));
+            }
             if !output_path.is_absolute()
                 || output_path
                     .components()
@@ -1542,7 +1584,14 @@ impl HostPlatform {
             let record = TaskRecord::new(start.task_id.clone(), TaskKind::Job(job.clone()));
             {
                 let mut commands = self.commands.lock().unwrap();
-                if commands.contains_key(&start.task_id) {
+                if commands.contains_key(&start.task_id)
+                    || commands.values().any(|existing| {
+                        matches!(
+                            &existing.kind,
+                            TaskKind::Job(other) if other.output_path == job.output_path
+                        )
+                    })
+                {
                     return Err(HostPlatformError::TaskExists);
                 }
                 commands.insert(start.task_id.clone(), record.clone());
@@ -4225,18 +4274,6 @@ pub(crate) mod shell {
                         .is_some_and(|shell| Arc::ptr_eq(&shell, pump))
                 {
                     job.pid.send_replace(Some(pid));
-                    if job.stop_requested.load(Ordering::SeqCst) {
-                        let _ = terminate_job(pid);
-                        record.finish(Terminal {
-                            status: TaskStatus::Cancelled,
-                            exit_code: None,
-                            signal: None,
-                            duration_ms: record.started.elapsed().as_millis() as u64,
-                            failure: None,
-                            output: job.output_record().0,
-                            note: None,
-                        });
-                    }
                 }
             }
         }

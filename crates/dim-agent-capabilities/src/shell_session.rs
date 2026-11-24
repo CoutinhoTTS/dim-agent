@@ -21,7 +21,7 @@ use crate::{
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use dim_agent_runtime::{Dispatcher, Names, Timeline};
+use dim_agent_runtime::{Dispatcher, Names, SessionLifecycle, Timeline};
 use dim_agent_types::{
     EventKind, ExecEndedData, ExecStartedData, ExecStatus, JsonObject, ToolContent, ToolEffect,
     ToolResult,
@@ -103,11 +103,13 @@ struct OccupyingTask {
     output_path: PathBuf,
     delivered: usize,
     ended: Arc<Notify>,
+    hold: Option<dim_agent_runtime::SessionHold>,
 }
 
 struct BackgroundTask {
     task_id: String,
     output_path: PathBuf,
+    hold: Option<dim_agent_runtime::SessionHold>,
 }
 
 struct Inner {
@@ -154,6 +156,7 @@ pub struct ShellSession {
     /// native storage, where shell output has no owner.
     owner: Option<Arc<SessionFiles>>,
     session_id: String,
+    session_lifecycle: Option<Arc<SessionLifecycle>>,
     recovery: Option<Arc<BackgroundExec>>,
     tasks: Arc<tokio::sync::Mutex<TaskTracker>>,
 }
@@ -192,6 +195,7 @@ impl ShellSession {
             dispatcher,
             owner,
             session_id,
+            session_lifecycle: None,
             recovery: None,
             tasks: Arc::new(tokio::sync::Mutex::new(TaskTracker::new())),
         }
@@ -1202,6 +1206,10 @@ impl ShellSession {
                     .into(),
                 )
                 .map_err(|error| error.to_string())?;
+            let hold = self
+                .session_lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.take_hold());
             inner.occupy_tail = None;
             inner.occupy_exit = None;
             inner.occupying = Some(OccupyingTask {
@@ -1209,6 +1217,7 @@ impl ShellSession {
                 output_path: output_path.to_path_buf(),
                 delivered: preview.len(),
                 ended: Arc::new(Notify::new()),
+                hold,
             });
         }
         let ended = {
@@ -1359,11 +1368,16 @@ impl ShellSession {
                     .into(),
                 )
                 .map_err(|error| error.to_string())?;
+            let hold = self
+                .session_lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.take_hold());
             inner.background.insert(
                 task_id.clone(),
                 BackgroundTask {
                     task_id: task_id.clone(),
                     output_path: output_path.clone(),
+                    hold,
                 },
             );
         }
@@ -1690,6 +1704,7 @@ pub struct ShellSessionPlugin {
     host: Key<HostPlatform>,
     lifecycle: Key<dim_agent_runtime::BranchLifecycle>,
     session_config: Key<dim_agent_runtime::SessionConfig>,
+    session_lifecycle: Key<SessionLifecycle>,
     identity: Key<dim_agent_runtime::TimelineIdentity>,
     config: Option<ShellSessionConfig>,
 }
@@ -1714,6 +1729,7 @@ impl ShellSessionPlugin {
             host: names.key()?,
             lifecycle: names.key()?,
             session_config: names.key()?,
+            session_lifecycle: names.key()?,
             identity: names.key()?,
             config: None,
         })
@@ -1732,6 +1748,7 @@ impl DynPlugin for ShellSessionPlugin {
             self.host.erase(),
             self.lifecycle.erase(),
             self.session_config.erase(),
+            self.session_lifecycle.erase(),
             self.identity.erase(),
         ]
     }
@@ -1742,6 +1759,7 @@ impl DynPlugin for ShellSessionPlugin {
             let host = ctx.require_at(&self.host)?;
             let recovery = ctx.require_at(&self.recovery)?;
             let config = ctx.require_at(&self.session_config)?;
+            let session_lifecycle = ctx.require_at(&self.session_lifecycle)?;
             let identity = ctx.require_at(&self.identity)?;
             let owner = ctx.get::<SessionFiles>();
             let mut session = ShellSession::new(
@@ -1763,6 +1781,7 @@ impl DynPlugin for ShellSessionPlugin {
             );
             session.facts = Some((ctx.clone(), self.facts.clone()));
             session.recovery = Some(recovery);
+            session.session_lifecycle = Some(session_lifecycle);
             let session = Arc::new(session);
             let service = session.clone();
             ctx.effect(move || async move {
