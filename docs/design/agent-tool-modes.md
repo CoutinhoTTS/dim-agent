@@ -42,9 +42,9 @@ repository; the shell is the one without a product form.
 | `codemode` | one program | discover tools, call them, branch, loop, aggregate; child results stay out of the model context | the `codemode` tool beside the direct tools |
 | `shell` | one shell session | compose commands; working directory, environment and jobs persist across calls | the minimal-execution profile only |
 
-In `codemode` and `shell` only the entry and the two conversation tools are declared (§2). That
-absence is a property of the mode — the model does its work through one surface — not the goal of
-the change. Fewer declarations
+In `codemode` and `shell` only the entry and the tools a program cannot consume are declared (§2).
+That absence is a property of the mode — the model does its work through one surface — not the goal
+of the change. Fewer declarations
 per request, fewer round trips and less context churn follow from it; the tools declared today
 carry about 12 kB of description and about 20 kB with schemas, but saving that is a result, not the
 requirement.
@@ -89,21 +89,27 @@ mean something, not a simplification.
 
 ## 2. Product behavior
 
-A mode declares its entry tool and two conversation tools, `ask_user` and `recall`: asking the
-operator and reading a shortened conversation are what a mode cannot replace.
+A mode declares its entry tool, plus the tools whose result the program cannot consume: `skill`
+carries instructions for the model, and a shell has no program, so it also declares `ask_user` and
+`recall`.
 
 | Mode | Declared | A program may call | Hidden |
 | --- | --- | --- | --- |
 | `normal` (default) | every tool except `codemode` and `execute` | — | `codemode`, `execute` |
-| `codemode` | `codemode`, `ask_user`, `recall` | every tool except `codemode` | — |
+| `codemode` | `codemode`, `skill` | every tool except `codemode` | — |
 | `shell` | `execute`, `ask_user`, `recall` | — | every other tool |
 
-- `codemode` loses no reach: its program calls every tool except `codemode`, so skills, images, the
-  web, MCP, lines, agents, schedules, settings and the shell are all available inside a program.
-  They are not declared because the model does that work in one program.
-- `shell` is the shell, plus the two conversation tools. It cannot load a skill, read an image, call
-  an MCP tool, open a line, start a member, schedule or manage settings and plugins. Those are the
-  mode's boundary: a task that needs one runs in another mode.
+- `codemode` loses no reach: its program calls every tool except `codemode`, so images, the web,
+  MCP, lines, agents, schedules, settings and the shell are all available inside a program.
+  `ask_user` and `recall` are orchestration inputs a program can process and use — it may ask the
+  operator several times and act on each answer, or search the history and decide from it — so they
+  are calls, not declarations.
+- `skill` is different: its result is instructions for the model, not data for the program, so it
+  stays declared.
+- `shell` is the shell, plus `ask_user` and `recall`, because it has no program to carry them. It
+  cannot load a skill, read an image, call an MCP tool, open a line, start a member, schedule or
+  manage settings and plugins. Those are the mode's boundary: a task that needs one runs in another
+  mode.
 - What each entry tool must provide to carry its mode is §7.
 
 Rules that hold in every mode:
@@ -149,7 +155,7 @@ owns this projection. Three terms:
 | Mode | visible (top-level) | delegated (child) | entry tool absent |
 | --- | --- | --- | --- |
 | `normal` | every tool except `codemode` and `execute` | none | — |
-| `codemode` | `codemode`, `ask_user`, `recall` | every tool except `codemode` | the Session runs `normal` |
+| `codemode` | `codemode`, `skill` | every tool except `codemode` | the Session runs `normal` |
 | `shell` | `execute`, `ask_user`, `recall` | none | the Session runs `normal` |
 
 - The sets follow §2 and name no other tool: a new tool is declared in `normal`, callable from a
@@ -247,16 +253,32 @@ kinds exist in one Session:
 
 ## 7. What the entry tools must provide
 
-A mode declares one tool, so that tool must carry everything the mode promises. The items below are
-its requirements; the ones marked missing are follow-up work, not part of this change.
+A mode declares one entry tool, so that tool must carry everything the mode promises. The items
+below are its requirements; the ones marked missing are follow-up work, not part of this change.
 
 `codemode`:
 
 - Discovery and call (`tools.list`, `tools.describe`, `tools.call`) over the request's pinned set,
   everything except `codemode`. Exists.
-- Asking the operator from inside a program: a child `ask_user` already carries `parent_call_id` and
-  is answerable through `session.question.respond`; the clients must show it under the program and
-  let the operator answer it. Missing on the client side.
+- **Content blocks on return.** A child result can carry image blocks (`read` of an image, an MCP
+  result), and they reach the model only if the return path rebuilds them. When the returned value
+  is a child result or its `content`, the host rebuilds the blocks it handed out; an image block is
+  rebuilt only when it equals one a child result returned, so a program cannot point the model at
+  pixels it never read. Text blocks always become text, and anything else stays JSON text. The
+  existing output bound applies. Missing.
+- **Ordering.** A program calls tools in any order and in parallel, and child calls currently bypass
+  `ToolConcurrency`. The gate must order them the way a top-level batch does: calls start in the
+  order the program issued them, `Concurrent` calls may overlap, an `Exclusive` call waits for the
+  calls before it and holds back the calls after it, and a call waiting for an approval or a
+  question keeps its place. Missing.
+- **Async lifetime.** Work handed to its owner — a background `exec` or `execute` task, an `events`
+  subscription, a `schedule`/`wakeup`/`loop` timer, a branch line, a member — is not tied to the
+  child call or the program: cancelling the program does not cancel it, and its completion arrives
+  as it does today. A call cancelled before it hands the work over does nothing. Mostly exists;
+  verify and pin it.
+- Asking the operator from inside a program: a child `ask_user` carries `parent_call_id` and is
+  answerable through `session.question.respond`; the clients must show it under the program and let
+  the operator answer it. Missing on the client side.
 - Progress: each child call is a `step/tool-call`/`step/tool-result` event; the client groups them
   under the program row. The protocol exists (v4); grouping is a client feature.
 - A failure manifest: a failed program names the child calls that ran and their effects, beyond
@@ -332,15 +354,20 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
 
 - Flow: create a Session in each mode (request field; absent = `normal`) and assert the request's
   declarations: `normal` declares every tool except `codemode` and `execute`; `codemode` declares
-  `codemode`, `ask_user` and `recall`; `shell` declares `execute`, `ask_user` and `recall`.
-- Flow: a tool registered by a capability or an MCP server is declared in `normal`, callable from a
-  `codemode` program, and absent from a `shell` Session.
-- Flow: in `codemode` mode a top-level call naming `read` or `skill` is refused as an unknown tool
-  even though the request pinned it for children, and a child call to `codemode` is refused as
-  outside `delegated`. In `shell` mode a top-level call naming `read` is refused.
-- Flow: in `codemode` mode, a program calls a work tool the model does not see and a dialogue tool
-  it does see; the child `step/tool-call` and `step/tool-result` carry `parent_call_id`, and
-  Permission admits each child by its own risk.
+  `codemode` and `skill`; `shell` declares `execute`, `ask_user` and `recall`.
+- Flow: in `codemode` mode a top-level call naming `read`, `ask_user` or `execute` is refused as an
+  unknown tool even though the request pinned it for children, and a child call to `codemode` is
+  refused as outside `delegated`. In `shell` mode a top-level call naming `read` is refused.
+- Flow: a program returns a `read` image result; the outer result carries the same image block, and
+  the model request renders it as an image, not as JSON. A fabricated image block falls back to
+  text.
+- Flow: a program issues two `write` calls in parallel; the gate serializes them as `Exclusive`
+  calls in issue order, while two `read` calls overlap.
+- Flow: a program starts a background `exec` and then fails or is stopped; the task keeps running,
+  the Session wakes on its completion, and `session.exec.stop` stops it.
+- Flow: a child `ask_user` is shown under the program and is answerable through
+  `session.question.respond`; its result drives the program and is not duplicated into the model
+  context unless the program returns it.
 - Flow: switch a running Session in each direction; the next request declares the new visible set,
   the request after a tool result uses the new mode, a request retried through its own source
   (budget or restart recovery) keeps its pin, and a call already admitted finishes.
