@@ -286,7 +286,7 @@ pub(crate) fn convert(
         } else {
             LanguageModelV4ToolChoice::None
         }),
-        tools,
+        tools: tools.map(Arc::from),
         strict_stream: Some(true),
         ..CallOptions::new(prompt)
     };
