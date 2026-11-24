@@ -46,7 +46,7 @@ holds `Arc`, so no cycle. The owner's active slot is authoritative for `kill`: `
 is a client-side projection and never changes which record `kill` may interrupt; when they
 disagree, the owner wins and the session drops the stale occupancy. `finish(terminal)` returns if already terminal, stores the `Arc`
 in `state` and `changed` (wakes all), then clears active/sweeps; only `LogRecord.retained`
-and `JobTask.stop_requested` remain. The `Terminal` (including its `OutputRecord`) is
+and the terminal mode remain. The `Terminal` (including its `OutputRecord`) is
 immutable; `retainOutput` never mutates it (see §2.2).
 ### 1.3 Settlement
 `settle(taskId)` is the only release. Terminal → remove; Reserved/Running →
@@ -56,7 +56,7 @@ terminal record is a no-op.
 
 | Action | Exec command | Shell command | Job | Shell |
 | --- | --- | --- | --- | --- |
-| `kill` running | cancel + terminate; await release; `cancelled` or `failed{terminate_failed}` | ETX only if active; terminal from marker or sweep | signal pid; `cancelled` or `failed{terminate_failed}`; missing pid sets `stop_requested` | terminate PTY; `cancelled` or `failed{terminate_failed}`; sweep |
+| `kill` running | cancel + terminate; await release; `cancelled` or `failed{terminate_failed}` | ETX only if active; terminal from marker or sweep | signal pid; `cancelled` or `failed{terminate_failed}`; missing pid answers `task_running` and keeps a pid watcher | terminate PTY; `cancelled` or `failed{terminate_failed}`; sweep |
 | `kill` terminal / settle | no-op / after result | no-op / after result | no-op / after fact | no-op / after children; removes remaining terminal children |
 | shell exit | n/a | `failed{shell_exited}` with partial output | `failed{shell_exited}` with file read | `exited`/`signaled`/`cancelled` |
 | timeout / unload | `spawn.timeout` → `timed_out`; `wait` never kills; unload `cancelled{owner_unloaded}` | deadline is `kill`; unload same | no timeout; unload same after sweep | no timeout; unload same |
@@ -72,7 +72,8 @@ no-op. A shell command's terminal comes from its end marker; a shell exit sweeps
 expiry kills the shell. A job pid arrives through a `watch<Option<u32>>`; `kill`
 subscribes before reading the pid and waits for it. The pid is accepted only when its job id
 is registered and the record belongs to the same shell. A pid after terminal is ignored; a
-kill before it sets `stop_requested`; no pid in 2 s answers `task_running`. pwsh completion
+kill before it keeps a pid watcher and answers `task_running` after 2 s; a late pid is
+killed and released before the terminal. pwsh completion
 writes its marker to the owner-derived `<taskId>.result`, watched for 200 ms. Windows uses the existing PTY/job
 code; a stopped job is `cancelled`.
 ### 1.5 Wake and binding
@@ -228,7 +229,8 @@ A `write`/`resize` `task_ended` means the shell is terminal → step 7.
 6. **Background.** `write(shellId, data, start=Job{...})`; register; append `exec/started`
    (on failure kill/settle, no fact); watcher `wait(jobId, None)`; terminal → result,
    append `exec/ended`, settle, remove. A stop kills and waits; `task_running` keeps the
-   watcher and returns `exec_terminate_failed`; the fact follows.
+   watcher and returns a stop-requested result; a kill error keeps the watcher too; the
+   owner terminal fact follows.
 7. **Shell exit.** The watcher gets the terminal; ignore an older generation. Set
    `shell=None`, `had_reset=true`, `shell_exit=note(status)`; the sweep has terminaled the
    children and their watchers write facts. Wait for child watchers (separate tracker),
@@ -273,8 +275,8 @@ after start. Command logs are registered; the init log is internal and is not.
 ### 5.2 Markers, pid, state
 Shape/validation/scope: §3.1; `write` rejects a malformed/empty marker with `invalid`. The
 pid line is `__DIM_END_...__<pid> <taskId>`, scoped to its shell and a registered id; a job
-without a pid cannot be signaled: `stop_requested`, 2 s, `task_running`; a late pid
-signals. `ShellState`/`ready` is deleted: readiness is the init terminal.
+without a pid cannot be signaled immediately: 2 s, `task_running`, then a late pid is
+killed and released before the terminal. `ShellState`/`ready` is deleted: readiness is the init terminal.
 ### 5.3 MCP child PATH: final rule
 ```rust
 // native, in-process, not served
