@@ -2219,9 +2219,23 @@ test("a queued tool start settles a snapshot taken before it", async t => {
   })
   chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1 } })
   receive(chat, "main", event(2, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "read_file" }))
+  receive(chat, "main", event(3, { kind: "tool-use", requestId: "r1", callId: "call", name: "read_file", input: {} }))
   held.resolve(page([event(1, { kind: "model-start", requestId: "r1" })], 1))
   await flush()
-  assert.deepEqual(chat.views.session.rows, [], "the snapshot's uncommitted thought is not left behind")
+  const rows = chat.views.session.rows
+  assert.equal(rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(rows))
+  assert.equal(rows.find((row) => row.kind === "tool")?.callId, "call")
+})
+
+test("a snapshot of a request the turn read no longer reports running is dropped", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise, {
+    "session.turn.get": params => ({ ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r2", textCharacters: 0, thinkingCharacters: 0 } }),
+  })
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  held.resolve(page([event(1, { kind: "model-start", requestId: "r2" })], 1))
+  await flush()
+  assert.deepEqual(chat.views.session.rows, [], "the turn read reports another request running")
 })
 
 test("a queued model end settles a snapshot taken before it", async t => {
