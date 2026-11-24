@@ -156,9 +156,10 @@ switches: declarations are read once, while each process start reads them.
 
 For a persistent shell, background PIDs enter through the
 existing PTY marker. `PtyProcessTree::job_pid` uses portable-pty's foreground-group handle and
-Linux's namespace/session metadata to resolve the native host identity once. ShellSession stores
-the typed PID or the I/O failure and uses it directly on stop or shell exit. A bounded native
-stop waits for release before the cancelled terminal fact; the public signal helper is unchanged.
+Linux's namespace/session metadata to resolve the native host identity once. `ShellJob.pid`
+stores the typed PID in the owner record; `ShellSession` keeps only the task id and calls
+`host.kill` by id. A bounded native stop waits for release before the cancelled terminal fact;
+the public signal helper is unchanged.
 A running shell keeps the boundary it started with; changing the switches applies to the next
 process. macOS permits only the needed terminal ioctl commands.
 

@@ -1879,7 +1879,7 @@ async fn output_removal_refuses_traversal_and_links() {
 }
 
 #[tokio::test]
-async fn a_shell_burst_is_backpressured_instead_of_reset() {
+async fn a_shell_burst_completes_without_a_private_subscriber() {
     let dir = std::env::temp_dir().join(unique("dim-host-burst"));
     std::fs::create_dir_all(&dir).unwrap();
     let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());

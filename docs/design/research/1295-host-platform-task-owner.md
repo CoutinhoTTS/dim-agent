@@ -85,14 +85,14 @@ table, worker tracker and shutdown token are `Arc`/cloneable fields created by
 | Method | Request | Reply |
 | --- | --- | --- |
 | `info` / `execShell` / `persistentShell` / `sandboxBackend` / `execRoot` | `{}` | facts; `execRoot` is `String`; non-UTF-8 is `invalid` |
-| `spawn` / `shell` / `write` | `SpawnRequest` / `ShellRequest` / `ShellWrite` | `SpawnReply` / `WriteReply {started?}` |
+| `spawn` / `shell` / `write` | `SpawnRequest` / `ShellRequest` / `ShellWrite` | `SpawnReply` / `SpawnReply` / `{}` |
 | `resize` / `kill` / `settle` / `retainOutput` / `wait` | existing / `TaskRequest` / `WaitRequest` | `{}` / `OutputPathReply` / `WaitReply` |
 | `output` / `tail` | `OutputRequest {taskId, cursor?, limit?}` / `TaskRequest` | `OutputPage` / `OutputTail` |
 | `spawnWithStdin` / `spawnConfined` / `removeOutputDirectory` / `childPath` | existing / UTF-8 base | existing; `childPath` `None` = nothing to append |
 
-`ShellStart` is `{kind:"command", taskId, startMarker, endMarker}` or
-`{kind:"job", taskId, endMarker, outputPath, completionFile?}`. The event API is deleted
-(§3.2).
+`ShellWrite` is `{taskId, data, command?: {taskId, startMarker, endMarker}, job?:
+{taskId, endMarker, outputPath, completionFile?}}`; the optional start declares the task the
+written bytes begin. The event API is deleted (§3.2).
 ### 2.2 Task snapshot
 | Field | Exec command | Shell command | Job | Shell |
 | --- | --- | --- | --- | --- |
@@ -304,7 +304,7 @@ operations and attributes the PTY to `ShellSession`; npm declarations regenerate
 | --- | --- |
 | shell command page, UTF-8 cut, retained log, second command, kill | `host_platform_flow::a_shell_command_capture_is_owned_by_the_host` |
 | shell terminal, `TaskEnded`, idempotent settle | `host_platform_flow::the_host_platform_service_serves_a_shell` |
-| public shell text burst without an event cursor | `host_platform_flow::a_shell_burst_is_backpressured_instead_of_reset` |
+| public shell text burst without an event cursor | `host_platform_flow::a_shell_burst_completes_without_a_private_subscriber` |
 | shell exit sweeps commands/jobs; stop after a pid | `minimal_execution::shell_exit_settles_tasks`, `shell_exit_kills_background_jobs`, `stop_background_task` |
 | inline exec behavior | `local_execution::foreground_output_is_canonical_and_offloaded_like_ts` |
 | page accounting and restored tasks | `transport_flow/shell_input::background_exec_output_pages_running_finished_and_restored_tasks` |

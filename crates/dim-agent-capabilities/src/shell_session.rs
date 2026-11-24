@@ -1387,12 +1387,21 @@ impl ShellSession {
                     )
                     .await;
                 if let Ok(reply) = reply {
+                    if this
+                        .inner
+                        .lock()
+                        .await
+                        .background
+                        .remove(&watched)
+                        .is_none()
+                    {
+                        return;
+                    }
                     let _ = host
                         .settle(TaskRequest {
                             task_id: watched.clone(),
                         })
                         .await;
-                    this.inner.lock().await.background.remove(&watched);
                     let mut data = ended_from_reply(&watched, &reply, &output_path);
                     if let ToolContent::Text(text) = &mut data.result.content {
                         text.push_str(&format!("\nStandard error: {}", error_path.display()));
@@ -1529,12 +1538,21 @@ impl ShellSession {
                         )
                         .await;
                     if let Ok(reply) = reply {
+                        if this
+                            .inner
+                            .lock()
+                            .await
+                            .background
+                            .remove(&watched)
+                            .is_none()
+                        {
+                            return;
+                        }
                         let _ = host
                             .settle(TaskRequest {
                                 task_id: watched.clone(),
                             })
                             .await;
-                        this.inner.lock().await.background.remove(&watched);
                         this.settle(ended_from_reply(&watched, &reply, &output_path));
                     }
                 });
@@ -1795,16 +1813,21 @@ fn marker_code(text: &str, marker: &str) -> Option<String> {
 fn exit_status(code: &str) -> ExecStatus {
     match code {
         "0" => ExecStatus::Completed,
+        "cancelled" => ExecStatus::Cancelled,
         _ => ExecStatus::Failed,
     }
 }
 
 fn wait_code(reply: &WaitReply) -> String {
-    reply
-        .exit_code
-        .map(|code| code.to_string())
-        .or_else(|| reply.signal.clone())
-        .unwrap_or_else(|| "failed".to_owned())
+    if reply.status == WaitStatus::Cancelled {
+        "cancelled".to_owned()
+    } else {
+        reply
+            .exit_code
+            .map(|code| code.to_string())
+            .or_else(|| reply.signal.clone())
+            .unwrap_or_else(|| "failed".to_owned())
+    }
 }
 
 fn never_cancelled() -> crate::host::CancelledFn {

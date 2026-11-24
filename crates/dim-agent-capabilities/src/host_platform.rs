@@ -1457,11 +1457,15 @@ impl HostPlatform {
                 .output_path()
                 .parent()
                 .unwrap_or_else(|| Path::new("."));
+            let command_path = directory.join(format!("{}.log", start.task_id));
+            if std::fs::symlink_metadata(&command_path).is_ok() {
+                return Err(HostPlatformError::TaskExists);
+            }
             let command = Arc::new(shell::ShellCommand::new(
                 shell.clone(),
                 start.start_marker,
                 start.end_marker,
-                directory.join(format!("{}.log", start.task_id)),
+                command_path,
             ));
             let record = TaskRecord::new(
                 start.task_id.clone(),
@@ -1519,6 +1523,14 @@ impl HostPlatform {
                     directory.join(format!("{}.err", start.task_id)),
                 )
             });
+            if std::fs::symlink_metadata(&output_path).is_ok()
+                || completion.as_ref().is_some_and(|(result, error)| {
+                    std::fs::symlink_metadata(result).is_ok()
+                        || std::fs::symlink_metadata(error).is_ok()
+                })
+            {
+                return Err(HostPlatformError::TaskExists);
+            }
             let job = Arc::new(shell::ShellJob {
                 shell: Arc::downgrade(&shell),
                 pid: watch::channel(None).0,
@@ -3839,7 +3851,7 @@ pub(crate) mod shell {
             }
             if state.file.is_none() {
                 let mut options = std::fs::OpenOptions::new();
-                options.create(true).append(true);
+                options.create_new(true).append(true);
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::OpenOptionsExt;
@@ -4085,13 +4097,11 @@ pub(crate) mod shell {
         fn trim(&mut self) {
             let mut removed = false;
             while self.chars > EVENT_RETAIN_CHARS {
-                let Some(super::ShellEvent::Output { .. }) = self.items.front() else {
+                let Some(front) = self.items.pop_front() else {
                     break;
                 };
-                if let Some(front) = self.items.pop_front() {
-                    self.chars = self.chars.saturating_sub(shell_event_len(&front));
-                    removed = true;
-                }
+                self.chars = self.chars.saturating_sub(shell_event_len(&front));
+                removed = true;
             }
             if removed {
                 self.base = self
