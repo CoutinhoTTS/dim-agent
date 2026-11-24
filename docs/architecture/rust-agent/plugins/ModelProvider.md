@@ -24,11 +24,14 @@ intact; a target that does not take an image's format fails the call instead of
 turning it into a reference
 ([ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)).
 
-The destination's format support belongs to that rule, and it is one whitelist
-per protocol: Gemini takes no GIF, and a native xAI route takes only PNG and
-JPEG, so a GIF on Gemini and a WebP or GIF on a native xAI route become
-references before the encoder and add nothing to the budget. The other
-protocols take the four a request may carry.
+The destination's format support belongs to that rule: one whitelist per
+protocol, and for the compatible protocol the vendor package the connection's
+preset names. Gemini takes no GIF, and every xAI destination takes only PNG and
+JPEG — the native routes by their protocol, the built-in `xai` and `grok-build`
+entries by the preset their connections carry — so a GIF on Gemini and a WebP or
+GIF on an xAI destination become references before the encoder and add nothing
+to the budget. The other protocols, and compatible destinations that name no
+vendor package or another one, take the four a request may carry.
 The provider request encoder applies the destination's message-placement
 support: a Bedrock model outside the ones that support images in `toolResult`
 receives the tool image in the user message after the result, and the same

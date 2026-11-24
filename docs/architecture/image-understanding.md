@@ -30,7 +30,7 @@ These are the existing owners' faces, not new services. The tool consumes only
 `modalityTargets.resolve`, `auxiliaryModel.complete`, `modelSelectionHost.resolve`
 and the registration routes of ToolRegistry and GuideEntries. See their owner
 contracts rather than a separate image-specific model or storage interface. A
-route whose protocol the owner does not report is an unknown destination, which
+destination whose format rule the owner does not report is an unknown one, which
 takes the four formats a request may carry.
 
 ## Facts, state and lifetime
@@ -51,8 +51,9 @@ Concurrent identical calls in one branch share a future held only by its waiters
 One waiter leaving releases only its share; the last waiter cancels and drops the
 provider request. Unload cancels this generation's work and discards its indexes.
 No result is reused until its ordinary tool result has committed, and not while
-the route that serves the target now does not take the image's format. An answer
-another caller has in flight is refused before this call waits for it.
+the format rule of the route that serves the target now does not take the image's
+format. An answer another caller has in flight is refused before this call waits
+for it.
 
 ## Verification
 

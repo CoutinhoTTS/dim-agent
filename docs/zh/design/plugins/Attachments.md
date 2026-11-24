@@ -229,7 +229,7 @@ CLI 在提交前检查：
 
 ModelProvider 在构建对话模型请求时按所用模型的视觉能力和解析后目标的格式支持处理每个图片块，覆盖所有写入方的用户内容和工具结果。支持视觉的模型（或能力未知的请求）在目标接受该格式时收到可发送的图片块，文件来源先解析为字节，解析后按同一规则再检查一次，因此空的自有文件只会得到占位；不支持图像的模型从不收到像素，目标不接受的格式得到引用或占位。引用契约见 [ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)。
 
-目标的格式支持属于这条路由规则，按协议各是一张白名单：准备阶段产生的格式是 PNG、JPEG、WebP 和 GIF；Gemini 除了 GIF 都接受（其指南列的是 PNG、JPEG、WebP、HEIC 和 HEIF），因此 GIF 在那里变成引用；原生 xAI 路由只接受 JPEG 和 PNG（Chat Completions 与 Responses 的图片输入限制），因此 WebP 或 GIF 在那里变成引用；其他目标接受请求可携带的四种格式，协议未知的目标也一样。独立的图片提问按同一规则处理，不支持时直接失败而不发送（[ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)）。提供方的请求编码器按目标的放置能力处理：Bedrock 只在 Amazon Nova 和 Anthropic Claude 3、4 上把图片放进 `toolResult`，AWS 对同一批模型才支持该块的 `status` 字段；其他 Bedrock 模型的图片跟在结果之后的用户消息里，这条形式没有报告结论的字段，因此失败结果的文本以 `[Error: this tool result reports a failed tool call.]` 开头。
+目标的格式支持属于这条路由规则：按协议各是一张白名单，兼容协议还看连接上标出的厂商包。准备阶段产生的格式是 PNG、JPEG、WebP 和 GIF；Gemini 除了 GIF 都接受（其指南列的是 PNG、JPEG、WebP、HEIC 和 HEIF），因此 GIF 在那里变成引用；每个 xAI 目标只接受 JPEG 和 PNG（Chat Completions 与 Responses 的图片输入限制）——原生 xAI 路由按协议判断，走兼容协议服务 xAI 的内置条目按连接上标注的厂商包判断——因此 WebP 或 GIF 在那里变成引用；其他目标接受请求可携带的四种格式，协议未知的目标也一样。独立的图片提问按同一规则处理，不支持时直接失败而不发送（[ImageUnderstanding §3](../../../design/plugins/ImageUnderstanding.md#3-references)）。提供方的请求编码器按目标的放置能力处理：Bedrock 只在 Amazon Nova 和 Anthropic Claude 3、4 上把图片放进 `toolResult`，AWS 对同一批模型才支持该块的 `status` 字段；其他 Bedrock 模型的图片跟在结果之后的用户消息里，这条形式没有报告结论的字段，因此失败结果的文本以 `[Error: this tool result reports a failed tool call.]` 开头。
 
 只有真正按像素发送的图片在加入请求时计入编码后的图片预算：用户图片和工具结果图片合计最多 32 MiB。文件解析后变成引用的图片不占字节。超出的请求在适配阶段就失败，不再读取其余图片。
 
@@ -237,7 +237,7 @@ ModelProvider 在构建对话模型请求时按所用模型的视觉能力和解
 | --- | --- |
 | 支持视觉的模型收到的、可发送的 PNG、JPEG、WebP 或 GIF base64 图片或带 id 的同格式文件 | 图片块本身；文件来源先解析为字节 |
 | 不支持图像的模型收到的、可发送的图片 | 文本 `img:` 加 base64 解码后的图片文件字节的 SHA-256 前 16 个小写十六进制字符；不散列像素或 base64 文本，相同字节得到相同引用 |
-| 支持视觉的模型收到、但目标不接受的格式（如 Gemini 上的 GIF、原生 xAI 路由上的 WebP 或 GIF） | 同一 `img:` 引用或占位；不计入编码后的图片预算 |
+| 支持视觉的模型收到、但目标不接受的格式（如 Gemini 上的 GIF、xAI 目标上的 WebP 或 GIF） | 同一 `img:` 引用或占位；不计入编码后的图片预算 |
 | URL 来源、缺少 id 或内容为空的文件、缺失或无法解码的 base64 数据，或本构建无法解码的格式 | 保留原有占位：不支持图像的模型为 `[Image omitted: the current model does not accept images.]`，否则为 `[Image omitted: the image cannot be sent to this model.]`（A10） |
 
 CLI 的缩放规则和限制（A2）在提交前仍然适用；引用散列图片块实际携带的文件字节，不再次缩放或重编码。

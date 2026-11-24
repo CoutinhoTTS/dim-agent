@@ -129,9 +129,10 @@ the branch history can resolve it. A standalone `image_understand` request carri
 so a target that does not take the image's format fails the call with
 `image_understand_failed`: the tool sends no request, returns no answer and writes no reuse
 stamp. It never asks a model about an image the request does not carry. Reuse follows the same
-rule: the call reads the protocol of the route that serves its target now before it returns a
-committed answer or waits for one in flight, and fails the same way when that route does not
-take the image's format (§6).
+rule: the call reads the format rule of the route that serves its target now — its protocol,
+and for a compatible destination the vendor package it names — before it returns a committed
+answer or waits for one in flight, and fails the same way when that route does not take the
+image's format (§6).
 
 ## 4. Model choice and execution
 
@@ -205,12 +206,12 @@ owner changes its own document.
 
 Reuse is limited to the calling branch. Key: the reference, the question bytes, and the
 instruction version. A candidate is reused only when it is a completed, non-truncated answer
-whose resolved target is still the model this call resolves to, and only when the protocol of
-the route that serves that target now takes the image's format — the same whitelist a request
-follows ([Attachments](Attachments.md) A.1). A route whose protocol the owner does not report
-is an unknown destination and takes the four formats a request may carry. A committed answer is
-returned as it committed, and an answer another caller has in flight is refused before this
-call waits for it; the format read adds no provider call.
+whose resolved target is still the model this call resolves to, and only when the format rule
+of the route that serves that target now takes the image's format — the same whitelist a
+request follows ([Attachments](Attachments.md) A.1). A destination whose format rule the
+owner does not report is an unknown destination and takes the four formats a request may
+carry. A committed answer is returned as it committed, and an answer another caller has in
+flight is refused before this call waits for it; the format read adds no provider call.
 
 The index is derived from committed tool facts of that branch — the calls and their results —
 and is rebuilt lazily, never persisted and never shared across Sessions. Failed, cancelled or

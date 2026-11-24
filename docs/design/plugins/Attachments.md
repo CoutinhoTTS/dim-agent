@@ -140,13 +140,16 @@ image file bytes, not the pixels or base64 text. Equal bytes have equal
 references; the reference contract is [ImageUnderstanding §3](ImageUnderstanding.md#3-references).
 File-backed sources must be resolved before computing the reference.
 
-The destination's format support is part of that routing rule, and it is one
-whitelist per protocol. The preparation formats are PNG, JPEG, WebP and GIF.
-Gemini takes all but GIF (its guides list PNG, JPEG, WebP, HEIC and HEIF), so a
-GIF becomes its reference there; a native xAI route takes JPEG and PNG only (the
-Chat Completions and Responses image input limits), so a WebP or a GIF becomes
-its reference there; and every other destination takes the four a request may
-carry, as a destination whose protocol is unknown does. A standalone image
+The destination's format support is part of that routing rule: one whitelist
+per protocol, and for the compatible protocol the vendor package the connection
+names. The preparation formats are PNG, JPEG, WebP and GIF. Gemini takes all but
+GIF (its guides list PNG, JPEG, WebP, HEIC and HEIF), so a GIF becomes its
+reference there; every xAI destination takes JPEG and PNG only (the Chat
+Completions and Responses image input limits) — a native xAI route by its
+protocol and the built-in entries that serve xAI over the compatible protocol by
+the vendor package their connections carry — so a WebP or a GIF becomes its
+reference there; and every other destination takes the four a request may carry,
+as a destination whose protocol is unknown does. A standalone image
 question follows the same rule and fails instead of sending
 ([ImageUnderstanding §3](ImageUnderstanding.md#3-references)). The provider
 request encoder applies the destination's message-placement support: Bedrock
