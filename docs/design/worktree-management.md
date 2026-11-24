@@ -103,17 +103,25 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
   `--force`）或未登记的目录一律不选。删除前逐项复核 Git 登记、根未变与内容干净，先预览再按确认删除；apply
   携带预览的 task id，只删除用户看到的集合，单个候选失败时保留其记录并继续其余候选。保留项逐条给出原因。
   选择语义与交互沿用 [session cleanup](cli-commands.md#session-deletion-and-cleanup)，不新增第二套。
-- **排斥**：已登记的 remove 与 prune 经由 SessionStore 的 `store.removeWorktree` 操作完成：它持有会话存储
-  所有权锁，先复核关联与存储中的 Session cwd，再调用调用方传入的 Git 删除步骤，最后删除记录。未登记的 remove
-  经由 `store.removeUnregisteredDirectory`：它在同一把锁内复核目录记录中没有根在该目录或其下的条目、存储中没有
-  Session 的 cwd 在该目录或其下，再运行调用方传入的删除步骤；该步骤在删除前用文件系统检查复核目录仍是管理根下的
-  普通目录、它的直接子目录仍是管理根内的普通目录，以及删除范围内每个目录都没有 `.git` 条目（目录、gitdir 文件或
-  符号链接，含悬空链接；遍历不跟随符号链接，不起 Git 子进程），不满足就拒绝。
-  `Session` 创建与 `associate_worktree` 在同一把锁内重新核验 cwd 与根是否仍是目录，所以复核之后不会出现指向已删根的
-  新 Session 或关联；分叉、删除 Session 与关联移除也取同一把锁，会等这次删除结束。
-  锁跨越的步骤没有时间上限：一次 `git worktree remove`（30 秒超时）、Git 不再登记时的 `cleanup_unregistered_root`
-  递归删除，以及未登记目录删除前对整棵树 `.git` 条目的遍历和带 `--force` 的递归删除都在锁内；未登记目录的内容有多少，锁就持有多久。
-  这期间 `session.create`、`session.fork`、`session.delete` 以及 worktree 关联与删除都要等这把锁。
+- **排斥**：删除分两步。已登记的 remove 与 prune 经由 SessionStore 的 `store.removeWorktree` 操作：它在会话存储
+  所有权锁内复核关联与存储中的 Session cwd；未登记的 remove 经由 `store.removeUnregisteredDirectory`：它在同一把锁内
+  复核目录记录中没有根在该目录或其下的条目、存储中没有 Session 的 cwd 在该目录或其下。两个操作随后把要删的规范化路径
+  登记进内存的“正在删除”集合，放锁。调用方传入的删除步骤（`git worktree remove`、`cleanup_unregistered_root`、未登记目录
+  的检查与递归删除）在本次请求自己的任务里前台完成，失败照样返回给调用方，记录只在删除成功后删除。删除结束时同一个任务把路径
+  移出集合；外层请求被取消也不会提前移出，集合只在内存里，进程崩溃后半删的目录仍可按 task id 再删一次。
+- **正在删除**：集合只拦与登记路径相同、在其上或在其下的操作：`session.create` 与 `sessions.launch` 的 cwd、
+  `store.fork` 配置里的 cwd、`associate_worktree` 的根，以及同一路径的再次删除，都以 `worktree_in_use` 拒绝；
+  父路径方向也拒绝，因为它的内容正在被删（例如任务目录下的仓库），这期间不在其上新建 Session。删除结束后被删的目录
+  自然通不过创建与关联的目录检查。不相关路径的创建、分叉、删除与关联不再等删除；复核之后也不会出现指向已删根的
+  新 Session 或关联。
+- **未登记目录的复核**：由 ManagedWorktrees 提供的删除步骤在删除前用文件系统检查复核目录仍是管理根下的普通目录、
+  它的直接子目录仍是管理根内的普通目录，以及删除范围内每个目录都没有 `.git` 条目（目录、gitdir 文件或符号链接，含悬空链接；
+  遍历不跟随符号链接，不起 Git 子进程），不满足就拒绝。
+- **非 force 的删除**：只删检查记录下来的空直接子目录和任务目录本身，逐个按名字从已打开的目录句柄删除（Unix 的 `unlinkat`）；
+  任务目录或子目录在检查后被换成符号链接时删除以 `worktree_in_use` 失败，不会删到管理根外。Windows 没有句柄相对的目录删除，
+  仍按路径删除并逐个复核是普通目录，任务目录在复核与删除之间被换成 reparse point 的窗口是已知限制。
+- **时间上限**：锁只跨越复核与登记，没有慢步骤。删除本身没有时间上限：`git worktree remove` 有 30 秒超时，
+  递归删除按目录内容多少决定，这是已知限制。
   可证明的使用只有记录与存储中的 cwd；其余使用不可证明，由预览、确认和 worktree-access §4 的删除授权承担。
 - Session 删除和 `session cleanup` 不删除也不报告遗留的 worktree；`worktree list` 是查看它们的唯一入口。
 
@@ -121,7 +129,7 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
 
 | Owner | 现有机制为何不够 | 需要的合同 | 顺序与失败 |
 | --- | --- | --- | --- |
-| SessionStore | `associate_worktree` 要求 Session 已存在，不能补写创建期记录；目录记录没有时间；删除目录记录会撞上未级联的关联外键 | 创建 Session 时同一事务写入目录记录、使用关联与最后使用时间；关联写入/解除更新时间；按根查询任何存储中 Session 的 cwd；Session 创建、分叉、删除、关联写入与移除共用所有权锁，创建与关联在锁内重新核验 cwd/根；`store.removeWorktree` 与 `store.removeUnregisteredDirectory` 操作在锁内复核并运行调用方传入的删除（前者还删除记录），锁一直持有到删除结束且没有时间上限；删除目录记录的类型化操作（含核验缺失/Git 不登记的记录清理）。列变更遵守 native-storage-format.md | 创建失败不留记录；删除成功才删记录，失败保留供重试 |
+| SessionStore | `associate_worktree` 要求 Session 已存在，不能补写创建期记录；目录记录没有时间；删除目录记录会撞上未级联的关联外键 | 创建 Session 时同一事务写入目录记录、使用关联与最后使用时间；关联写入/解除更新时间；按根查询任何存储中 Session 的 cwd；Session 创建、分叉、删除、关联写入与移除共用所有权锁，创建与关联在锁内重新核验 cwd/根；`store.removeWorktree` 与 `store.removeUnregisteredDirectory` 在锁内复核并把正在删除的路径登记到内存集合，放锁后运行调用方传入的删除（前者还在删除成功后删记录），同一路径及其上下路径的创建、关联、分叉与再次删除在删除期间被拒；删除目录记录的类型化操作（含核验缺失/Git 不登记的记录清理）。列变更遵守 native-storage-format.md | 创建失败不留记录；删除成功才删记录，失败保留供重试，且不留下删除登记 |
 | Agents | 现有 `cwd` 只能指向已存在目录，不能把创建目录和创建 Session 合成一次请求 | `session.create` 与 `sessions.launch` 共用可选 `worktree`、嵌套回复、创建关联与失败清除；launch 保持既有策略上限与非交互语义 | 入口只校验格式与权限；Git、失败清除由 ManagedWorktrees 执行，创建失败时入口调用它清除 |
 | App Server 协议 | 客户端各自 `git worktree add` 会重新引入路径分歧；新成员会被旧 daemon 当作未知字段拒绝 | `hello.features` 宣告 `session.create.worktree` 与 `sessions.launch.worktree`（仅在产品 home 与原生存储都存在时宣告）、`worktree.list`、`worktree.remove`、`worktree.prune`；`cwd` 声明为源工作区；三个操作注册为 `managementMethods` 的 `worktree` 命名空间，不服务配对设备 | 客户端只在宣告存在时发送；失败不留半成品，重试创建新的 `<task-id>` |
 | CLI 与 Desktop | 没有可调用的创建入口，只能让模型跑 Git | 各自的入口与展示（`--worktree`、`dimcode worktree ...`；TUI 的 `/worktree` 面板留待后续），只消费类型化结果与拒绝原因 | 由各自 owner 更新 cli-commands.md 与 clients.md；不拼路径、不读存储、不直接调用 Git |
