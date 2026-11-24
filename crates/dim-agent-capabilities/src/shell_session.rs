@@ -1241,6 +1241,10 @@ impl ShellSession {
     ) -> Result<ToolResult, String> {
         let task_id = format!("exec-{}", uuid::Uuid::new_v4().simple());
         let output_path = self.config.output_dir.join(format!("{task_id}.log"));
+        let output_path_text = output_path
+            .to_str()
+            .ok_or_else(|| "the job output path is not UTF-8".to_owned())?
+            .to_owned();
         self.register_output(&output_path).await?;
         let completion = marker_pair().1;
         let pid_marker = marker_pair().1;
@@ -1290,7 +1294,7 @@ impl ShellSession {
                         task_id: task_id.clone(),
                         description: description.clone(),
                         title: None,
-                        output_path: output_path.to_string_lossy().into_owned(),
+                        output_path: output_path_text.clone(),
                     })
                     .into(),
                 )
@@ -1309,10 +1313,7 @@ impl ShellSession {
                 ShellJobStart {
                     task_id: task_id.clone(),
                     end_marker: completion.full(),
-                    output_path: output_path
-                        .to_str()
-                        .ok_or_else(|| "the job output path is not UTF-8".to_owned())?
-                        .to_owned(),
+                    output_path: output_path_text,
                 },
             )
             .await
