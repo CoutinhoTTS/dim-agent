@@ -73,7 +73,7 @@ ModelFailure {
 
 - `failure` 可选。旧事件里不存在；不属于模型提供方调用的失败也没有：agent loop 在重载时对未结算调用的失败（`agent_loop.rs`）和上下文准备失败（`context_preparation.rs`）。字段的大小写和 `optional_non_null` 处理与 `presentation` 一致。
 - `retryForbidden` 仅在为 true 时存在。ModelProvider 在失败策略禁止重试结束该请求的失败时写入它；续接会拒绝它，因此该禁止覆盖续接。
-- `retried` 仅在为 true 时存在：重试在同一次尝试已把输出作为 progress 公开之后替换了它。`thinkingPartId` 只与它一起写入，指向最终尝试公开过、尚未闭合的 thinking 块。客户端按 progress 显示的思考行在标识相等时保留，不等时随被替换的尝试一起丢弃；两次尝试之间的空 progress 被合并掉时，终态事实是唯一能观察到这条界线的地方。续接请求不写这两个字段：`attempts` 也统计失败链的尝试次数，不能用来判断原地重试。
+- `retried` 仅在为 true 时存在：重试替换了同一请求更早的一次尝试。`thinkingPartId` 只与它一起写入，指向最终尝试公开过、尚未闭合的 thinking 块。客户端按 progress 显示的思考行在标识相等时保留，不等时随被替换的尝试一起丢弃；两次尝试之间的空 progress 被合并掉时，终态事实是唯一能观察到这条界线的地方。`attempts` 也统计失败链的尝试次数，不能用来判断原地重试。
 - `reason`：响应或流事件失败取提供方的错误消息；传输失败取原因链最内层。以空回复完成的请求背后没有提供方错误，其 `reason` 是该规则写明的固定句子，不引用任何响应内容。JSON 解析的消息内嵌了它读不懂的响应体文本，因此其 `reason` 取错误结构中的解析诊断；错误没有 cause 时为空。工具失败从 `tool_name` 字段命名：`invalid arguments for tool '<tool_name>'` 或 `the model called an unknown tool '<tool_name>'`。`TypeValidation` 不带 reason，因为它的消息内嵌了被校验的值。工具输入、可用工具列表和被校验的值从不存储。
 - `cause`：来自 `ApiCallError.message` 和 `ErrorCause` 的链，由外到内，每帧一行。`providerCode` 和 `requestId` 是单行且有界，最多 200 字符；为空则不存在。
 - 从不存储：请求 URL、请求头、请求值、响应体或任何凭据。aimux 已丢弃 URL；桥接层不得复制 `url`、`request_body_values` 或 `response_body`，`reason` 和原因帧只是去除了控制字符的文本。

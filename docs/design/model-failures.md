@@ -122,14 +122,13 @@ ModelFailure {
   failure policy forbids retrying the failure that ended the request, and a
   continuation declines it, so the prohibition covers the continuation.
 - `retried` is present only when true: a retry replaced an earlier attempt of
-  this request after the attempt showed output as progress. `thinkingPartId` is
-  written only with it and names the thinking block the final attempt left open
-  when it showed one as progress. A client showing an open thought row from
-  progress keeps it when the identity matches and takes it, with the replaced
-  attempt, when it does not; the terminal fact is the only place the boundary
-  is observable when the empty progress between the attempts was coalesced
-  away. Continued requests keep the field out: `attempts` counts a failure
-  chain's attempts as well, so it does not mean an in-place retry.
+  this request. `thinkingPartId` is written only with it and names the thinking
+  block the final attempt left open when it showed one as progress. A client
+  showing an open thought row from progress keeps it when the identity matches
+  and takes it, with the replaced attempt, when it does not; the terminal fact
+  is the only place the boundary is observable when the empty progress between
+  the attempts was coalesced away. `attempts` counts a failure chain's attempts
+  as well, so it does not mean an in-place retry.
 - `reason` is the provider's error message for a response or stream-event
   failure, and the innermost frame of the cause chain for a transport failure.
   A reply that completed with no answer has no provider error behind it, so its
