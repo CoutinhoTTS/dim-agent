@@ -42,10 +42,11 @@ repository; the shell is the one without a product form.
 | `codemode` | one program | discover tools, call them, branch, loop, aggregate; child results stay out of the model context | the `codemode` tool beside the direct tools |
 | `shell` | one shell session | compose commands; working directory, environment and jobs persist across calls | the minimal-execution profile only |
 
-In `codemode` and `shell` the work tools are not declared; the three dialogue tools stay (§2). That
+In `codemode` and `shell` only the entry and the two conversation tools are declared (§2). That
 absence is a property of the mode — the model does its work through one surface — not the goal of
-the change. Fewer declarations per request, fewer round trips and less context churn follow from
-it; the work tools declared today carry most of that description, but saving it is a result, not the
+the change. Fewer declarations
+per request, fewer round trips and less context churn follow from it; the tools declared today
+carry about 12 kB of description and about 20 kB with schemas, but saving that is a result, not the
 requirement.
 
 ### 1.3 The one real risk: how well the model uses the mode
@@ -88,27 +89,22 @@ mean something, not a simplification.
 
 ## 2. Product behavior
 
-A mode decides how work is done. Three tools keep the dialogue itself working, so every mode
-declares them: `ask_user` talks to the operator, `recall` reads the conversation a compaction
-shortened, and `goal_update` settles the Session's goal. Everything else is work or coordination
-that the mode either does itself or hides.
+A mode declares its entry tool and two conversation tools, `ask_user` and `recall`: asking the
+operator and reading a shortened conversation are what a mode cannot replace.
 
 | Mode | Declared | A program may call | Hidden |
 | --- | --- | --- | --- |
 | `normal` (default) | every tool except `codemode` and `execute` | — | `codemode`, `execute` |
-| `codemode` | `codemode`, `ask_user`, `recall`, `goal_update` | every tool except `codemode` | — |
-| `shell` | `execute`, `ask_user`, `recall`, `goal_update` | — | every other tool |
+| `codemode` | `codemode`, `ask_user`, `recall` | every tool except `codemode` | — |
+| `shell` | `execute`, `ask_user`, `recall` | — | every other tool |
 
-- The three dialogue tools are what a mode cannot replace: a shell command cannot ask the operator,
-  read a compacted conversation or close a goal. A mode that dropped them would trap the agent in
-  its own work.
-- `codemode` loses no reach. Its program calls every tool except `codemode`, so skills, images, the
-  web, MCP, lines, agents, schedules and settings stay available inside a program; they are simply
-  not declared, because the model is meant to do that work in one program.
-- `shell` deliberately drops them. A shell Session has the shell and the dialogue, nothing else: no
-  skill tool, no image understanding, no web, no MCP, no lines or agents, no schedules, no settings
-  or plugin tool. Adding one back is a decision on this table, not a mechanism change.
-- An entry tool is declared only in its own mode.
+- `codemode` loses no reach: its program calls every tool except `codemode`, so skills, images, the
+  web, MCP, lines, agents, schedules, settings and the shell are all available inside a program.
+  They are not declared because the model does that work in one program.
+- `shell` is the shell, plus the two conversation tools. It cannot load a skill, read an image, call
+  an MCP tool, open a line, start a member, schedule or manage settings and plugins. Those are the
+  mode's boundary: a task that needs one runs in another mode.
+- What each entry tool must provide to carry its mode is §7.
 
 Rules that hold in every mode:
 
@@ -119,8 +115,6 @@ Rules that hold in every mode:
   what a program may call. It does not enable or disable a source.
 - Client surfaces are unchanged. Mention search (`session.files`), command-output paging, skills,
   approvals and settings work in every mode.
-- A new tool is work by default: `normal` declares it, a `codemode` program may call it, and `shell`
-  hides it. A tool that belongs to the dialogue is added to the table above.
 
 ## 3. Who owns the mode
 
@@ -155,11 +149,11 @@ owns this projection. Three terms:
 | Mode | visible (top-level) | delegated (child) | entry tool absent |
 | --- | --- | --- | --- |
 | `normal` | every tool except `codemode` and `execute` | none | — |
-| `codemode` | `codemode`, `ask_user`, `recall`, `goal_update` | every tool except `codemode` | the Session runs `normal` |
-| `shell` | `execute`, `ask_user`, `recall`, `goal_update` | none | the Session runs `normal` |
+| `codemode` | `codemode`, `ask_user`, `recall` | every tool except `codemode` | the Session runs `normal` |
+| `shell` | `execute`, `ask_user`, `recall` | none | the Session runs `normal` |
 
-- The sets follow §2's table, and a new tool follows its default: declared in `normal`, callable in
-a `codemode` program, hidden in `shell`. No other tool is named here.
+- The sets follow §2 and name no other tool: a new tool is declared in `normal`, callable from a
+  `codemode` program and hidden in `shell`, so it needs no edit here.
 - Admission is by call origin: a top-level call is admitted only inside `visible`, a child call only
   inside `delegated`. Both then pass the called tool's own Permission and Approval. A call outside
   its origin's set is refused as an unknown tool, even when the tool is bound. The origin is the
@@ -251,37 +245,43 @@ kinds exist in one Session:
   still be stopped after the Session switches to `normal`.
 - `session.stop` remains the turn's stop and stops no background task.
 
-## 7. What each mode still needs
+## 7. What the entry tools must provide
 
-This design fixes the unit of action and the tool surface. Making each mode good is separate work:
-the items below are follow-up requirements, not part of this change.
+A mode declares one tool, so that tool must carry everything the mode promises. The items below are
+its requirements; the ones marked missing are follow-up work, not part of this change.
 
 `codemode`:
 
-- A failure manifest: when a program fails, the result names the child calls that ran and what they
-  declared, beyond today's "some child calls may have completed".
-- Approval wording: the operator approves a program and then each child by its own risk, so the
-  prompt must say that and show the child calls as they happen.
-- Grouping: v4 carries `parent_call_id`; the TUI and web must group a program's children under one
-  row, with their own detail.
-- Asking the operator from inside a program, and a surface to answer it.
-- Stopping a program and its children with a clear terminal result.
-- Description and examples that teach the model when to call `tools.describe`, how to bound loops
-  and how to report a partial result.
+- Discovery and call (`tools.list`, `tools.describe`, `tools.call`) over the request's pinned set,
+  everything except `codemode`. Exists.
+- Asking the operator from inside a program: a child `ask_user` already carries `parent_call_id` and
+  is answerable through `session.question.respond`; the clients must show it under the program and
+  let the operator answer it. Missing on the client side.
+- Progress: each child call is a `step/tool-call`/`step/tool-result` event; the client groups them
+  under the program row. The protocol exists (v4); grouping is a client feature.
+- A failure manifest: a failed program names the child calls that ran and their effects, beyond
+  today's "some child calls may have completed". Missing.
+- Stop: stopping the program ends its children and writes a terminal result that says what may have
+  run. Missing.
+- Bounds on time, memory, calls and output. Exists.
+- A description and examples that teach discovery, loop bounds and partial results. Missing.
 
-`shell`:
+`execute`:
 
-- A command title for the background task list (`exec` takes one; `execute` does not today).
-- Command-level approval wording and output paging; the permission command rules already name
-  `exec` and `execute`.
-- Operator-visible shell state: the current directory, running jobs, and a command waiting for
-  input.
-- Description and examples for the dialect, background work and timeouts.
+- One shell per branch with cwd, environment, shell variables and jobs persisting across calls.
+  Exists.
+- Background work with a task id, an output path and a wake on completion. Exists; a title for the
+  task list is missing.
+- Foreground occupancy: a command still running at the timeout returns its output so far and keeps
+  the shell occupied. Exists.
+- Stop through the route in §6, so a shell task stops and writes `exec/ended`. Missing.
+- Pageable output, and operator-visible state: the current directory, the running job, a command
+  waiting for input. Output paging exists for native tasks; the state view is missing.
+- A description and examples for the dialect, backgrounding and timeouts. Missing.
 
-Both:
-
-- A mode-aware environment block: on Windows it carries guidance about `read`/`edit`/`write` text
-  encoding, which is noise in `shell` mode; the block should follow the surface the model has.
+The boundary is §2's: a shell Session cannot load a skill, read an image, call an MCP tool, open a
+line, start a member, schedule or manage settings and plugins. A task that needs one runs in another
+mode.
 
 ## 8. Clients
 
@@ -332,7 +332,7 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
 
 - Flow: create a Session in each mode (request field; absent = `normal`) and assert the request's
   declarations: `normal` declares every tool except `codemode` and `execute`; `codemode` declares
-  `codemode`, `ask_user`, `recall` and `goal_update`; `shell` declares `execute` and the same three.
+  `codemode`, `ask_user` and `recall`; `shell` declares `execute`, `ask_user` and `recall`.
 - Flow: a tool registered by a capability or an MCP server is declared in `normal`, callable from a
   `codemode` program, and absent from a `shell` Session.
 - Flow: in `codemode` mode a top-level call naming `read` or `skill` is refused as an unknown tool
