@@ -14,8 +14,8 @@ stack (`backup/pr-2002-af675`). Not an implementation record. The contract lands
 4. Service methods take `&self`; no `mounted` weak, no `arc()`, no test-only path.
 5. Paths are UTF-8 `String`; errors are typed enums whose tags are the codes.
 6. Seven migration steps; no step waits for a product approval. `session.exec.stop` is
-   routed in this PR through the branch stop owner, without making `BackgroundExec` and
-   `ShellSession` depend on each other.
+   routed in this PR through the branch stop owner, without adding a `ShellSession`
+   dependency to `BackgroundExec`.
 ## 1. Ownership and state
 `HostPlatform` owns every process/PTY/task and its terminal, timeout, isolation marker and
 log. `ShellSession` owns queue/timeout/occupancy/markers/facts; `WorkspaceTools`/
@@ -335,15 +335,16 @@ Existing flows stay (`host_platform_flow`, `local_execution`, `minimal_execution
 `task_ended` is in this PR: step 2 adds it, step 4 makes `write`/`resize` return it, and
 `write_to_a_terminated_shell_answers_task_ended` gates it; no `connection.rs` change for
 that case. `session.exec.stop` is step 6: the minimal `ShellSession` `ExecStop` provider
-serves shell tasks; the local profile keeps `BackgroundExec`; neither task owner references
-the other.
+serves shell tasks; the local profile keeps `BackgroundExec`. `BackgroundExec` gains no
+`ShellSession` dependency; `ShellSession`'s existing recovery dependency on `BackgroundExec`
+stays.
 ## 8. Rule check
 | Rule | Application |
 | --- | --- |
 | §1 dependence / ownership; ADR 002 D1 | HostPlatform owns processes/PTYs/tasks; ShellSession policy; WorkspaceTools semantics; BackgroundExec facts. No new capability. |
 | Timeline facts; rules 1–4, 9 | No fact added/moved; producers unchanged; owner writes none. |
 | One owner/record/watch/splitter/page/error enum | Four records → one with per-kind payload, three notifiers → one watch, two page types → one, folded messages → one `HostPlatformError` and one `TaskFailure`. |
-| Data face, no live handle, no duplicate owner | Public methods are serde data; native handles stay native; exec/BackgroundExec hold ids and paths; the owner is the only marker interpreter and terminal writer. `session.exec.stop` selects the branch stop provider; no task owner depends on another. |
+| Data face, no live handle, no duplicate owner | Public methods are serde data; native handles stay native; exec/BackgroundExec hold ids and paths; the owner is the only marker interpreter and terminal writer. `session.exec.stop` selects the branch stop provider; `BackgroundExec` gains no `ShellSession` dependency. |
 | Rule 3 / rule 7 / test rule / ADR 002 D4 | Reader is a blocking thread, supervisors/waiters are tasks, terminal transition never awaits under a lock; reuses `pump`/`Decoder`/`bounded_preview`, `sessionFiles`, `Timeline`, `SessionLifecycle`; boundary tests are face flows; switches read per prepare, shell preference per spawn. |
 
 Exceptions: `kill` on a shell command requests an interrupt and the marker or sweep decides
