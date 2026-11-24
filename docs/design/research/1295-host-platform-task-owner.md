@@ -300,29 +300,20 @@ parent when absent, and require a strict descendant of the canonical root (equal
 `WorkspaceTools.md` owns exec/BackgroundExec and links; `service-faces.md` §3.4 lists
 operations and attributes the PTY to `ShellSession`; npm declarations regenerate.
 ## 6. Verification
-Only `foreground_output_is_canonical_and_offloaded_like_ts` and
-`output_removal_refuses_traversal_and_links` exist at this head; every other row is added by
-its step.
-| Case | Test | File | Status |
-| --- | --- | --- | --- |
-| display >1 MiB never stalls the PTY | `a_shell_burst_never_stalls_the_pty_and_resets_stale_cursors` | `host_platform_flow.rs` | step 4 |
-| inline < threshold, >2,000 lines | `foreground_output_is_canonical_and_offloaded_like_ts` + `seq 1 5000` | `local_execution.rs` | existing; recheck step 3 |
-| output failure with exit 0 | `an_output_write_failure_fails_a_zero_exit_command` | `host_platform_flow.rs` | step 3 |
-| kill reserved/terminal/then wait; repeated settle/lost wake | `kill_on_reserved_answers_task_running` (focused task test), `kill_after_any_terminal_is_a_noop`, `kill_then_wait_answers_cancelled`, `a_second_settle_answers_task_unknown`, `wait_started_before_terminal_never_misses_it` | `host_platform.rs` tests, `host_platform_flow.rs` | step 1/2 |
-| retainOutput keeps the inline snapshot | `retain_output_after_terminal_keeps_text` | `host_platform_flow.rs` | step 2 |
-| shell exit partial line / retained log / job tail/page | `a_partial_line_at_shell_exit_is_retained_once`, `a_retained_shell_log_survives_settle`, `a_large_job_file_tail_and_page_are_bounded`, `an_empty_page_and_a_stale_cursor` | `minimal_execution.rs`, `host_platform_flow.rs` | step 4 |
-| non-UTF-8 | `info_rejects_a_non_utf8_home`; `exec_rejects_a_non_utf8_root` | `host_platform_flow.rs`, `local_execution.rs` | step 5 |
-| pwsh terminal | `a_pwsh_job_reaches_terminal_from_its_result_file` | `host_platform_windows_flow.rs` | step 4 |
-| shell command duration/status | `a_shell_command_wait_reports_duration_and_status` | `host_platform_flow.rs` | step 4 |
-| duplicate id after settle | `a_reserved_id_rejects_a_second_spawn_and_a_settled_log_rejects_reuse` | `host_platform_flow.rs` | step 1 |
-| failure kinds | `OutputWriteFailed`, `TerminateFailed`, `ShellExited/Reset`, `CommandFailed`, `UnknownExit`, `JobUnavailable`, `OwnerUnloaded` via the rows above and unload/stop tests | `host_platform_flow.rs`, `minimal_execution.rs` | step 2/4 |
-| second capture / marker / interrupt / dead-shell write | `a_second_command_while_one_runs_answers_task_running`, `an_echoed_or_cross_shell_marker_does_not_end_a_task`, `kill_interrupts_only_the_active_command`, `write_to_a_terminated_shell_answers_task_ended` | `host_platform_flow.rs` | step 4 |
-| `session.exec.stop` owner route | live shell command/job stop; normal exec stop unchanged; unknown id | `transport_flow/shell_input.rs`, `minimal_execution.rs`, `local_execution.rs` | step 6 |
-| removal / MCP PATH / confined / isolation hint | `output_removal_refuses_traversal_and_links`, four PATH outcomes, `ocr_plugin_helper...`, `execution_settings...` extended | `host_platform_flow.rs`, `stdio.rs`, `dim-modality`, `execution_settings.rs` | existing/step 5 |
-| docs/types | `xtask check`, `types`, `graph` | CI | step 7 |
+| Case | Evidence |
+| --- | --- |
+| shell command page, UTF-8 cut, retained log, second command, kill | `host_platform_flow::a_shell_command_capture_is_owned_by_the_host` |
+| shell terminal, `TaskEnded`, idempotent settle | `host_platform_flow::the_host_platform_service_serves_a_shell` |
+| public shell text burst without an event cursor | `host_platform_flow::a_shell_burst_is_backpressured_instead_of_reset` |
+| shell exit sweeps commands/jobs; stop after a pid | `minimal_execution::shell_exit_settles_tasks`, `shell_exit_kills_background_jobs`, `stop_background_task` |
+| inline exec behavior | `local_execution::foreground_output_is_canonical_and_offloaded_like_ts` |
+| page accounting and restored tasks | `transport_flow/shell_input::background_exec_output_pages_running_finished_and_restored_tasks` |
+| Windows confined outcomes | `host_platform_windows_flow` |
+| docs/types | `xtask check`, `types`, `graph` |
 
 Existing flows stay (`host_platform_flow`, `local_execution`, `minimal_execution`,
-`transport_flow/shell_input`); delete the backpressure test and fold private helper tests.
+`transport_flow/shell_input`). Full commands and counts are in the PR body, so this table
+does not claim a test that is not in the tree.
 ## 7. Migration
 ### 7.1 Buildable steps
 

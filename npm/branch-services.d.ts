@@ -389,6 +389,7 @@ export type OutputRequest = {
 export type OutputPageReply = {
   text: string
   bytes: number | bigint
+  totalBytes: number | bigint
   nextCursor?: number | bigint | null
   truncated: boolean
   retainedFrom: number | bigint
@@ -1094,6 +1095,8 @@ export type OutputPage = {
    * control characters.
    */
   bytes: number | bigint
+  /** The total bytes in the source capture or file. */
+  totalBytes: number | bigint
   /**
    * Present when the read found at least `limit` bytes, so the client may
    * continue immediately; always `cursor + bytes`. Absent on a shorter or
