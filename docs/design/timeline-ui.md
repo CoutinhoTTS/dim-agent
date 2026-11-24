@@ -108,7 +108,7 @@ While a line is shown, the composer's bottom border names its path from `main`, 
 ╰── ~/repo (main) · ⑂ main ▸ parser race ▸ the guard · after message 4 ─╯
 ```
 
-`after message N` counts the user messages in the parent's history, its inherited ones included, at the cut.
+`after message N` counts the user messages in the parent's history, its inherited ones included, at the cut. The count is unknown while any retained history in the ancestor chain fails to reach the branch point: a parent line this attachment has never opened, and a loaded window that stops before the branch start, both leave it out. Counting never reads a whole parent history ([bounded window](clients.md#opening-a-conversation-with-a-bounded-window)), so a line shows no count rather than one that is too small; a read that reaches the start, such as `/earlier` on the shown line, fills it in.
 
 The workspace half of that label gives way before the line does. Beside a wide left status it shortens as a whole first — the path's front is cut, then the branch is dropped, then the path alone is cut — instead of disappearing, and only a border with no room for any of those forms drops it. A shown line keeps the three forms it has: the whole place, `⑂` alone, then nothing, so line information is never displaced by path information. The label names the workspace the Session works in rather than the directory the process was started in, and it follows a Session attached elsewhere — an explicit `--cwd`, a `/resume` into another worktree — together with that workspace's branch. Home, which has no Session yet, names the launch workspace again. File mentions, pasted paths and dropped files keep the local `--cwd` base instead ([CLI attachment input](cli-attachment-input.md)), so after a cross-workspace resume the label can name a different directory than they do; when it does, the `@` picker names that base in its title.
 
@@ -215,7 +215,7 @@ A line whose creation fails before its first window loads has no transcript and 
 
 ## 6. Lines panel
 
-`/lines` is the map of the Timelines. Children are ordered by where they were cut from their parent, then by opening order. Each row leads with the line's purpose and says `after message N` and its id:
+`/lines` is the map of the Timelines. Children are ordered by where they were cut from their parent, then by opening order; the branch point orders them whether or not the count is known. Each row leads with the line's purpose and says `after message N` and its id; a row whose count is unknown omits the count and keeps the rest:
 
 ```
 ┌ Lines ───────────────────────────────────────────────────────────┐
@@ -260,7 +260,7 @@ The notification shares the existing bottom border in both TUI modes. Narrow wid
 
 | # | Need | Owner | Notes |
 | --- | --- | --- | --- |
-| R1 | `LineView.cut`: the parent sequence and the message count at it | CLI projection | Folded from `branch/create.at` and the parent's user inputs; no format change |
+| R1 | `LineView.cut`: the parent sequence and the message count at it | CLI projection | Folded from `branch/create.at` and the parent's user inputs; no format change. `None` until retained history in the ancestor chain covers the branch point; `/lines` orders by `branchPoint` either way |
 | R2 | A user message row's cut (`ViewRow.cut`), whether the model has consumed it (`ViewRow.pending`), and a marker row's line (`ViewRow.line`) | CLI projection | From sequences and input state the client already has |
 | R3 | `session.branch_create` and `session.fork` calls | CLI session host | Existing methods; a request made from a stale attachment is refused locally |
 | R4 | Later, optional: show a fork's origin (`↗ forked` on the source, `forked from S` in the fork) | App Server, needs a format decision | `session/forked` carries no data and the fork design adds no provenance column |
