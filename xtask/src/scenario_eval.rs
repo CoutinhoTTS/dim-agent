@@ -171,7 +171,16 @@
 //!   after it is created and before the message. The runner resolves the
 //!   Session id into `params.sessionId`; a branch defaults to `main` the
 //!   way the methods treat it. A call that fails fails the run, and the
-//!   error names the method.
+//!   error names the method. Such a run stopped at `setup_failed`: it ran
+//!   before the message, so no request of it saw the configured text. It is
+//!   a failed run, enters no probe rate, and the report lists it apart from a
+//!   run that failed later.
+//! - `afterIdle` is the step a scenario runs after its first idle: every one
+//!   of the scenario's lines — `main` and the line a `calls` step opened —
+//!   with no `completed` compaction of this run is compacted with
+//!   `session.context.compact`, then each line is asked `request`. A
+//!   compaction that does not complete fails the run there, so the requests
+//!   after it are only judged when a compaction happened.
 //! - `sources` declares the event producers a scenario runs with and the
 //!   Session's subscription to them. One producer row is installed, only
 //!   when `sources` is present, and it declares every source through the
@@ -2065,6 +2074,9 @@ struct ScenarioFile {
     #[serde(default)]
     moves: Vec<Switch>,
     budget: Budget,
+    /// The step after the run's first idle, when the scenario runs one.
+    #[serde(default)]
+    after_idle: Option<AfterIdle>,
     probes: Vec<Probe>,
 }
 
@@ -2365,6 +2377,18 @@ struct SwitchNotes {
     expected: Vec<SwitchNote>,
 }
 
+/// The step a scenario runs after its first idle: every line that did not
+/// compact on its own is compacted by the runner, and each line then answers
+/// one request that sees the compacted context (Timeline branches §12.3). The
+/// lines are the Session's `main` and the one the `calls` step opened, and
+/// what a step does with them is fixed: a line without a completed compaction
+/// of this run gets `session.context.compact`, then both lines get `request`.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AfterIdle {
+    pub(crate) request: String,
+}
+
 /// One source a scenario declares through the `eventHub` service, and
 /// optionally subscribes its Session's `main` branch to (EventHub design A.1,
 /// A.3). Without `subscribe` the source starts unsubscribed, for a scenario
@@ -2501,6 +2525,9 @@ pub(crate) struct Scenario {
     #[serde(default)]
     pub(crate) moves: Vec<Switch>,
     pub(crate) budget: Budget,
+    /// The step after the run's first idle, when the scenario runs one.
+    #[serde(default)]
+    pub(crate) after_idle: Option<AfterIdle>,
     probes: Vec<Probe>,
 }
 
@@ -2722,6 +2749,7 @@ fn into_scenario(
         steers: raw.steers,
         switch: raw.switch,
         moves: raw.moves,
+        after_idle: raw.after_idle,
         budget: raw.budget,
         probes: raw.probes,
     })
@@ -2740,9 +2768,12 @@ struct RunRecord {
     /// emitted.
     texts: Vec<ConfiguredText>,
     session: Option<String>,
-    /// `idle`, `turns`, `seconds`, `switch_target_not_reached`,
-    /// `switch_target_ended`, `switch_target_unknown`, `switch_note_missing`,
-    /// `switch_incomplete` or `error`.
+    /// `idle`, `turns`, `seconds`, `setup_failed`,
+    /// `switch_target_not_reached`, `switch_target_ended`,
+    /// `switch_target_unknown`, `switch_note_missing`, `switch_incomplete` or
+    /// `error`. `setup_failed` is the `calls` step before the first submit: no
+    /// model request of that run saw the configured text (Timeline branches
+    /// §12.3).
     stop: &'static str,
     turns: u32,
     window: Option<f64>,
@@ -5597,6 +5628,7 @@ fn child_record(
         "idle" => "idle",
         "turns" => "turns",
         "seconds" => "seconds",
+        "setup_failed" => "setup_failed",
         "switch_target_not_reached" => "switch_target_not_reached",
         "switch_target_ended" => "switch_target_ended",
         "switch_target_unknown" => "switch_target_unknown",
@@ -6543,7 +6575,11 @@ async fn drive(
                 }
             }
             Err(error) => {
-                driven.stop = "error";
+                // The calls step runs before the message, so no model request
+                // of this run has seen the text being evaluated: the failure
+                // is a setup failure, not the model's answer (Timeline
+                // branches §12.3).
+                driven.stop = "setup_failed";
                 driven.error = Some(format!(
                     "the calls step {} ({}) failed: {error}",
                     index + 1,
@@ -6581,7 +6617,20 @@ async fn drive(
         return driven;
     }
     let started = Instant::now();
-    let mut branches: BTreeSet<String> = ["main".to_owned()].into();
+    // The lines the run knows before its message: `main` and the line the calls
+    // step opened, whose id is known before its `branch/create` notice arrives
+    // — waiting on that notice alone would let a run that stops early go idle
+    // with the line still starting. They are also the lines the step after the
+    // first idle settles (Timeline branches §12.3).
+    let after_lines: Vec<String> = std::iter::once("main".to_owned())
+        .chain(user_line.clone())
+        .collect();
+    let mut branches: BTreeSet<String> = after_lines.iter().cloned().collect();
+    // The lines whose `context/compaction` this run has seen complete, and the
+    // step after the first idle, which compacts the rest before it asks each
+    // line for a request.
+    let mut compacted: BTreeSet<String> = BTreeSet::new();
+    let mut after_idle = scenario.after_idle.clone();
     let mut steers: Vec<(Steer, bool)> = scenario
         .steers
         .iter()
@@ -6782,7 +6831,43 @@ async fn drive(
         }
         if !pending && !awaiting && last_event.elapsed() >= QUIET {
             match idle(client, &session, &branches, &mut calls).await {
-                Ok(true) => break,
+                Ok(true) => {
+                    // The lines are idle: a scenario with a step after the
+                    // first idle runs it here, and its requests keep the loop
+                    // going until the second idle.
+                    let Some(after) = after_idle.take() else {
+                        break;
+                    };
+                    let settled = tokio::time::timeout(
+                        time_left(started, &scenario.budget),
+                        settle_after_idle(client, &session, &after_lines, &after, &compacted),
+                    )
+                    .await;
+                    match settled {
+                        Ok(Ok(())) => awaiting = true,
+                        Ok(Err(error)) => {
+                            driven.stop = "error";
+                            driven.error = Some(error);
+                            return driven;
+                        }
+                        Err(_) => {
+                            driven.stop = "seconds";
+                            driven.timed_out = true;
+                            driven.cleanup_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + cleanup_budget(
+                                        settings.stall_cleanup,
+                                        settings.cleanup_budget_ms,
+                                    ),
+                            );
+                            driven.error = Some(format!(
+                                "the step after the first idle did not answer before the run's {}s budget ran out",
+                                scenario.budget.seconds
+                            ));
+                            return driven;
+                        }
+                    }
+                }
                 Ok(false) => last_event = Instant::now(),
                 Err(error) => {
                     driven.stop = "error";
@@ -6805,6 +6890,15 @@ async fn drive(
                             && let Some(branch) = event["data"]["branch"].as_str()
                         {
                             branches.insert(branch.to_owned());
+                        }
+                        // A line that compacted on its own is not compacted
+                        // again after the idle: a second compaction of the same
+                        // tail does not shrink the input (context policy §5).
+                        if event["type"] == "context"
+                            && event["name"] == "compaction"
+                            && event["data"]["status"] == "completed"
+                        {
+                            compacted.insert(branch.clone());
                         }
                         if let Some(line) = tool_line(&event) {
                             latest_tool_line = Some(line.to_owned());
@@ -8238,6 +8332,54 @@ impl IdleCalls {
     }
 }
 
+/// The step after the first idle: every line without a completed compaction of
+/// this run is compacted, then each line is asked one request (Timeline
+/// branches §12.3). A compaction that does not complete ends the run here
+/// instead of letting the next request be judged as one after a compaction:
+/// the probe reads identity across a compaction, and a run that did not compact
+/// measures nothing else.
+async fn settle_after_idle(
+    client: &mut impl SwitchClient,
+    session: &str,
+    lines: &[String],
+    after: &AfterIdle,
+    compacted: &BTreeSet<String>,
+) -> std::result::Result<(), String> {
+    for line in lines {
+        if compacted.contains(line) {
+            continue;
+        }
+        let reply = client
+            .rpc(
+                "session.context.compact",
+                json!({"sessionId": session, "branchId": line}),
+            )
+            .await
+            .map_err(|error| format!("{line}: session.context.compact failed: {error}"))?;
+        match reply["status"].as_str() {
+            Some("completed") => {}
+            Some("skipped") => {
+                return Err(format!(
+                    "{line}: the compaction after the first idle was skipped: {}",
+                    reply["reason"].as_str().unwrap_or("no reason given")
+                ));
+            }
+            status => {
+                return Err(format!(
+                    "{line}: the compaction after the first idle answered {}",
+                    status.unwrap_or("no status")
+                ));
+            }
+        }
+    }
+    for line in lines {
+        submit(client, session, &after.request, None, Some(line))
+            .await
+            .map_err(|error| format!("{line}: the request after the idle failed: {error}"))?;
+    }
+    Ok(())
+}
+
 /// Whether every known line is idle and no notice arrived while it asked.
 /// `session.idle` returns when the line is idle; a short deadline keeps a busy
 /// line from holding the driver, and a call whose deadline passes stays
@@ -9123,6 +9265,29 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             );
         }
     }
+    // A run that failed before its first request is a setup failure, not the
+    // model's answer: the report names it apart from the run failures beside
+    // the rates it left, so a probe no run was judged on is not read as a lost
+    // identity (Timeline branches §12.3).
+    let failed_runs: Vec<&RunRecord> = records.iter().filter(|record| record.failed).collect();
+    if !failed_runs.is_empty() {
+        text += "\n| arm | scenario | run | failure | error |\n| --- | --- | --- | --- | --- |\n";
+        for record in failed_runs {
+            let failure = if record.stop == "setup_failed" {
+                "setup"
+            } else {
+                "run"
+            };
+            let error = record.error.as_deref().unwrap_or_default();
+            text += &format!(
+                "| {} | {} | {} | {failure} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                error.lines().next().unwrap_or_default(),
+            );
+        }
+    }
     text.push('\n');
     text.push_str(&rule::verdict_line(
         &judged,
@@ -9229,6 +9394,7 @@ mod tests {
             steers: Vec::new(),
             switch: None,
             moves: Vec::new(),
+            after_idle: None,
             budget: Budget {
                 turns: 4,
                 seconds: 60.,
@@ -10489,6 +10655,41 @@ mod tests {
             Ok(json!({}))
         }
     }
+    /// Answers the step after the first idle's two calls and records them: its
+    /// compaction with the status the test set, and each request with an input
+    /// id.
+    struct AfterIdleRecorder {
+        calls: Vec<(String, Value)>,
+        compaction: &'static str,
+    }
+    impl Default for AfterIdleRecorder {
+        fn default() -> Self {
+            Self {
+                calls: Vec::new(),
+                compaction: "completed",
+            }
+        }
+    }
+    impl AfterIdleRecorder {
+        fn methods(&self) -> Vec<&str> {
+            self.calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect()
+        }
+    }
+    impl SwitchClient for AfterIdleRecorder {
+        async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
+            self.calls.push((method.to_owned(), params));
+            Ok(match method {
+                "session.context.compact" => json!({
+                    "status": self.compaction,
+                    "reason": "nothing_to_compact",
+                }),
+                _ => json!({"event": {"id": "input"}}),
+            })
+        }
+    }
 
     /// The `branch:line` message a move writes on `line`: the role it gives
     /// the line and the participant it names (design §12.1).
@@ -10904,33 +11105,76 @@ mod tests {
         );
     }
 
-    /// Gate 2's fixed probe list is the committed scenarios' own: a rename in a
-    /// scenario cannot move the family without failing here.
-    #[test]
-    fn the_opening_gate_names_the_committed_opening_probes() {
-        let root = repository().join("xtask").join("scenario-eval");
-        let branches = read_scenarios(&root.join("timeline-branches")).unwrap();
-        for (scenario, probe_id) in OPENING_PROBES {
-            let committed = branches
-                .iter()
-                .find(|candidate| candidate.id == scenario)
-                .unwrap_or_else(|| panic!("{scenario} is in the committed set"));
-            assert!(
-                committed
-                    .probes
-                    .iter()
-                    .any(|probe| probe.id == probe_id && probe.kind == ProbeKind::MustShow),
-                "{scenario} pre-registers {probe_id} as a must_show probe"
+    /// The step after the first idle compacts only the lines that did not
+    /// compact on their own, then asks every line of the scenario one
+    /// request (Timeline branches §12.3).
+    #[tokio::test]
+    async fn the_step_after_the_idle_compacts_the_rest_and_asks_every_line() {
+        let mut client = AfterIdleRecorder::default();
+        let lines = vec!["main".to_owned(), "line".to_owned()];
+        let compacted: BTreeSet<String> = ["main".to_owned()].into();
+        let after = AfterIdle {
+            request: "re-run the tests".into(),
+        };
+        settle_after_idle(&mut client, "session", &lines, &after, &compacted)
+            .await
+            .unwrap();
+        assert_eq!(
+            client.methods(),
+            [
+                "session.context.compact",
+                "session.submit",
+                "session.submit"
+            ],
+            "the line that compacted is not compacted again, and both are asked"
+        );
+        assert_eq!(client.calls[0].1["branchId"], "line");
+        assert_eq!(client.calls[1].1["branchId"], "main");
+        assert_eq!(client.calls[1].1["text"], "re-run the tests");
+        assert_eq!(client.calls[2].1["branchId"], "line");
+    }
+
+    /// A compaction that does not complete fails the run there: the requests
+    /// after it would be judged as ones after a compaction (Timeline branches
+    /// §12.3).
+    #[tokio::test]
+    async fn a_compaction_the_idle_step_could_not_complete_fails_the_run() {
+        let after = AfterIdle {
+            request: "re-run the tests".into(),
+        };
+        for (status, reason) in [
+            ("skipped", "nothing_to_compact"),
+            ("failed", "no error given"),
+        ] {
+            let mut client = AfterIdleRecorder {
+                compaction: status,
+                ..AfterIdleRecorder::default()
+            };
+            let error = settle_after_idle(
+                &mut client,
+                "session",
+                &["main".to_owned()],
+                &after,
+                &BTreeSet::new(),
+            )
+            .await
+            .expect_err("a line that did not compact cannot be judged on it");
+            assert!(error.contains(status) || error.contains(reason), "{error}");
+            assert_eq!(
+                client.methods(),
+                ["session.context.compact"],
+                "no request follows a compaction that did not complete"
             );
         }
     }
 
     /// The opening scenarios pre-register the probe that their runs open one
-    /// line for one job, and the compact scenario asks the user for the parser
-    /// line (Timeline branches §12.3). No model runs, so CI catches a drift in
-    /// the committed probes or steer before a manual run.
+    /// line for one job, and the compact scenario opens its parser line before
+    /// the message, keeps `main` off it, and settles both lines after the
+    /// first idle (Timeline branches §12.3). No model runs, so CI catches a
+    /// drift in the committed probes, calls or step before a manual run.
     #[test]
-    fn the_opening_scenarios_pre_register_their_probe_and_the_compact_scenario_asks_for_one_line() {
+    fn the_opening_scenarios_pre_register_their_probe_and_the_compact_scenario_opens_its_line() {
         let root = repository().join("xtask").join("scenario-eval");
         let branches = read_scenarios(&root.join("timeline-branches")).unwrap();
         let compact = read_scenarios(&root.join("timeline-branches-compact")).unwrap();
@@ -10950,16 +11194,50 @@ mod tests {
         }
         let identity = find(&compact, "identity-after-compaction");
         assert_eq!(
+            identity.calls.len(),
+            1,
+            "identity-after-compaction opens its line before the message"
+        );
+        assert_eq!(identity.calls[0].method, "session.branch_create");
+        assert_eq!(identity.calls[0].params["parentBranchId"], "main");
+        assert_eq!(identity.calls[0].params["at"], 0);
+        assert!(
+            identity.calls[0].params["prompt"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("parser/")),
+            "the line is given the parser/ subsystem: {:?}",
+            identity.calls[0].params["prompt"]
+        );
+        assert_eq!(
             identity.steers.len(),
             1,
-            "identity-after-compaction asks the user for one line"
+            "identity-after-compaction keeps main off the line's subsystem"
         );
         assert!(
             identity.steers[0]
                 .text
-                .contains("Open one line for the parser/"),
-            "the steer names the parser line: {}",
+                .contains("Keep main strictly on cache/"),
+            "the steer keeps main on cache/: {}",
             identity.steers[0].text
+        );
+        let after = identity
+            .after_idle
+            .as_ref()
+            .expect("identity-after-compaction settles both lines after the first idle");
+        assert!(
+            after.request.contains("Re-run the tests") && !after.request.contains("which line"),
+            "the request re-runs a line's own tests and names no line: {}",
+            after.request
+        );
+        let probe = identity
+            .probes
+            .iter()
+            .find(|probe| probe.id == "identity-after-compaction")
+            .expect("the identity probe");
+        assert_eq!(
+            probe.text,
+            "after a compaction, a line's next request still carries its own identity block",
+            "the probe reads a line's own identity, not main's roster"
         );
     }
 
@@ -12069,6 +12347,56 @@ mod tests {
         assert!(
             text.contains("the fewest judged runs on a scenario are 0, under the floor of 20"),
             "{text}"
+        );
+    }
+
+    /// A run whose calls step failed never sent the configured text to a model:
+    /// the report lists it as a setup failure, apart from a run that failed on
+    /// its own, and neither enters the probe's rate (Timeline branches §12.3).
+    #[test]
+    fn the_report_lists_a_setup_failure_apart_from_a_run_failure() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut setup = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            JudgeOutcome::NotAsked,
+        );
+        setup.stop = "setup_failed";
+        setup.error =
+            Some("the calls step 1 (session.branch_create) failed: branch_not_found".into());
+        setup.failed = true;
+        let mut run = record(
+            "current",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            JudgeOutcome::Judged,
+        );
+        run.stop = "seconds";
+        run.error = Some("the run stopped on its wall clock".into());
+        run.failed = true;
+        let records = [setup, run];
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains(
+                "| candidate | case | 0 | setup | the calls step 1 (session.branch_create) failed"
+            ),
+            "a setup failure is named as one: {text}"
+        );
+        assert!(
+            text.contains("| current | case | 0 | run | the run stopped on its wall clock |"),
+            "a run failure is named as one: {text}"
+        );
+        let metrics = metrics(&scenario, &records);
+        assert_eq!(metrics.failed, 2, "both are failed runs for gate 1");
+        assert_eq!(
+            metrics.counts(&("case".to_owned(), "reports".to_owned())),
+            ProbeCounts::default(),
+            "neither enters the probe's rate"
         );
     }
 

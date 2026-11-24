@@ -499,7 +499,7 @@ WorkspaceTools 不变。
 | 过度拆分 | `timeline-branches/over-splitting` | 为很短或必须按顺序做的步骤开线 |
 | 不结束 | `timeline-branches/never-ending` | 一条线已经做完，却不调用 `end` |
 | 兄弟中转 | `timeline-branches/sibling-relay` | 用 `main` 在本该合成一条线的几条线之间传话 |
-| 压缩后的身份 | `timeline-branches-compact/identity-after-compaction` | `main` 和某条线各自压缩之后，仍知道自己是哪条线、哪些线是自己的 |
+| 压缩后的身份 | `timeline-branches-compact/identity-after-compaction` | `main` 和某条线各自压缩之后，仍知道自己是哪条线 |
 | 切换后继续在线上工作 | — | 成为默认分支的线对自己调用 `end`、把工作交给另一条线、不断用 idle 通知唤醒开它的线，或者根能开线而这条线不能 |
 | 切换后开线 | `timeline-branches/switch-then-open-lines` | 新的默认分支自己做掉两处互不相干的新增，而不是为其中一处开一条线；或者原默认分支接过新工作 |
 | 线持有角色时根开线 | `timeline-branches/root-opens-after-switch` | 另一条线成为默认分支后，用户向根要一条线：根必须开这条线，新线必须从根的历史开始，并向根汇报 |
