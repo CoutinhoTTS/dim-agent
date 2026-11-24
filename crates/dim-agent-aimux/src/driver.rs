@@ -14,7 +14,7 @@ use aimux_providers::{
 };
 use dim_agent_capabilities::host::*;
 use dim_agent_types::ModelRequest;
-use futures_util::Stream;
+use futures_util::{Stream, StreamExt};
 use std::{
     collections::HashMap,
     pin::Pin,
@@ -247,6 +247,53 @@ fn anthropic_base_url(base_url: &str) -> String {
         base_url.to_owned()
     } else {
         format!("{base_url}/v1")
+    }
+}
+
+/// The transport of one model call, watched by its driver.
+///
+/// The driver cannot see how far a provider has got inside `do_stream`: the
+/// OpenAI Chat provider reads one stream event after the headers and before it
+/// returns, while the compatible provider returns at the headers, so a
+/// deadline around the whole call cannot tell a late set of headers from a
+/// late first event. The driver only sees the events the stream produces, so
+/// this decorator reports the status as soon as the transport produces a
+/// response.
+///
+/// It also bounds a non-2xx body: the provider reads that body before it
+/// returns the failure, and a stalled body would otherwise outlive the
+/// request. The read is a short diagnostic, so it gets the allowance once in
+/// total rather than per chunk: an idle bound would let a trickle extend it.
+/// When the allowance expires the body ends, and the provider reports the HTTP
+/// status it already received with the bytes that arrived.
+struct ResponseWatch {
+    inner: FetchFunction,
+    status: Mutex<Option<tokio::sync::oneshot::Sender<http::StatusCode>>>,
+}
+
+#[async_trait::async_trait]
+impl Fetch for ResponseWatch {
+    async fn fetch(&self, request: FetchRequest) -> Result<FetchResponse, FetchError> {
+        let response = self.inner.fetch(request).await?;
+        if let Some(status) = self.status.lock().unwrap().take() {
+            let _ = status.send(response.status());
+        }
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let FetchResponse {
+            status,
+            headers,
+            url,
+            body,
+        } = response;
+        let deadline = Box::pin(tokio::time::sleep(stream::STREAM_IDLE_TIMEOUT));
+        Ok(FetchResponse {
+            status,
+            headers,
+            url,
+            body: body.take_until(deadline).boxed(),
+        })
     }
 }
 
@@ -632,6 +679,11 @@ impl ModelDriver for AimuxDriver {
             } else {
                 fetch(&self.transport, network, query)
             };
+            let (report, mut response) = tokio::sync::oneshot::channel();
+            let fetch: FetchFunction = Arc::new(ResponseWatch {
+                inner: fetch,
+                status: Mutex::new(Some(report)),
+            });
             if preset == Some(OPENAI_CODEX_PRESET) && protocol != ModelProtocol::OpenaiResponses {
                 return Err(HostError::classified(
                     HostErrorKind::InvalidRequest,
@@ -720,43 +772,82 @@ impl ModelDriver for AimuxDriver {
                 capture.input(&options, model.provider(), &request.model_id);
                 capture.pending()
             });
-            let result = tokio::select! {
-                biased;
-                _ = self.generation.cancelled() => {
-                    abort.abort();
-                    if let Some(pending) = pending.as_mut() { pending.cancelled(); }
-                    return Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed"));
-                }
-                _ = cancel.cancelled() => {
-                    abort.abort();
-                    if let Some(pending) = pending.as_mut() { pending.cancelled(); }
-                    return Err(HostError::Cancelled("Model invocation cancelled".into()));
-                }
-                _ = tokio::time::sleep(stream::STREAM_IDLE_TIMEOUT) => {
-                    abort.abort();
-                    let error = stream::idle_failure(format!(
-                        "no response headers arrived within {} seconds of sending the request",
-                        stream::STREAM_IDLE_TIMEOUT.as_secs()
-                    ));
-                    if let Some(pending) = pending.as_mut() { pending.failed(&error.to_string()); }
-                    return Err(error);
-                }
-                result = async {
+            // Three waits carry the idle allowance: sending the request until
+            // the response headers, the headers until the first stream event,
+            // and one part until the next. `do_stream` ends only after the
+            // headers and the first event, so `ResponseWatch` reports the
+            // headers here and the deadline moves to the first event.
+            let result = {
+                let mut awaiting_headers = true;
+                let mut headers_arrived = false;
+                let mut bounded = true;
+                let mut deadline = Box::pin(tokio::time::sleep(stream::STREAM_IDLE_TIMEOUT));
+                let exchange = async {
                     match &recording {
                         Some(capture) => capture.scope(model.do_stream(&options)).await,
                         None => model.do_stream(&options).await,
                     }
-                } => match result
-                    .map_err(|error| stream::error(name_redirect_target(error), &cancel))
-                {
-                    Ok(result) => result,
-                    Err(error) => {
-                        if let Some(pending) = pending.as_mut() {
-                            pending.failed(&error.to_string());
+                };
+                tokio::pin!(exchange);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = self.generation.cancelled() => {
+                            abort.abort();
+                            if let Some(pending) = pending.as_mut() { pending.cancelled(); }
+                            return Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed"));
                         }
-                        return Err(error);
+                        _ = cancel.cancelled() => {
+                            abort.abort();
+                            if let Some(pending) = pending.as_mut() { pending.cancelled(); }
+                            return Err(HostError::Cancelled("Model invocation cancelled".into()));
+                        }
+                        _ = &mut deadline, if bounded => {
+                            abort.abort();
+                        let error = stream::idle_failure(if headers_arrived {
+                                format!(
+                                    "the response headers arrived, but no stream event followed within {} seconds",
+                                    stream::STREAM_IDLE_TIMEOUT.as_secs()
+                                )
+                            } else {
+                                format!(
+                                    "no response headers arrived within {} seconds of sending the request",
+                                    stream::STREAM_IDLE_TIMEOUT.as_secs()
+                                )
+                            });
+                            if let Some(pending) = pending.as_mut() { pending.failed(&error.to_string()); }
+                            return Err(error);
+                        }
+                        status = &mut response, if awaiting_headers => {
+                            awaiting_headers = false;
+                            if let Ok(status) = status {
+                                headers_arrived = true;
+                                if status.is_success() {
+                                    deadline.as_mut().reset(
+                                        tokio::time::Instant::now() + stream::STREAM_IDLE_TIMEOUT,
+                                    );
+                                } else {
+                                    // A non-2xx reply fails with the status it
+                                    // carries; its body is bounded by the
+                                    // transport, and an idle failure here would
+                                    // discard that status.
+                                    bounded = false;
+                                }
+                            }
+                        }
+                        result = &mut exchange => match result
+                            .map_err(|error| stream::error(name_redirect_target(error), &cancel))
+                        {
+                            Ok(result) => break result,
+                            Err(error) => {
+                                if let Some(pending) = pending.as_mut() {
+                                    pending.failed(&error.to_string());
+                                }
+                                return Err(error);
+                            }
+                        },
                     }
-                },
+                }
             };
             let result = match recording {
                 Some(capture) => {

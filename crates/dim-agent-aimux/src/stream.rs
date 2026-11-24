@@ -28,16 +28,21 @@ use tokio_util::sync::CancellationToken;
 
 use crate::request::ToolNames;
 
-/// How long a request waits for the reply to start or continue before the
-/// connection counts as lost.
+/// How long a request waits for each step of the reply before the connection
+/// counts as lost.
 ///
 /// Five minutes matches the allowance other harnesses give a slow model step.
-/// It bounds one exchange from sending the request until the response headers
-/// arrive (the request body and any redirects count against it) and, once they
-/// arrive, the wait between parts: a reply that keeps streaming is never cut,
-/// however long it takes, while a half-open connection fails as a network
-/// failure instead of holding the turn until an external deadline. The same
-/// failure is retried in place while the attempt committed nothing.
+/// It bounds three waits: from sending the request until the response headers
+/// arrive (the request body and any redirects count against it), from the
+/// headers until the first stream event (the provider reads one event before
+/// it returns the stream), and from one stream part to the next. Each wait
+/// gets the full allowance, so a slow reply is never cut, however long it
+/// takes, while a half-open connection fails as a network failure instead of
+/// holding the turn until an external deadline; that failure is retried in
+/// place while the attempt committed nothing. It also bounds reading the body
+/// of a non-2xx response, which is a short diagnostic: that read gets the
+/// allowance once in total, because an idle bound would let a trickle of bytes
+/// extend it.
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) fn convert(
