@@ -2468,7 +2468,10 @@ async fn a_second_creation_moves_off_the_path_a_creation_registered() {
     let second_repo = work.repo.clone();
     let second = tokio::spawn(async move {
         second_client
-            .rpc("session.create", json!({"cwd": second_repo, "worktree": {}}))
+            .rpc(
+                "session.create",
+                json!({"cwd": second_repo, "worktree": {}}),
+            )
             .await
     });
     let built = tokio::time::timeout(Duration::from_secs(30), second)
@@ -2530,7 +2533,10 @@ async fn a_creation_cannot_take_the_path_a_failed_creation_rolls_back() {
     let failing_cwd = repo.join("packages/b");
     let failed = tokio::spawn(async move {
         failing_client
-            .rpc("session.create", json!({"cwd": failing_cwd, "worktree": {}}))
+            .rpc(
+                "session.create",
+                json!({"cwd": failing_cwd, "worktree": {}}),
+            )
             .await
     });
     tokio::time::timeout(Duration::from_secs(30), building.reached.notified())
@@ -2547,7 +2553,10 @@ async fn a_creation_cannot_take_the_path_a_failed_creation_rolls_back() {
     let second_repo = repo.clone();
     let second = tokio::spawn(async move {
         second_client
-            .rpc("session.create", json!({"cwd": second_repo, "worktree": {}}))
+            .rpc(
+                "session.create",
+                json!({"cwd": second_repo, "worktree": {}}),
+            )
             .await
     });
     tokio::time::timeout(Duration::from_secs(30), checking.reached.notified())
