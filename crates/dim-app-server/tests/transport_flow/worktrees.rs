@@ -2304,6 +2304,65 @@ async fn a_removal_does_not_delete_a_path_a_creation_is_building() {
     server.join().await.unwrap();
 }
 
+/// A creation that fails after it built its worktree still removes it: the
+/// rollback ends the creation's own registration first, so the path it holds
+/// does not refuse the removal the rollback needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_creation_removes_the_worktree_it_registered() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let repo = work.repo.clone();
+    git(&repo, &["rm", "--cached", "-r", "-q", "packages/b"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "drop the subtree",
+        ],
+    );
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut client = Client::new_version(&server, false, 3).await;
+    let failed = tokio::time::timeout(
+        Duration::from_secs(30),
+        client.rpc(
+            "session.create",
+            json!({"cwd": repo.join("packages/b"), "worktree": {}}),
+        ),
+    )
+    .await
+    .expect("a creation that cannot map its subtree does not hang");
+    assert!(
+        failed["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("packages/b")),
+        "{failed}"
+    );
+    let task = work.home.join("worktrees/aaaaaa");
+    assert!(!task.exists(), "the failed creation keeps no directory");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let created = client
+        .rpc("session.create", json!({"cwd": repo, "worktree": {}}))
+        .await;
+    assert_ok(&created);
+    assert_eq!(
+        created["result"]["worktree"]["taskId"], "aaaaaa",
+        "the failed creation kept neither its directory nor its branch"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Dropping the caller of a recorded removal keeps the spawned deletion
 /// running, the path refused and its record undeletable until it ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

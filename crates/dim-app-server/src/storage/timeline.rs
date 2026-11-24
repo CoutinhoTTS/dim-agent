@@ -1286,6 +1286,12 @@ pub struct SessionStore {
     /// mid-removal leaves a partly deleted directory, which the same removal
     /// removes again.
     deleting: Arc<Mutex<HashSet<PathBuf>>>,
+    /// The normalized directories a worktree creation is building now. A
+    /// creation registers its chosen directory under the ownership lock before
+    /// it builds there and holds it until its Session row is written or its
+    /// rollback ends, so a removal of the same path meets this registration
+    /// instead of deleting a worktree that is still being created.
+    creating: Arc<Mutex<HashSet<PathBuf>>>,
 }
 
 /// A path a removal registered as being deleted. The removal's own task owns
@@ -1303,6 +1309,42 @@ impl Drop for Deleting {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.path);
+    }
+}
+
+/// A directory a creation registered as being built. The creation's own task
+/// owns this: dropping it is what clears the path, so a caller that stops
+/// waiting for the creation does not clear it before the creation is over.
+pub(crate) struct WorktreeCreation {
+    store: SessionStore,
+    path: PathBuf,
+}
+
+impl std::fmt::Debug for WorktreeCreation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorktreeCreation")
+            .field("path", &self.path)
+            .finish()
+    }
+}
+
+impl WorktreeCreation {
+    /// Ends this registration before the creation's rollback removes its
+    /// directory, which that removal would otherwise be refused for. Dropping
+    /// the guard afterwards changes nothing.
+    pub(crate) fn end(&self) {
+        self.store
+            .creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.path);
+    }
+}
+
+impl Drop for WorktreeCreation {
+    fn drop(&mut self) {
+        self.end();
     }
 }
 
@@ -1348,6 +1390,7 @@ impl SessionStore {
             titles,
             ownership: Arc::new(tokio::sync::Mutex::new(())),
             deleting: Arc::new(Mutex::new(HashSet::new())),
+            creating: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     pub fn timeline_store(&self) -> Arc<TimelineStoreBinding> {
@@ -2008,13 +2051,23 @@ impl SessionStore {
     /// registration are one step for every operation that looks at the same
     /// lock. A path that is itself, above or below a path already being
     /// removed is refused, which also refuses a second removal of the same
-    /// worktree.
+    /// worktree, and so is one a creation registered as being built.
     async fn begin_deletion(&self, path: &Path) -> Result<Deleting> {
         let path = normalized(path).await;
         let mut deleting = self
             .deleting
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let creating = self
+            .creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(other) = creating.iter().find(|other| overlaps(other, &path)) {
+            return Err(AgentError::InvalidInput(format!(
+                "{} is being created",
+                other.display()
+            )));
+        }
         if let Some(other) = deleting.iter().find(|other| overlaps(other, &path)) {
             return Err(AgentError::InvalidInput(format!(
                 "{} is being removed",
@@ -2049,13 +2102,30 @@ impl SessionStore {
         }
     }
 
-    /// Refuses a worktree directory a removal is deleting now, taking the same
-    /// ownership lock and reading the same set a removal registers under. A
-    /// creation picks its directory before it builds there, so this keeps it
-    /// out of a path whose deletion is still finishing.
-    pub(crate) async fn reject_worktree_creation(&self, path: &Path) -> Result<()> {
+    /// Registers the worktree directory a creation selected, until the returned
+    /// guard drops. The caller holds the ownership lock, which is the same lock
+    /// a removal registers under, so a path seen as free cannot be registered
+    /// by a removal before this creation records what it does with it. A path a
+    /// removal is deleting, or one another creation registered, is refused.
+    pub(crate) async fn begin_worktree_creation(&self, path: &Path) -> Result<WorktreeCreation> {
+        let path = normalized(path).await;
         let _ownership = self.ownership.lock().await;
-        self.reject_deletion(path).await
+        self.reject_deletion(&path).await?;
+        let mut creating = self
+            .creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(other) = creating.iter().find(|other| overlaps(other, &path)) {
+            return Err(AgentError::InvalidInput(format!(
+                "{} is being created",
+                other.display()
+            )));
+        }
+        creating.insert(path.clone());
+        Ok(WorktreeCreation {
+            store: self.clone(),
+            path,
+        })
     }
 
     /// Lists the Session associations of a recorded directory. An unknown

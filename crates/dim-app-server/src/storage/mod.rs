@@ -53,6 +53,7 @@ pub use timeline::testing as timeline_testing;
 pub fn rebuild_text_index(connection: &rusqlite::Connection) -> dim_agent_runtime::Result<()> {
     text::backfill(connection)
 }
+pub(crate) use timeline::WorktreeCreation;
 pub use timeline::{
     PreparedWorktree, SessionStore, SessionStorePlugin, SqliteTimelineStore, TurnWindow,
     WorktreeDirectoryRecord, WorktreeUsage,

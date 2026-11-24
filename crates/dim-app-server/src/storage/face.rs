@@ -1,4 +1,4 @@
-use super::{PreparedWorktree, SessionStore, WorktreeDirectory};
+use super::{PreparedWorktree, SessionStore, WorktreeCreation, WorktreeDirectory};
 use crate::protocol::SessionOrigin;
 use dim_agent_runtime::{AgentError, ReplyLanguage, SessionConfig};
 use dim_agent_types::grant::{GrantKind, GrantMode};
@@ -161,13 +161,14 @@ impl Store {
     ) -> impl Future<Output = Result<bool>> {
         self.0.remove_unregistered_directory(path, remove)
     }
-    /// Refuses a worktree directory a removal registered as being deleted; the
-    /// check takes the ownership lock the removal registers under.
-    pub(crate) fn reject_worktree_creation(
+    /// Registers a worktree directory a creation selected until the returned
+    /// guard drops; the registration takes the ownership lock a removal
+    /// registers under.
+    pub(crate) fn begin_worktree_creation(
         &self,
         path: &std::path::Path,
-    ) -> impl Future<Output = Result<()>> {
-        self.0.reject_worktree_creation(path)
+    ) -> impl Future<Output = Result<WorktreeCreation>> {
+        self.0.begin_worktree_creation(path)
     }
 }
 

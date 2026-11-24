@@ -6,10 +6,14 @@
 //! path and registers it as being deleted under the store's ownership lock
 //! before it runs its deletion outside that lock, so a late association or
 //! creation meets the registration instead of slipping in. A creation compares
-//! its directory with that registration and moves to another task id. Git is
-//! the fact; a record is a candidate.
+//! its directory with that registration and moves to another task id, and it
+//! registers its own directory under the same lock until its Session row is
+//! written, so a removal meets the creation too. Git is the fact; a record is a
+//! candidate.
 use crate::methods::ManagementMethods;
-use crate::storage::{PreparedWorktree, Store, WorktreeDirectory, WorktreeDirectoryRecord};
+use crate::storage::{
+    PreparedWorktree, Store, WorktreeCreation, WorktreeDirectory, WorktreeDirectoryRecord,
+};
 use dim_agent_capabilities::methods::{
     Interruption, MethodCall, MethodDecl, RpcError, params, reply,
 };
@@ -45,12 +49,16 @@ pub struct ManagedWorktrees {
 
 /// A worktree this call created, with what it needs to be reported or
 /// discarded: the directory, the Session's subtree, the branch and the base.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CreatedWorktree {
     pub task_id: String,
     pub prepared: PreparedWorktree,
     pub branch: String,
     pub base: String,
+    /// The creation's registration of `prepared.directory.root`: a removal of
+    /// that path is refused until this value drops, which is after the Session
+    /// row is written or after the failed creation's rollback returns.
+    creating: WorktreeCreation,
 }
 
 /// One row of `worktree.list`: a recorded directory under the managed root,
@@ -290,10 +298,15 @@ impl ManagedWorktrees {
             // A removal registers a path under the ownership lock and clears
             // it only when the deletion returns; a directory that registration
             // still covers is not built in, even if its files are already gone.
-            if let Err(error) = self.sessions.reject_worktree_creation(&directory).await {
-                last = Some(error.into());
-                continue;
-            }
+            // Registering this directory in the same call keeps a removal that
+            // starts while it is built away from it.
+            let creating = match self.sessions.begin_worktree_creation(&directory).await {
+                Ok(creating) => creating,
+                Err(error) => {
+                    last = Some(error.into());
+                    continue;
+                }
+            };
             #[cfg(feature = "testing")]
             self.wait_for_creation_hold().await;
             let branch_name = match branch {
@@ -345,7 +358,7 @@ impl ManagedWorktrees {
             let root_dir = match canonical(directory.clone()).await {
                 Ok(root_dir) => root_dir,
                 Err(error) => {
-                    self.rollback_add(&repository, &directory, &branch_name)
+                    self.rollback_add(&repository, &directory, &branch_name, &creating)
                         .await;
                     return Err(error);
                 }
@@ -353,7 +366,7 @@ impl ManagedWorktrees {
             let subtree = match checked_subtree(&root_dir, &relative).await {
                 Ok(subtree) => subtree,
                 Err(error) => {
-                    self.rollback_add(&repository, &root_dir, &branch_name)
+                    self.rollback_add(&repository, &root_dir, &branch_name, &creating)
                         .await;
                     return Err(error);
                 }
@@ -369,6 +382,7 @@ impl ManagedWorktrees {
                 },
                 branch: branch_name,
                 base,
+                creating,
             });
         }
         Err(last.unwrap_or_else(|| WorktreeError::Invalid("no task id was free".into())))
@@ -377,8 +391,18 @@ impl ManagedWorktrees {
     /// Removes a worktree this call just added under the store's ownership
     /// exclusion, without `--force` and with a token that cannot be cancelled.
     /// The branch goes only after Git accepted the removal. A Session or
-    /// content that appeared since the checkout keeps both.
-    async fn rollback_add(&self, repository: &Path, root: &Path, branch: &str) {
+    /// content that appeared since the checkout keeps both. Its own creation's
+    /// `registration` ends first: a removal of the path is refused while a
+    /// creation may still hand the worktree to a Session, and this rollback is
+    /// that creation's end.
+    async fn rollback_add(
+        &self,
+        repository: &Path,
+        root: &Path,
+        branch: &str,
+        registration: &WorktreeCreation,
+    ) {
+        registration.end();
         let directory = WorktreeDirectory {
             repository: repository.to_owned(),
             root: root.to_owned(),
@@ -426,6 +450,7 @@ impl ManagedWorktrees {
             &created.prepared.directory.repository,
             &created.prepared.directory.root,
             &created.branch,
+            &created.creating,
         )
         .await;
     }
