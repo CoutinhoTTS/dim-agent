@@ -3063,6 +3063,12 @@ impl ProviderService {
             }
             let mut connection =
                 drivers::connection(&record.driver_kind, protocol, &record.base_url, headers);
+            // The built-in xai entry serves xAI over the compatible protocol;
+            // its provider id is what says so, since custom providers take a
+            // generated UUID and never this id.
+            if provider_id == "xai" {
+                connection.preset = Some("xai".into());
+            }
             if provider_id == "opencode-go" {
                 let session_id = use_
                     .session_id()
@@ -3302,7 +3308,7 @@ fn managed_connection(
             }
             (ModelProtocol::OpenaiResponses, Some("openai-codex".into()))
         }
-        CredentialAuthority::Grok => (ModelProtocol::OpenaiCompatible, None),
+        CredentialAuthority::Grok => (ModelProtocol::OpenaiCompatible, Some("xai".into())),
         CredentialAuthority::Static => unreachable!(),
     };
     RecoveredModelConnection {

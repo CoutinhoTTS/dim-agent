@@ -1741,6 +1741,126 @@ async fn managed_provider_selection_http_recovery_and_restart_flow() {
     fs::remove_dir_all(home).unwrap();
 }
 
+/// A 1x1 WebP: a format neither the native xAI routes nor the managed Grok
+/// subscription takes.
+const WEBP: &str = "UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==";
+
+/// The managed Grok subscription is an xAI destination served over the
+/// compatible protocol: its connection names the `xai` vendor package, and a
+/// standalone call refuses a WebP before sending anything.
+#[tokio::test]
+async fn the_managed_grok_route_takes_only_the_native_xai_image_formats() {
+    let (f, server, home) = fixture().await;
+    let catalog = dim_app_server::catalog();
+    let build = rutis_loader::resolve::Build::default();
+    let names = Names::copy(&catalog, &build);
+    let (root, _, _, _) = codex(&home, &f.base).await;
+    let grok_plugin =
+        root.plugin(GrokOAuthPlugin::with_config(&names, 0, config(&f.base, false)).unwrap());
+    let dim = root.plugin(dim_app_server::managed_provider::ManagedProvidersPlugin::new(None));
+    let sqlite = root.plugin(dim_app_server::storage::SqliteStoragePlugin::new(
+        home.join("native.sqlite"),
+    ));
+    let provider_plugin = root.plugin(ProviderPlugin::new(&names).unwrap());
+    let aimux = root.plugin(dim_agent_aimux::AimuxPlugin::default());
+    for plugin in [&grok_plugin, &dim, &sqlite, &provider_plugin, &aimux] {
+        active(plugin).await;
+    }
+    let provider = root.get::<ProviderService>().unwrap();
+    let resolver = root.get::<ProviderConnectionResolver>().unwrap();
+    let auxiliary = root.get::<AuxiliaryModel>().unwrap();
+    let grok = root.get::<GrokOAuthService>().unwrap();
+    let cancel = CancellationToken::new();
+    let token_responses = f.device_successes.load(Ordering::SeqCst);
+    f.polls.store(2, Ordering::SeqCst);
+    let begin = grok.begin_device(&cancel).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while f.device_successes.load(Ordering::SeqCst) == token_responses {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the device token response did not arrive");
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while grok.attempt_status(begin.attempt_id).await.unwrap() == AttemptStatus::Pending {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the device login did not complete after the token response");
+    let target = ModelId {
+        provider_id: "grok-build".into(),
+        model_id: "grok-build-0.1".into(),
+    };
+    let selection = provider
+        .configuration(
+            Some(target.clone()),
+            None,
+            ModelPreferences::default(),
+            &cancel,
+        )
+        .await
+        .unwrap();
+    let mut request = ModelRequest::new(
+        "grok-build",
+        "grok-build-0.1",
+        vec![Message::text(Role::User, "hello")],
+    );
+    request.capability_snapshot = selection.capability_snapshot;
+    request.config = selection.config;
+    let resolved = resolver
+        .0
+        .resolve(Arc::new(request), cancel.clone())
+        .await
+        .unwrap();
+    let dim_agent_capabilities::host::ModelConnection::Http(connection) = &resolved.connection
+    else {
+        panic!("the managed Grok connection is HTTP")
+    };
+    assert_eq!(
+        connection.preset.as_deref(),
+        Some("xai"),
+        "the managed Grok route names its vendor package"
+    );
+    let sent = f.model_requests.lock().unwrap().len();
+    let error = auxiliary
+        .0
+        .complete(
+            target,
+            AuxiliaryRequest {
+                system: None,
+                messages: vec![Message {
+                    role: Role::User,
+                    content: dim_agent_types::MessageContent::Parts(vec![
+                        dim_agent_types::MessagePart::Image {
+                            source: dim_agent_types::ImageSource {
+                                source_type: dim_agent_types::ImageSourceType::Base64,
+                                media_type: "image/webp".into(),
+                                data: Some(WEBP.into()),
+                                url: None,
+                                file_id: None,
+                            },
+                        },
+                    ]),
+                }],
+                max_output_tokens: None,
+            },
+            cancel.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, AuxiliaryErrorCode::InvalidRequest, "{error:?}");
+    assert_eq!(
+        f.model_requests.lock().unwrap().len(),
+        sent,
+        "the Grok route refuses the WebP before sending"
+    );
+    root.shutdown().await.unwrap();
+    server.abort();
+    let _ = server.await;
+    fs::remove_dir_all(home).unwrap();
+}
+
 #[tokio::test]
 async fn login_retains_ts_claim_precedence_and_bounds_pending_attempts() {
     let (f, server, home) = fixture().await;

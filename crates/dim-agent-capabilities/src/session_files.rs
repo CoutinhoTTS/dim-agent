@@ -140,8 +140,17 @@ pub async fn materialize(
     }
 }
 
-fn check_image_budget(bytes: usize) -> Result<(), HostError> {
-    if bytes > 32 * 1024 * 1024 {
+/// The most encoded image data one model request carries, user and
+/// tool-result images together.
+#[cfg(not(test))]
+const IMAGE_BUDGET: usize = 32 * 1024 * 1024;
+/// The unit-test target crosses the same rule at a cap it reaches without
+/// allocating production-sized images; integration tests see the real limit.
+#[cfg(test)]
+const IMAGE_BUDGET: usize = 128;
+
+pub(crate) fn check_image_budget(bytes: usize) -> Result<(), HostError> {
+    if bytes > IMAGE_BUDGET {
         return Err(HostError::classified(
             HostErrorKind::InvalidRequest,
             "Model request images exceed 32 MiB of encoded data",
