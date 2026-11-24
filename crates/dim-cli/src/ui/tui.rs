@@ -1130,13 +1130,6 @@ impl PendingSwitches {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum QuestionFocus {
-    Question,
-    Command,
-    TaskDraft,
-}
-
 struct App {
     host: Box<dyn SessionPort>,
     composer: Composer,
@@ -1324,8 +1317,7 @@ struct App {
     runs: Runs,
     /// The draft set aside while Ctrl+O/Ctrl+P has the palette open; it
     /// comes back when command entry ends.
-    palette_stash: Option<String>,
-    question_focus: QuestionFocus,
+    palette_stash: Option<(String, bool)>,
     /// The workspace's git branch for the banner and composer.
     branch: Option<String>,
     git_head: Option<PathBuf>,
@@ -1731,7 +1723,6 @@ impl App {
             notified_tasks: HashSet::new(),
             runs: Runs::default(),
             palette_stash: None,
-            question_focus: QuestionFocus::Question,
             branch: None,
             git_head: None,
             git_checked: Instant::now(),
@@ -1823,15 +1814,16 @@ impl App {
     }
 
     fn command_entry_open(&self) -> bool {
-        (self.question_focus != QuestionFocus::Question || self.composer.palette_open())
+        (self.composer.skill_draft
+            || (self.composer.shell().is_none() && self.composer.text().starts_with('/')))
             && matches!(&self.prompt, Some(Prompt::Ask(prompt)) if !prompt.typing)
     }
 
     /// Opens the command palette on the draft it replaces; the draft comes
     /// back when command entry ends ([`Self::handle`]).
     fn open_palette(&mut self) {
-        if !self.composer.is_empty() {
-            self.palette_stash = Some(self.composer.text().to_owned());
+        if !self.composer.is_empty() || self.composer.skill_draft {
+            self.palette_stash = Some((self.composer.text().to_owned(), self.composer.skill_draft));
         }
         self.set_draft("/");
     }
@@ -3385,18 +3377,11 @@ impl App {
     fn handle(&mut self, event: InputEvent) -> Outcome {
         let outcome = self.handle_input(event);
         self.restore_question();
-        if !self.command_entry_open()
-            || (self.question_focus != QuestionFocus::TaskDraft
-                && !self.composer.text().starts_with('/'))
-        {
-            self.question_focus = QuestionFocus::Question;
-        } else if self.question_focus != QuestionFocus::TaskDraft {
-            self.question_focus = QuestionFocus::Command;
-        }
         if self.composer.is_empty()
-            && let Some(draft) = self.palette_stash.take()
+            && let Some((draft, skill_draft)) = self.palette_stash.take()
         {
             self.set_draft(&draft);
+            self.composer.skill_draft = skill_draft;
         }
         outcome
     }
@@ -3506,7 +3491,6 @@ impl App {
                     && !self.composer.mention_open()
                 {
                     self.composer.clear();
-                    self.question_focus = QuestionFocus::Question;
                     return Outcome::Continue;
                 }
                 return self.composer_key(key);
@@ -3515,7 +3499,6 @@ impl App {
                 || (ctrl && matches!(key.code, KeyCode::Char('o' | 'p')))
             {
                 self.open_palette();
-                self.question_focus = QuestionFocus::Command;
                 return Outcome::Continue;
             }
         }
@@ -3804,14 +3787,6 @@ impl App {
             self.restore_outcome(outcome);
             self.set_notice(t("Send now is still stopping the run; the draft was kept"));
             return Outcome::Continue;
-        }
-        if matches!(
-            outcome,
-            ComposerOutcome::Submit(_)
-                | ComposerOutcome::SubmitDraft { .. }
-                | ComposerOutcome::Shell { .. }
-        ) {
-            self.question_focus = QuestionFocus::Question;
         }
         match outcome {
             ComposerOutcome::Submit(text) if self.line_draft.is_some() => {
@@ -4137,7 +4112,6 @@ impl App {
         }
         if !self.composer.is_empty() {
             self.composer.clear();
-            self.question_focus = QuestionFocus::Question;
             self.arm_exit();
             self.set_notice(t("Press Ctrl+C again to exit"));
             return Outcome::Continue;
@@ -4306,7 +4280,6 @@ impl App {
             Effect::UseSkill(name) => {
                 self.prompt = None;
                 self.composer.prepend_skill(&format!("/skill:{name}"));
-                self.question_focus = QuestionFocus::TaskDraft;
             }
             Effect::Close => {
                 if matches!(self.prompt, Some(Prompt::Sessions(_))) {

@@ -1620,8 +1620,9 @@ In Skills, `Enter` inserts the enabled Skill into the task draft without sending
 the selected entry, and `Space` does not toggle it. In other areas, `Enter` or `Space`
 toggles, `Ctrl+E` opens a document in the external editor, `Ctrl+R` re-reads the area or asks its
 owner to rescan, `Ctrl+N` adds, `Ctrl+X` removes, `Ctrl+T` runs, `Tab` inspects, and `Esc`
-closes. A kind is offered only where the area's method table and the owner's view have one, so
-an area with no run action never names `Ctrl+T`. An action key is a Ctrl chord, or a key the
+closes. Using a Skill is local to the composer. A management action is offered only where the
+area's method table and the owner's view have one, so an area with no run action never names
+`Ctrl+T`. An action key is a Ctrl chord, or a key the
 filter never takes, because the filter takes every plain letter. The hint names the area's
 kinds plus the selected entry's, on the bottom border or, when that cannot hold it, in rows
 above the border wrapped by width so no key or action is cut; reload and add act on the area, so

@@ -1099,6 +1099,51 @@ const scenarios = [
       await terminal.waitFor('/skill:review-demo back at home');
     },
   })),
+  ...['scrollback', 'fullscreen'].map((mode) => ({
+    name: `${mode}_question_arrives_during_completion`,
+    area: 'skills',
+    title: 'A later question does not take the keys from a command or Skill draft',
+    async run(tui) {
+      let gate;
+      let turn;
+      await tui.setup({
+        files: {'.agents/skills/review-demo/SKILL.md': '---\nname: review-demo\ndescription: Review a draft\n---\nReview.'},
+        respond: async (request) => {
+          if (!request.tools?.length) return {text: ANSWER};
+          if (lastMessage(request).role === 'tool') return {text: `Recorded ${turn}`};
+          await gate.promise;
+          return {toolCalls: [{name: 'ask_user', arguments: {questions: [{header: 'Pick', question: `Choose for ${turn}`, options: [{label: 'One'}, {label: 'Two'}]}]}}]};
+        },
+      });
+      const args = ['--cwd', path.join(tui.root, 'workspace')];
+      if (mode === 'fullscreen') args.push('--fullscreen');
+      const terminal = await tui.launch(args, {waitForComposer: true});
+      for (turn of ['command', 'skill row', 'skill draft']) {
+        gate = Promise.withResolvers();
+        terminal.send(`ask about ${turn}`);
+        terminal.key('Enter');
+        await waitForRequest(tui.model, (r) => r.tools?.length && userText(r).includes(`ask about ${turn}`));
+        terminal.send(turn === 'command' ? '/goal' : '/review-de');
+        await terminal.waitFor(turn === 'command' ? 'follow or change' : 'Tab / Enter complete');
+        if (turn === 'skill draft') {
+          terminal.key('Enter', 'Home');
+          terminal.send('before ');
+          await terminal.waitFor('before /skill:review-demo');
+        }
+        gate.resolve();
+        await terminal.waitFor('answer required');
+        if (turn !== 'skill draft') terminal.key(turn === 'command' ? 'Tab' : 'Enter');
+        if (turn === 'skill row') terminal.key('Home');
+        terminal.send('keep typing');
+        await terminal.waitFor({command: '/goal keep typing', 'skill row': 'keep typing/skill:review-demo', 'skill draft': 'before keep typing/skill:review-demo'}[turn]);
+        terminal.key('Escape');
+        await terminal.waitFor(`Choose for ${turn}`);
+        terminal.key('Down', 'Enter', 'Enter');
+        await terminal.waitFor(`Recorded ${turn}`);
+        assert(userText(turnRequests(tui.model).at(-1).body).includes('Two'));
+      }
+    },
+  })),
   {
     name: 'question_panel_answer_reaches_the_next_request',
     area: 'approvals',

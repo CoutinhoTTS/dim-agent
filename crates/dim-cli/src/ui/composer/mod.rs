@@ -115,6 +115,7 @@ pub enum Outcome {
 pub struct Composer {
     area: TextArea,
     state: TextAreaState,
+    pub(super) skill_draft: bool,
     tokens: Vec<Token>,
     history: Vec<String>,
     history_index: Option<usize>,
@@ -139,6 +140,7 @@ impl Composer {
         Self {
             area: TextArea::new(),
             state: TextAreaState::default(),
+            skill_draft: false,
             tokens: Vec::new(),
             history,
             history_index: None,
@@ -407,6 +409,7 @@ impl Composer {
 
     pub fn clear(&mut self) {
         self.area.set_text("");
+        self.skill_draft = false;
         self.tokens.clear();
         self.history_index = None;
         self.saved_draft.clear();
@@ -624,6 +627,7 @@ impl Composer {
     }
 
     pub fn prepend_skill(&mut self, reference: &str) {
+        self.skill_draft = true;
         self.area.set_cursor(0);
         self.area.insert_element(reference, TOKEN_KIND, None);
         self.area.insert_str(" ");

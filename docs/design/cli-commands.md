@@ -1101,7 +1101,9 @@ In both TUI modes, `/skills` lists names and states by source. Selecting a Skill
 display its description, file path or file contents. In this panel Tab toggles the selected
 Skill and leaves the list open. Enter uses an invocable selection: it closes the list and
 puts `/skill:<name> ` in the chat composer. Type the task there and press Enter to send.
-If a question was pending, the composer keeps keyboard focus until the draft is sent or cancelled.
+An unanswered question does not take focus from a slash command being completed or edited,
+or from a selected Skill's task draft, even if the question arrives after editing has started.
+Send or cancel the draft to return to the question.
 Enter on a disabled or otherwise non-invocable row neither sends nor changes its state.
 
 ```text
@@ -1120,8 +1122,10 @@ Enter on a disabled or otherwise non-invocable row neither sends nor changes its
 
 ### Actions
 
-The client has a closed set of action kinds. Except for the Skills keys above, the table gives each kind's key. The hint
-lists the area's kinds plus the selected entry's kinds, in the table's order; Skills shows
+The table lists the management actions sent to an area's adapter. Using a Skill is a local
+composer action: it needs an invocable catalog entry, not a management method. Except for the
+Skills keys above, the table gives each kind's key. The hint lists the area's kinds plus the
+selected entry's kinds, in the table's order; Skills shows
 `Enter use` before `Tab toggle` when use is available.
 
 An action that names one entry carries the entry's id and the source its row reports. Two entries
