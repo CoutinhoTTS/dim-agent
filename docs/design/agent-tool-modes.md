@@ -266,12 +266,6 @@ below are its requirements; the ones marked missing are follow-up work, not part
   rebuilt only when it equals one a child result returned, so a program cannot point the model at
   pixels it never read. Text blocks always become text, and anything else stays JSON text. The
   existing output bound applies. Missing.
-- **Ordering.** `ToolConcurrency` orders the calls of one batch. Each child call is its own batch of
-  one, so the class has nothing to order: the program's `await` and parallel structure are the
-  order, and the runtime does not impose another. A handler that needs exclusion enforces it itself
-  — the file tools hold a per-path lock, so two writes to one path still serialize — and `exec`
-  holds none, so a program that runs `exec` beside a write can race it, as it already can across
-  turns and background tasks. Exists; state the boundary, add no gate.
 - **Async lifetime.** Work handed to its owner — a background `exec` or `execute` task, an `events`
   subscription, a `schedule`/`wakeup`/`loop` timer, a branch line, a member — is not tied to the
   child call or the program: cancelling the program does not cancel it, and its completion arrives
@@ -362,9 +356,6 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
 - Flow: a program returns a `read` image result; the outer result carries the same image block, and
   the model request renders it as an image, not as JSON. A fabricated image block falls back to
   text.
-- Flow: a program issues two `write` calls to one path in parallel; the per-path lock serializes
-them. Ordering between `exec` and a write is not guaranteed inside a program, as it is not across
-turns.
 - Flow: a program starts a background `exec` and then fails or is stopped; the task keeps running,
   the Session wakes on its completion, and `session.exec.stop` stops it.
 - Flow: a child `ask_user` is shown under the program and is answerable through
