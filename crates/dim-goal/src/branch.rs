@@ -1645,10 +1645,8 @@ impl Owner {
             }
             fold::decide_evaluation(&state.fold, after)
         };
-        if evaluation {
-            if self.evaluate_turn_end(after).await? {
-                return Ok(());
-            }
+        if evaluation && self.evaluate_turn_end(after).await? {
+            return Ok(());
         }
         let Ok(limit) = self.limit().await else {
             return Ok(());
