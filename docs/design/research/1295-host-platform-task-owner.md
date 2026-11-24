@@ -13,7 +13,9 @@ stack (`backup/pr-2002-af675`). Not an implementation record. The contract lands
    terminal records plus `output`/`tail`/`wait`/`retainOutput` replace it.
 4. Service methods take `&self`; no `mounted` weak, no `arc()`, no test-only path.
 5. Paths are UTF-8 `String`; errors are typed enums whose tags are the codes.
-6. Six migration steps; no step waits for a product approval.
+6. Seven migration steps; no step waits for a product approval. `session.exec.stop` is
+   routed in this PR through the branch stop owner, without making `BackgroundExec` and
+   `ShellSession` depend on each other.
 ## 1. Ownership and state
 `HostPlatform` owns every process/PTY/task and its terminal, timeout, isolation marker and
 log. `ShellSession` owns queue/timeout/occupancy/markers/facts; `WorkspaceTools`/
@@ -304,6 +306,7 @@ operations and attributes the PTY to `ShellSession`; npm declarations regenerate
 | duplicate id after settle | `a_reserved_id_rejects_a_second_spawn_and_a_settled_log_rejects_reuse` | `host_platform_flow.rs` |
 | failure kinds | `OutputWriteFailed`, `TerminateFailed`, `ShellExited/Reset`, `CommandFailed`, `UnknownExit`, `JobUnavailable`, `OwnerUnloaded` via the rows above and unload/stop tests | `host_platform_flow.rs`, `minimal_execution.rs` |
 | second capture / marker / interrupt / dead-shell write | `a_second_command_while_one_runs_answers_task_running`, `an_echoed_or_cross_shell_marker_does_not_end_a_task`, `kill_interrupts_only_the_active_command`, `write_to_a_terminated_shell_answers_task_ended` | `host_platform_flow.rs` |
+| `session.exec.stop` owner route | live shell command/job stop; normal exec stop unchanged; unknown id | `transport_flow/shell_input.rs`, `minimal_execution.rs`, `local_execution.rs` |
 | removal / MCP PATH / confined / isolation hint | `output_removal_refuses_traversal_and_links`, four PATH outcomes, `ocr_plugin_helper...`, `execution_settings...` extended | `host_platform_flow.rs`, `stdio.rs`, `dim-modality`, `execution_settings.rs` |
 | docs/types | `xtask check`, `types`, `graph` | CI |
 
@@ -319,7 +322,8 @@ Existing flows stay (`host_platform_flow`, `local_execution`, `minimal_execution
 | 3 | step 2 | `refactor(exec): run commands as owner task ids` | `exec.rs`, `background.rs`, `workspace_tools/mod.rs`, `local_execution.rs`, `WorkspaceTools.md` | `ExecProcess`, `CommandTask` and `ExecutionTask` deleted; one `TaskRecord` table; `BackgroundExec` holds ids, live reads via `tail`/`output` | `local_execution` handoff/stop/recovery, `transport_flow/shell_input` |
 | 4 | step 3 | `refactor(host-platform): splitter, shell settlement, event API removal` | `host_platform.rs`, `shell_session.rs`, `minimal_execution.rs`, `npm/*`, `HostPlatform.md`, `resource-faces.md` | Owner splitter; markers/pwsh/sweep; `write`/`resize` on a dead shell answer `task_ended`; `ShellSession` has no marker scan/retained/event loop; event API deleted | `minimal_execution` shell, `host_platform_flow` burst/display + dead-shell write, `xtask types` |
 | 5 | step 4 | `fix(host-platform): one boundary policy` | `host_platform.rs`, `exec.rs`, `shell_session.rs`, `stdio.rs`, `storage/files.rs`, `hooks/runner.rs`, `modality/engine.rs`, flow tests | UTF-8 paths; log reservation/cleanup/retention; strict removal; typed MCP PATH | `host_platform_flow`, `host_platform_windows_flow`, `mcp_session_flow`, `ocr_helper_flow` |
-| 6 | step 5 | `docs(host-platform): one owner contract` | `resource-faces.md`, `HostPlatform.md`, `WorkspaceTools.md`, `service-faces.md`, `resource-owner-operations.md`, `ShellInput.md`, `npm/plugin.d.ts`, generated | One rule per page; identical operation lists; PTY attribution; registration split | `xtask check`, `graph`, `types`; `node --test scripts/*.test.mjs` |
+| 6 | step 5 | `fix(app-server): route session.exec.stop through the branch stop owner` | `connection.rs`, `transport_flow/shell_input.rs`, `minimal_execution.rs` | Minimal's `ShellSession` already provides `dyn ExecStop`; `session.exec.stop` uses it when present, otherwise the local profile keeps `BackgroundExec`. `BackgroundExec` gains no `ShellSession` dependency; a future profile with both task kinds must provide one stop dispatcher in its assembly. | live shell command/job stop through `session.exec.stop`; normal exec stop unchanged; `product_protocol` |
+| 7 | step 6 | `docs(host-platform): one owner contract` | `resource-faces.md`, `HostPlatform.md`, `WorkspaceTools.md`, `service-faces.md`, `resource-owner-operations.md`, `ShellInput.md`, `npm/plugin.d.ts`, generated | One rule per page; identical operation lists; PTY attribution; registration split | `xtask check`, `graph`, `types`; `node --test scripts/*.test.mjs` |
 
 ### 7.2 Patch mapping
 | Change | Keep | Rewrite |
@@ -329,16 +333,17 @@ Existing flows stay (`host_platform_flow`, `local_execution`, `minimal_execution
 
 ### 7.3 Scope and follow-up
 `task_ended` is in this PR: step 2 adds it, step 4 makes `write`/`resize` return it, and
-`write_to_a_terminated_shell_answers_task_ended` gates it; no `connection.rs` change.
-`session.exec.stop` routing through `dyn ExecStop` is an explicit follow-up PR; today a
-shell task stop stays a historical read.
+`write_to_a_terminated_shell_answers_task_ended` gates it; no `connection.rs` change for
+that case. `session.exec.stop` is step 6: the minimal `ShellSession` `ExecStop` provider
+serves shell tasks; the local profile keeps `BackgroundExec`; neither task owner references
+the other.
 ## 8. Rule check
 | Rule | Application |
 | --- | --- |
 | §1 dependence / ownership; ADR 002 D1 | HostPlatform owns processes/PTYs/tasks; ShellSession policy; WorkspaceTools semantics; BackgroundExec facts. No new capability. |
 | Timeline facts; rules 1–4, 9 | No fact added/moved; producers unchanged; owner writes none. |
 | One owner/record/watch/splitter/page/error enum | Four records → one with per-kind payload, three notifiers → one watch, two page types → one, folded messages → one `HostPlatformError` and one `TaskFailure`. |
-| Data face, no live handle, no duplicate owner | Public methods are serde data; native handles stay native; exec/BackgroundExec hold ids and paths; the owner is the only marker interpreter and terminal writer. |
+| Data face, no live handle, no duplicate owner | Public methods are serde data; native handles stay native; exec/BackgroundExec hold ids and paths; the owner is the only marker interpreter and terminal writer. `session.exec.stop` selects the branch stop provider; no task owner depends on another. |
 | Rule 3 / rule 7 / test rule / ADR 002 D4 | Reader is a blocking thread, supervisors/waiters are tasks, terminal transition never awaits under a lock; reuses `pump`/`Decoder`/`bounded_preview`, `sessionFiles`, `Timeline`, `SessionLifecycle`; boundary tests are face flows; switches read per prepare, shell preference per spawn. |
 
 Exceptions: `kill` on a shell command requests an interrupt and the marker or sweep decides
