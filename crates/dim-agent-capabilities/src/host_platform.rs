@@ -4082,6 +4082,26 @@ pub(crate) mod shell {
             }
         }
 
+        fn trim(&mut self) {
+            let mut removed = false;
+            while self.chars > EVENT_RETAIN_CHARS {
+                let Some(super::ShellEvent::Output { .. }) = self.items.front() else {
+                    break;
+                };
+                if let Some(front) = self.items.pop_front() {
+                    self.chars = self.chars.saturating_sub(shell_event_len(&front));
+                    removed = true;
+                }
+            }
+            if removed {
+                self.base = self
+                    .items
+                    .front()
+                    .map(super::ShellEvent::cursor)
+                    .unwrap_or(self.next);
+            }
+        }
+
         fn finish(&mut self) {
             if self.pending.is_empty() {
                 return;
@@ -4379,13 +4399,7 @@ pub(crate) mod shell {
                     drop(capture);
                     {
                         let mut events = pump.events.lock().unwrap();
-                        while events.chars > EVENT_RETAIN_CHARS && !shell_record.is_terminal() {
-                            let (guard, _) = pump
-                                .event_space
-                                .wait_timeout(events, Duration::from_millis(100))
-                                .unwrap();
-                            events = guard;
-                        }
+                        events.trim();
                         if !shell_record.is_terminal() {
                             events.push(chunk);
                         }

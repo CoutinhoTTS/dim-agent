@@ -1916,16 +1916,27 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
         })
         .await
         .unwrap();
+    let token = format!("BURST-{}", uuid::Uuid::new_v4().simple());
+    std::fs::write(dir.join("burst-token"), &token).unwrap();
+    let burst = format!(
+        "printf '%s%s\\n' '__DIM_START_aaaabbbb_' 'ccccdddd__'; seq 1 400000; printf 'OUTPUT-'; cat '{}'; printf '\\n'; printf '%s%s%d\\n' '__DIM_END_eeeefaff_' '00001111__' 0",
+        dir.join("burst-token").display()
+    ) + "\n";
     platform
         .write(ShellWrite {
             task_id: "burst-shell".into(),
-            data: "c2VxIDEgNDAwMDAwCg==".into(),
-            command: None,
+            data: base64::engine::general_purpose::STANDARD.encode(burst.as_bytes()),
+            command: Some(ShellCommandStart {
+                task_id: "burst-command".into(),
+                start_marker: "__DIM_START_aaaabbbb_ccccdddd__".into(),
+                end_marker: "__DIM_END_eeeefaff_00001111__".into(),
+            }),
             job: None,
         })
         .await
         .unwrap();
     let mut seen = false;
+    let mut last = String::new();
     for _ in 0..2000 {
         let page = platform
             .output(OutputRequest {
@@ -1935,13 +1946,34 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
             })
             .await
             .unwrap();
-        if page.text.contains("400000") {
+        last = page.text;
+        if last.contains(&token) {
             seen = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(seen, "the shell output never reached the public page");
+    assert!(
+        seen,
+        "the shell output never reached the public page: {last:?}"
+    );
+    let terminal = platform
+        .wait(
+            WaitRequest {
+                task_id: "burst-command".into(),
+                timeout_ms: Some(30_000),
+            },
+            never_cancelled(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(terminal.status, WaitStatus::Exited);
+    platform
+        .settle(TaskRequest {
+            task_id: "burst-command".into(),
+        })
+        .await
+        .unwrap();
     platform
         .kill(TaskRequest {
             task_id: "burst-shell".into(),
