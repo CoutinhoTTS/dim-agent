@@ -110,7 +110,8 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
   的检查与递归删除）在本次请求自己的任务里前台完成，失败照样返回给调用方，记录只在删除成功后删除。删除结束时同一个任务把路径
   移出集合；外层请求被取消也不会提前移出，集合只在内存里，进程崩溃后半删的目录仍可按 task id 再删一次。
 - **正在删除**：集合只拦与登记路径相同、在其上或在其下的操作：`session.create` 与 `sessions.launch` 的 cwd、
-  `store.fork` 配置里的 cwd、`associate_worktree` 的根，以及同一路径的再次删除，都以 `worktree_in_use` 拒绝；
+  `store.fork` 配置里的 cwd、`associate_worktree` 的根、同一路径的再次删除，以及同一目录的记录删除
+  （`store.removeWorktreeDirectory`）都被拒绝（`worktree.remove` 报 `worktree_in_use`）；
   父路径方向也拒绝，因为它的内容正在被删（例如任务目录下的仓库），这期间不在其上新建 Session。删除结束后被删的目录
   自然通不过创建与关联的目录检查。不相关路径的创建、分叉、删除与关联不再等删除；复核之后也不会出现指向已删根的
   新 Session 或关联。
