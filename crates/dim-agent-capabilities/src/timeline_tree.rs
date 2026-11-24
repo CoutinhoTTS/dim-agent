@@ -5065,7 +5065,7 @@ impl BranchLine {
         } else if kind == "tool" {
             (
                 format!(
-                    "The session's default branch moved from this line to line {other}. This line stays open, reports to {parent} as before and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT} If end is refused when your purpose is done, message {parent} with what you found, did, changed and left undone and keep working."
+                    "The session's default branch moved from this line to line {other}. This line stays open, reports to {parent} as before and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT}"
                 ),
                 self.config.former_default_note.as_deref().unwrap_or(""),
             )

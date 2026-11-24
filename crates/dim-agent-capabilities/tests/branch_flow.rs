@@ -4865,6 +4865,10 @@ async fn a_former_default_tool_lines_note_reaches_the_model_request() {
                 !note.contains("How you work here:"),
                 "no guidance block without a configured one: {note}"
             );
+            assert!(
+                note.ends_with("Only a line opened with create can end itself, and not while it or a line below it is the default branch.\n</dim-branch-line>"),
+                "the shipped note ends with the end guard, not with an instruction: {note}"
+            );
         }
         soon(agent.close()).await.unwrap();
     }
