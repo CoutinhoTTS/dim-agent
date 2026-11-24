@@ -34,21 +34,32 @@ The bridge also bounds its own waits: a stream that delivers nothing for five
 minutes is `network`, with the reason `the stream delivered nothing for 300
 seconds`. The bound is per wait, not per request, so a reply that keeps
 streaming is never cut; an expired bound outranks a part that is ready at the
-same moment, and cancelling the request outranks both.
+same moment, and cancelling the request outranks both. A wait whose event has a
+producer-reported instant is judged against that instant: the transport reports
+the moment it produced the response headers, so headers written inside the
+allowance are on time even when the driver next polls after it. A wait with no
+such instant, the provider returning the stream and one stream part, keeps the
+deadline-first order.
 
 Three waits carry the bound. The wait for the response headers starts when the
 request is sent, so sending the body and following redirects count against it,
 and expires with the reason `no response headers arrived within 300 seconds of
-sending the request`. The wait for the first stream event starts when the
-response headers arrive and expires with the reason `the response headers
-arrived, but no stream event followed within 300 seconds`. The wait between
-stream parts expires with the reason `the stream delivered nothing for 300
-seconds`. A non-2xx response is handled differently: its body is a short
-diagnostic, and its read has its own total five-minute allowance, so a stalled
-error body cannot hold the request open, and the request still fails with the
-HTTP status and the kind that status names instead of an idle network failure.
-The connection's optional total timeout is unchanged and is still separate
-from these bounds.
+sending the request`. The wait for the stream to start begins when the
+transport produces the response headers. It expires with the reason `the
+response headers arrived, but no stream event followed within 300 seconds` for
+a provider that reads one stream event before it returns the stream (OpenAI
+Chat, Anthropic, Gemini, xAI Responses). It expires with the reason `the
+response headers arrived, but the stream did not start within 300 seconds` for
+the OpenAI Responses provider: its pinned SDK reads response metadata before it
+returns the stream, so that wait ends at the stream's start, not at an event
+the driver can see. The compatible and Bedrock providers return at the headers,
+so their first event falls under the wait between parts. That wait expires with
+the reason `the stream delivered nothing for 300 seconds`. A non-2xx response is
+handled differently: its body is a short diagnostic, and its read has its own
+total five-minute allowance, so a stalled error body cannot hold the request
+open, and the request still fails with the HTTP status and the kind that status
+names instead of an idle network failure. The connection's optional total
+timeout is unchanged and is still separate from these bounds.
 
 Only decoded stream parts renew the wait between parts. The provider parser
 drops SSE comments and Anthropic `ping` events before they reach the bridge, so

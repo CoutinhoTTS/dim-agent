@@ -23,9 +23,9 @@ aimux 桥接层是唯一持有提供方结构化错误、并看得到完整响�
 
 HTTP 连接或流的超时以传输 `ApiCall` 到达桥接层，是 `network`。`AiMuxError::Timeout` 在聊天调用中没有产生者；若它到达桥接层，是 `unknown`，且不重试。
 
-桥接层自己也给几段等待设上限：连续五分钟没有任何事件是 `network`，reason 为 `the stream delivered nothing for 300 seconds`。这个上限按每次等待计，不按整个请求计，所以持续有事件的回复不会被截断；上限到点时它优先于同时就绪的事件，取消请求又优先于两者。
+桥接层自己也给几段等待设上限：连续五分钟没有任何事件是 `network`，reason 为 `the stream delivered nothing for 300 seconds`。这个上限按每次等待计，不按整个请求计，所以持续有事件的回复不会被截断；上限到点时它优先于同时就绪的事件，取消请求又优先于两者。事件有生产者上报时刻的等待按那个时刻判定：传输层上报它产生响应头的时刻，所以在上限内写下的响应头，即使 driver 之后再 poll 也算按时。没有这种时刻的等待（provider 返回流、两个流分片之间）仍以上限优先。
 
-带上限的等待有三段。等响应头从发出请求开始计，发送请求体和跟随重定向都算在内，reason 为 `no response headers arrived within 300 seconds of sending the request`。等第一个流事件从收到响应头开始计，reason 为 `the response headers arrived, but no stream event followed within 300 seconds`。两次流事件之间的等待，reason 为 `the stream delivered nothing for 300 seconds`。非 2xx 响应另算：它的响应体是短的诊断信息，读取单独有总计五分钟的上限，卡住的错误体不能拖住请求，请求仍然按 HTTP 状态和该状态对应的类别失败，而不是变成空闲的网络失败。连接原来可选的整请求超时不变，和这几段上限是两件事。
+带上限的等待有三段。等响应头从发出请求开始计，发送请求体和跟随重定向都算在内，reason 为 `no response headers arrived within 300 seconds of sending the request`。等流启动从传输层产生响应头时开始计。先读一个流事件再返回流的 provider（OpenAI Chat、Anthropic、Gemini、xAI Responses），reason 为 `the response headers arrived, but no stream event followed within 300 seconds`。OpenAI Responses 的 provider 固定版本的 SDK 在返回流之前会读取响应元数据，它的 reason 为 `the response headers arrived, but the stream did not start within 300 seconds`：这段等待结束于流的启动，而不是 driver 看得到的事件。OpenAI 兼容和 Bedrock 的 provider 在响应头处就返回，它们的第一个事件落在两次事件之间的等待里，reason 为 `the stream delivered nothing for 300 seconds`。非 2xx 响应另算：它的响应体是短的诊断信息，读取单独有总计五分钟的上限，卡住的错误体不能拖住请求，请求仍然按 HTTP 状态和该状态对应的类别失败，而不是变成空闲的网络失败。连接原来可选的整请求超时不变，和这几段上限是两件事。
 
 只有解码出的流事件才续上两次事件之间的等待。提供方的解析器在事件到达桥接层之前就丢掉了 SSE 注释和 Anthropic 的 `ping` 事件，所以只靠 keep-alive 保活的连接仍然会在没有事件五分钟后失败。
 
