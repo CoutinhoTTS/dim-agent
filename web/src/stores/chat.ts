@@ -80,6 +80,12 @@ type QueuedLive =
   | { kind: "event"; event: SessionEvent }
   | { kind: "progress"; progress: ModelProgress }
 
+/** A queued item's part in the reconciliation: a snapshot, or a fact about the Timeline. */
+type QueuedFact = { event: SessionEvent } | { progress: ModelProgress }
+
+/** What a window's facts say about which requests were still producing at its cutoff. */
+type WindowFacts = { turnEnded: boolean; active: string | undefined; seen: ReadonlySet<string> }
+
 type BranchStream = {
   projection: Projection
   liveTask: Promise<void> | undefined
@@ -727,18 +733,46 @@ export const useChatStore = defineStore("chat", () => {
   }
 
   /**
-   * The requests a window's facts settle: its model and tool outputs, and the
-   * turn end that follows every request of the turn.
+   * Whether a snapshot taken before the window still describes output: only the
+   * request the turn read reports running at the cutoff, or one whose start
+   * arrived after it, does. A model or tool step is not an end (`output.rs`).
    */
-  function supersededRequests(events: readonly SessionEvent[]): { ended: Set<string>; turnEnded: boolean } {
+  function staleProgress(progress: ModelProgress, facts: WindowFacts, started: ReadonlySet<string>): boolean {
+    if (progress.requestId === undefined) return facts.turnEnded
+    if (started.has(progress.requestId) || progress.requestId === facts.active) return false
+    return facts.turnEnded || facts.active !== undefined || facts.seen.has(progress.requestId)
+  }
+
+  /** The requests the window holds an event of: each started at or before its cutoff. */
+  function seenRequests(events: readonly SessionEvent[]): Set<string> {
+    const seen = new Set<string>()
+    for (const event of events) if ("requestId" in event.content) seen.add(event.content.requestId)
+    return seen
+  }
+
+  /**
+   * The queued positions whose snapshot a later queued fact already answered.
+   * One connection delivered them in this order, so the snapshot was produced
+   * before that fact: a turn end or a model end ends the request, and a tool
+   * step writes the output before it, so the snapshot holds nothing it missed.
+   */
+  function settledSnapshots<T>(items: readonly T[], fact: (item: T) => QueuedFact | undefined): Set<number> {
+    const settled = new Set<number>()
     const ended = new Set<string>()
     let turnEnded = false
-    for (const event of events) {
-      const content = event.content
-      if (content.kind === "turn-end") turnEnded = true
-      else if (content.kind === "model-end" || content.kind === "tool-use-start" || content.kind === "tool-use") ended.add(content.requestId)
+    for (let index = items.length - 1; index >= 0; index--) {
+      const queued = fact(items[index]!)
+      if (queued === undefined) continue
+      if ("event" in queued) {
+        const content = queued.event.content
+        if (content.kind === "turn-end") turnEnded = true
+        else if (content.kind === "model-end" || content.kind === "tool-use-start" || content.kind === "tool-use") ended.add(content.requestId)
+        continue
+      }
+      const requestId = queued.progress.requestId
+      if (requestId !== undefined && (turnEnded || ended.has(requestId))) settled.add(index)
     }
-    return { ended, turnEnded }
+    return settled
   }
 
   /**
@@ -757,13 +791,6 @@ export const useChatStore = defineStore("chat", () => {
     return started
   }
 
-  /** Whether a window's facts already superseded a snapshot taken before it. */
-  function staleProgress(progress: ModelProgress, window: { ended: Set<string>; turnEnded: boolean }, active: string | undefined, started: ReadonlySet<string>): boolean {
-    if (progress.requestId === undefined) return window.turnEnded
-    if (started.has(progress.requestId)) return false
-    return window.ended.has(progress.requestId) || (window.turnEnded && progress.requestId !== active)
-  }
-
   async function loadHistory(channel: Channel, branchId: string): Promise<"ok" | "lost" | "failed"> {
     const branch = ensureBranch(channel, branchId)
     branch.syncing = true
@@ -772,11 +799,9 @@ export const useChatStore = defineStore("chat", () => {
     for (let attempt = 0; ; attempt++) {
       try {
         const loaded = await window(channel, branchId)
-        // What arrived before the window returned may already be inside it; a
-        // progress notice from that interval has no sequence of its own, so
-        // the window's facts decide whether it still describes anything.
-        const queuedAtWindow = branch.queued.length
-        const channelAtWindow = channel.queued.length
+        // A progress notice from that interval has no sequence of its own: the
+        // window's facts, and the queue's own order, decide whether it still
+        // describes anything.
         const through = loaded.window.through!
         await restoreControls(channel, branchId, loaded.projection, through)
         if (branchId !== ROOT_BRANCH_ID) channel.lines.detail(await client().call("session.branch.get", { sessionId: channel.view.sessionId, branchId }, readBranchDetail))
@@ -785,20 +810,18 @@ export const useChatStore = defineStore("chat", () => {
         branch.projection = loaded.projection
         branch.before = loaded.window.before
         branch.through = through
-        const settled = supersededRequests(loaded.events)
-        const active = loaded.projection.activeRequestId()
+        const facts: WindowFacts = { turnEnded: loaded.projection.lastTurnEnd !== undefined, active: loaded.projection.activeRequestId(), seen: seenRequests(loaded.events) }
         const started = startedRequests(branch, channel, branchId, through)
-        if (branch.progress !== undefined && staleProgress(branch.progress, settled, active, started)) branch.progress = undefined
-        const head = branch.queued.slice(0, queuedAtWindow)
-        const tail = branch.queued.slice(queuedAtWindow)
-        branch.queued = [
-          ...head.filter(item => item.kind === "event" ? item.event.sequence > through : !staleProgress(item.progress, settled, active, started)),
-          ...tail.filter(item => item.kind === "event" ? item.event.sequence > through : true),
-        ]
-        channel.queued = [
-          ...channel.queued.slice(0, channelAtWindow).filter(notification => notification.method !== "session.model.progress" || notification.progress.branchId !== branchId || !staleProgress(notification.progress, settled, active, started)),
-          ...channel.queued.slice(channelAtWindow),
-        ]
+        if (branch.progress !== undefined && staleProgress(branch.progress, facts, started)) branch.progress = undefined
+        const queuedSettled = settledSnapshots(branch.queued, item => item.kind === "event" ? { event: item.event } : { progress: item.progress })
+        branch.queued = branch.queued.filter((item, index) => !queuedSettled.has(index)
+          && (item.kind === "event" ? item.event.sequence > through : !staleProgress(item.progress, facts, started)))
+        const notifiedSettled = settledSnapshots(channel.queued, notification =>
+          notification.method === "session.model.progress" && notification.progress.branchId === branchId ? { progress: notification.progress }
+            : (notification.method === "session.event" || notification.method === "session.display") && notification.branchId === branchId ? { event: notification.event }
+              : undefined)
+        channel.queued = channel.queued.filter((notification, index) => !notifiedSettled.has(index)
+          && (notification.method !== "session.model.progress" || notification.progress.branchId !== branchId || !staleProgress(notification.progress, facts, started)))
         branch.syncing = false
         await consumeLive(channel, branchId)
         branch.done = true

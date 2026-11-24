@@ -303,8 +303,9 @@ export class Projection {
         this.settleRows()
         for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId, event.createAt)
         for (const requestId of [...this.answers.keys()]) this.closeAnswer(requestId)
+        // A request whose end this line applied never writes again, so what
+        // ended stays ended; the watermarks only matter while it may still write.
         this.discardedThoughts.clear()
-        this.endedRequests.clear()
         this.writtenText.clear()
         this.writtenThinking.clear()
         // The marker belongs to this turn only, whatever the outcome.
@@ -334,24 +335,25 @@ export class Projection {
     const thinking = [...progress.thinking].length
     const writtenText = this.writtenText.get(requestId) ?? 0
     const writtenThinking = this.writtenThinking.get(requestId)
-    if (progress.thinking !== "") {
-      if (progress.textOffset + text < writtenText) return
-      if (writtenThinking !== undefined) {
-        if (progress.thinkingOffset + thinking <= writtenThinking.chars) return
-        if (progress.thinkingOffset < writtenThinking.chars
+    // A notice whose text trails what the Timeline holds describes a replaced
+    // attempt: none of it is current.
+    if (progress.thinking !== "" && progress.textOffset + text < writtenText) return
+    // Each half answers to its own watermark, so a thought the Timeline already
+    // holds does not hold back the text beside it, nor the text the thought.
+    const showThinking = progress.thinking !== "" && (writtenThinking === undefined
+      || (progress.thinkingOffset + thinking > writtenThinking.chars
+        && !(progress.thinkingOffset < writtenThinking.chars
           && progress.thinkingPartId !== undefined && progress.thinkingPartId !== ""
           && writtenThinking.partId !== undefined && writtenThinking.partId !== ""
-          && progress.thinkingPartId !== writtenThinking.partId) return
-      }
-    }
-    if (progress.text !== "" && progress.textOffset + text <= writtenText) return
+          && progress.thinkingPartId !== writtenThinking.partId)))
+    const showText = progress.text !== "" && progress.textOffset + text > writtenText
     const reclaimed = progress.thinkingPartId !== undefined && this.discardedThoughts.get(requestId)?.has(progress.thinkingPartId) === true
     const thought = this.thoughts.get(requestId)
     if (!reclaimed && thought !== undefined && thought.written === "" && this.replacedAttempt(progress, thought)) {
       this.discardThinking(requestId)
       if (this.showedThinking.delete(requestId)) this.showedOutput.delete(requestId)
     }
-    if (progress.thinking !== "" && !reclaimed) {
+    if (showThinking && !reclaimed) {
       if (!this.showedOutput.has(requestId)) {
         this.showedOutput.add(requestId)
         this.showedThinking.add(requestId)
@@ -362,7 +364,7 @@ export class Projection {
       thought.progress = { text: progress.thinking, offset: progress.thinkingOffset }
       this.update(thought.index, { text: shown(thought) })
     }
-    if (progress.text !== "") {
+    if (showText) {
       this.showedOutput.add(requestId)
       this.showedThinking.delete(requestId)
       const answer = this.openAnswer(requestId)
