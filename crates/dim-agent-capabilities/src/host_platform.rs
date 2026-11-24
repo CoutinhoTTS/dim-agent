@@ -379,6 +379,8 @@ pub enum WaitStatus {
 pub struct WaitReply {
     pub status: WaitStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signal: Option<String>,
@@ -389,7 +391,38 @@ pub struct WaitReply {
     pub preview: String,
     pub preview_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TaskFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_note: Option<String>,
+}
+
+/// Why a task reached a failed or cancelled terminal record.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum TaskFailure {
+    OutputWriteFailed { message: String },
+    TerminateFailed { message: String },
+    JobUnavailable { message: String },
+    ShellExited,
+    ShellReset,
+    CommandFailed,
+    UnknownExit,
+    OwnerUnloaded,
+}
+
+impl std::fmt::Display for TaskFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OutputWriteFailed { message }
+            | Self::TerminateFailed { message }
+            | Self::JobUnavailable { message } => f.write_str(message),
+            Self::ShellExited => f.write_str("shell exited"),
+            Self::ShellReset => f.write_str("shell reset"),
+            Self::CommandFailed => f.write_str("command failed"),
+            Self::UnknownExit => f.write_str("command ended with an unknown exit"),
+            Self::OwnerUnloaded => f.write_str("execution owner unloaded"),
+        }
+    }
 }
 
 /// A page of a task's captured output.
@@ -630,18 +663,40 @@ pub enum HostPlatformError {
     Invalid(String),
     #[error("invalid path {path}: {reason}")]
     InvalidPath { path: String, reason: String },
+    #[error("the confined helper exceeded its timeout")]
+    TimedOut,
+    #[error("the confined helper reached its {stream} limit")]
+    OutputLimit { stream: ConfinedStream },
     #[error("unknown execution task")]
     TaskUnknown,
     #[error("execution task already exists")]
     TaskExists,
     #[error("execution task is still running")]
     TaskRunning,
+    #[error("execution task has ended")]
+    TaskEnded,
     #[error("output unavailable: {0}")]
     OutputUnavailable(String),
     #[error("cancelled")]
     Cancelled,
     #[error("execution host closed")]
     Closed,
+    #[error("{0}")]
+    Io(String),
+    #[error("isolation configuration is invalid: {0}")]
+    IsolationConfigInvalid(String),
+    #[error("isolation is unavailable: {0}")]
+    IsolationUnavailable(String),
+    #[error("exec shell configuration is invalid: {0}")]
+    ExecShellConfigInvalid(String),
+    #[error("exec shell is unavailable: {0}")]
+    ExecShellUnavailable(String),
+    #[error("exec shell does not support this working directory: {0}")]
+    ExecShellCwdUnsupported(String),
+    #[error("working directory not found: {0}")]
+    CwdNotFound(String),
+    #[error("exec shell path mapping failed: {0}")]
+    ExecShellPathMappingFailed(String),
     #[error("{0}")]
     Failed(String),
 }
@@ -784,8 +839,14 @@ impl HostPlatform {
                     reason,
                 }
             }
+            confined::ConfinedError::TimedOut => HostPlatformError::TimedOut,
+            confined::ConfinedError::OutputLimit { stream } => {
+                HostPlatformError::OutputLimit { stream }
+            }
             confined::ConfinedError::Cancelled => HostPlatformError::Cancelled,
-            _ => HostPlatformError::Failed(error.to_string()),
+            confined::ConfinedError::Spawn(error) | confined::ConfinedError::Cleanup(error) => {
+                HostPlatformError::Io(error.to_string())
+            }
         })?;
         Ok(ConfinedReply {
             status: output.status.code(),
@@ -810,12 +871,12 @@ impl HostPlatform {
         let path = PathBuf::from(request.path);
         tokio::task::spawn_blocking(move || platform.remove_exec_directory(&path))
             .await
-            .map_err(|error| HostPlatformError::Failed(error.to_string()))?
+            .map_err(|error| HostPlatformError::Io(error.to_string()))?
             .map_err(|error| {
                 if error.kind() == io::ErrorKind::InvalidInput {
                     HostPlatformError::Invalid(error.to_string())
                 } else {
-                    HostPlatformError::Failed(error.to_string())
+                    HostPlatformError::Io(error.to_string())
                 }
             })
     }
@@ -854,14 +915,18 @@ impl HostPlatform {
         let end = self
             .configured(command, &cancel, None)
             .await
-            .map_err(|error| {
-                let stderr = String::from_utf8_lossy(error.stderr()).into_owned();
-                let reason = error.to_string();
-                HostPlatformError::Failed(if stderr.is_empty() {
-                    reason
-                } else {
-                    format!("{reason}: {stderr}")
-                })
+            .map_err(|error| match error {
+                ConfiguredError::Prepare(error) => Self::process_error(error),
+                ConfiguredError::Unloaded => HostPlatformError::Closed,
+                ConfiguredError::Spawn(error) => HostPlatformError::Io(error.to_string()),
+                ConfiguredError::Wait(error, stderr) => {
+                    let reason = format!("wait failed: {error}");
+                    HostPlatformError::Io(if stderr.is_empty() {
+                        reason
+                    } else {
+                        format!("{reason}: {}", String::from_utf8_lossy(&stderr))
+                    })
+                }
             })?;
         waiter.abort();
         let duration_ms = started.elapsed().as_millis() as u64;
@@ -1066,7 +1131,24 @@ impl HostPlatform {
     fn process_error(error: ProcessSpecError) -> HostPlatformError {
         match error.code {
             "task_exists" => HostPlatformError::TaskExists,
+            "task_ended" => HostPlatformError::TaskEnded,
             "cancelled" => HostPlatformError::Cancelled,
+            "io" => HostPlatformError::Io(error.reason),
+            "isolation_config_invalid" => HostPlatformError::IsolationConfigInvalid(error.reason),
+            "isolation_unavailable" => HostPlatformError::IsolationUnavailable(error.reason),
+            "exec_shell_config_invalid" | EXEC_SHELL_CONFIG_INVALID => {
+                HostPlatformError::ExecShellConfigInvalid(error.reason)
+            }
+            "exec_shell_unavailable" | EXEC_SHELL_UNAVAILABLE => {
+                HostPlatformError::ExecShellUnavailable(error.reason)
+            }
+            "exec_shell_cwd_unsupported" | "EXEC_SHELL_CWD_UNSUPPORTED" => {
+                HostPlatformError::ExecShellCwdUnsupported(error.reason)
+            }
+            "cwd_not_found" => HostPlatformError::CwdNotFound(error.reason),
+            "exec_shell_path_mapping_failed" | "EXEC_SHELL_PATH_MAPPING_FAILED" => {
+                HostPlatformError::ExecShellPathMappingFailed(error.reason)
+            }
             "invalid_request" | "exec_invalid_request" => {
                 HostPlatformError::Invalid(format!("{}: {}", error.code, error.reason))
             }
@@ -1166,24 +1248,20 @@ impl HostPlatform {
             TaskKind::Command(command) => {
                 command.kill.cancel();
                 let terminal = task.wait(None).await;
-                match terminal.status {
-                    WaitStatus::Failed => Err(HostPlatformError::Failed(
-                        task.terminal()
-                            .and_then(|terminal| terminal.failure.clone())
-                            .unwrap_or_else(|| "execution task failed".into()),
-                    )),
+                match terminal.failure {
+                    Some(TaskFailure::TerminateFailed { message }) => {
+                        Err(HostPlatformError::Failed(message))
+                    }
                     _ => Ok(()),
                 }
             }
             TaskKind::Shell(shell) => {
                 shell.terminate();
                 let terminal = task.wait(None).await;
-                match terminal.status {
-                    WaitStatus::Failed => Err(HostPlatformError::Failed(
-                        task.terminal()
-                            .and_then(|terminal| terminal.failure.clone())
-                            .unwrap_or_else(|| "execution task failed".into()),
-                    )),
+                match terminal.failure {
+                    Some(TaskFailure::TerminateFailed { message }) => {
+                        Err(HostPlatformError::Failed(message))
+                    }
                     _ => Ok(()),
                 }
             }
@@ -1205,14 +1283,14 @@ impl HostPlatform {
                 };
                 kill_job(pid)
                     .await
-                    .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
+                    .map_err(|error| HostPlatformError::Io(error.to_string()))?;
                 task.finish(Terminal {
                     status: TaskStatus::Cancelled,
                     exit_code: None,
                     signal: None,
                     duration_ms: task.started.elapsed().as_millis() as u64,
                     failure: None,
-                    output: job.output_record(),
+                    output: job.output_record().0,
                     note: None,
                 });
                 Ok(())
@@ -1231,7 +1309,7 @@ impl HostPlatform {
         let mut commands = self.commands.lock().unwrap();
         commands.remove(&request.task_id);
         if let TaskKind::Shell(shell) = &task.kind {
-            shell.sweep();
+            shell.sweep(task.terminal());
             for child in shell.children_list() {
                 commands.remove(&child.id);
             }
@@ -1311,7 +1389,7 @@ impl HostPlatform {
         }
         tokio::fs::create_dir_all(&output_dir)
             .await
-            .map_err(|error| HostPlatformError::Failed(error.to_string()))?;
+            .map_err(|error| HostPlatformError::Io(error.to_string()))?;
         let (shell, _) = self
             .start_shell(
                 &request.task_id,
@@ -1430,7 +1508,7 @@ impl HostPlatform {
                 self.commands.lock().unwrap().remove(id);
             }
             shell.set_active_command(None);
-            return Err(HostPlatformError::Failed(error.to_string()));
+            return Err(HostPlatformError::Io(error.to_string()));
         }
         if let Some((_, record)) = &command {
             record.start();
@@ -1452,7 +1530,7 @@ impl HostPlatform {
                 rows: request.rows,
             })
             .await
-            .map_err(|error| HostPlatformError::Failed(error.to_string()))
+            .map_err(|error| HostPlatformError::Io(error.to_string()))
     }
 
     /// Reads a page of a task's captured output.
@@ -1491,6 +1569,23 @@ impl HostPlatform {
         }
         if let Some(command) = self.shell_command(&request.task_id) {
             return Ok(command.page(request.cursor.unwrap_or(0), limit));
+        }
+        if let Some(page) = self
+            .task(&request.task_id)
+            .and_then(|task| task.terminal_page(request.cursor.unwrap_or(0), limit))
+        {
+            return Ok(OutputPageReply {
+                text: page.text,
+                bytes: page.bytes,
+                next_cursor: page.next_cursor,
+                truncated: page.truncated,
+                retained_from: 0,
+                reset: None,
+                events: Vec::new(),
+                next_event_cursor: None,
+                event_retained_from: None,
+                state: None,
+            });
         }
         let task = self.command_task(&request.task_id)?;
         let page = task
@@ -1540,6 +1635,15 @@ impl HostPlatform {
         }
         if let Some(command) = self.shell_command(&request.task_id) {
             return Ok(command.tail());
+        }
+        if let Some(terminal) = self.task(&request.task_id).and_then(|task| task.terminal())
+            && let Some(text) = &terminal.output.text
+        {
+            return Ok(crate::workspace_tools::exec::OutputTail {
+                text: crate::host_platform::output::truncate_preview(text),
+                total_bytes: terminal.output.bytes,
+                truncated: terminal.output.truncated,
+            });
         }
         self.tail_by_id(&request.task_id).await.map_err(Into::into)
     }
@@ -3646,7 +3750,6 @@ pub(crate) mod shell {
                 text: None,
                 preview: state.tail.clone(),
                 preview_truncated: state.omitted > 0,
-                failure: None,
             }
         }
 
@@ -3710,33 +3813,46 @@ pub(crate) mod shell {
     }
 
     impl ShellJob {
-        pub(crate) fn output_record(&self) -> super::OutputRecord {
+        pub(crate) fn output_record(&self) -> (super::OutputRecord, Option<super::TaskFailure>) {
             use std::io::{Read, Seek, SeekFrom};
             let bytes = std::fs::metadata(&self.output_path)
                 .map(|metadata| metadata.len())
                 .unwrap_or(0);
-            let text = std::fs::File::open(&self.output_path).map_or_else(
-                |_| String::new(),
+            let (text, failure) = std::fs::File::open(&self.output_path).map_or_else(
+                |error| {
+                    (
+                        String::new(),
+                        Some(super::TaskFailure::JobUnavailable {
+                            message: error.to_string(),
+                        }),
+                    )
+                },
                 |mut file| {
                     let window = 64 * 1024;
                     if bytes > window {
                         let _ = file.seek(SeekFrom::End(-(window as i64)));
                     }
                     let mut tail = Vec::new();
-                    let _ = file.read_to_end(&mut tail);
-                    String::from_utf8_lossy(&tail).into_owned()
+                    let read = file.read_to_end(&mut tail);
+                    let text = String::from_utf8_lossy(&tail).into_owned();
+                    let failure = read.err().map(|error| super::TaskFailure::JobUnavailable {
+                        message: error.to_string(),
+                    });
+                    (text, failure)
                 },
             );
             let (preview, preview_truncated) = bounded_preview(&text, bytes as usize);
-            super::OutputRecord {
-                path: self.output_path.to_string_lossy().into_owned(),
-                bytes,
-                truncated: false,
-                text: None,
-                preview,
-                preview_truncated,
-                failure: None,
-            }
+            (
+                super::OutputRecord {
+                    path: self.output_path.to_string_lossy().into_owned(),
+                    bytes,
+                    truncated: false,
+                    text: None,
+                    preview,
+                    preview_truncated,
+                },
+                failure,
+            )
         }
     }
 
@@ -4042,7 +4158,7 @@ pub(crate) mod shell {
                                             duration_ms: record.started.elapsed().as_millis()
                                                 as u64,
                                             failure: None,
-                                            output: job.output_record(),
+                                            output: job.output_record().0,
                                             note: None,
                                         });
                                     }
@@ -4118,7 +4234,7 @@ pub(crate) mod shell {
                         biased;
                         _=poll.tick()=>None,
                         _=worker.kill.cancelled()=>Some("cancelled"),
-                        _=shutdown.cancelled()=>Some("cancelled"),
+                        _=shutdown.cancelled()=>Some("unloaded"),
                     };
                     let mut guard = worker.pty.lock().await;
                     let tree = guard.as_mut().expect("shell worker owns the process");
@@ -4198,7 +4314,18 @@ pub(crate) mod shell {
                 .collect()
         }
 
-        pub(crate) fn sweep(&self) {
+        pub(crate) fn sweep(&self, shell_terminal: Option<Arc<super::Terminal>>) {
+            let failure = match &shell_terminal {
+                Some(terminal)
+                    if matches!(&terminal.failure, Some(super::TaskFailure::OwnerUnloaded)) =>
+                {
+                    super::TaskFailure::OwnerUnloaded
+                }
+                Some(terminal) if terminal.status == super::TaskStatus::Cancelled => {
+                    super::TaskFailure::ShellReset
+                }
+                _ => super::TaskFailure::ShellExited,
+            };
             for record in self.children_list() {
                 if record.is_terminal() {
                     continue;
@@ -4209,7 +4336,7 @@ pub(crate) mod shell {
                         if let Some(pid) = *job.pid.borrow() {
                             let _ = terminate_job(pid);
                         }
-                        job.output_record()
+                        job.output_record().0
                     }
                     _ => super::OutputRecord::default(),
                 };
@@ -4218,7 +4345,7 @@ pub(crate) mod shell {
                     exit_code: None,
                     signal: None,
                     duration_ms: record.started.elapsed().as_millis() as u64,
-                    failure: Some("shell_exited".into()),
+                    failure: Some(failure.clone()),
                     output,
                     note: None,
                 });
@@ -4241,7 +4368,6 @@ pub(crate) mod shell {
                 text: None,
                 preview,
                 preview_truncated,
-                failure: None,
             }
         }
 
@@ -4351,29 +4477,47 @@ pub(crate) mod shell {
         command: &ShellCommand,
         code: String,
     ) -> super::Terminal {
-        let status = match code.as_str() {
-            "0" => super::TaskStatus::Exited,
-            _ => super::TaskStatus::Failed,
+        let (status, failure) = match code.as_str() {
+            "0" => (super::TaskStatus::Exited, None),
+            "failed" => (
+                super::TaskStatus::Failed,
+                Some(super::TaskFailure::CommandFailed),
+            ),
+            other => match other.parse::<i32>() {
+                Ok(_) => (
+                    super::TaskStatus::Failed,
+                    Some(super::TaskFailure::CommandFailed),
+                ),
+                Err(_) => (
+                    super::TaskStatus::Failed,
+                    Some(super::TaskFailure::UnknownExit),
+                ),
+            },
         };
         super::Terminal {
             status,
             exit_code: code.parse().ok(),
             signal: None,
             duration_ms: record.started.elapsed().as_millis() as u64,
-            failure: (status == super::TaskStatus::Failed).then(|| code.clone()),
+            failure,
             output: command.output_record(),
             note: None,
         }
     }
 
     fn job_terminal(record: &super::TaskRecord, job: &ShellJob) -> super::Terminal {
+        let (output, failure) = job.output_record();
         super::Terminal {
-            status: super::TaskStatus::Exited,
+            status: if failure.is_some() {
+                super::TaskStatus::Failed
+            } else {
+                super::TaskStatus::Exited
+            },
             exit_code: None,
             signal: None,
             duration_ms: record.started.elapsed().as_millis() as u64,
-            failure: None,
-            output: job.output_record(),
+            failure,
+            output,
             note: None,
         }
     }
@@ -4385,11 +4529,13 @@ pub(crate) mod shell {
         status: &str,
         error: Option<String>,
     ) -> super::Terminal {
-        let status = match status {
+        let status_text = status;
+        let status = match status_text {
             "exited" => super::TaskStatus::Exited,
             "signaled" => super::TaskStatus::Signaled,
             "timed_out" => super::TaskStatus::TimedOut,
             "cancelled" => super::TaskStatus::Cancelled,
+            "unloaded" => super::TaskStatus::Cancelled,
             _ => super::TaskStatus::Failed,
         };
         let (exit_code, signal) = match exit.as_ref() {
@@ -4399,12 +4545,25 @@ pub(crate) mod shell {
             ),
             None => (None, None),
         };
+        let failure = match status {
+            super::TaskStatus::Cancelled if status_text == "unloaded" => {
+                Some(super::TaskFailure::OwnerUnloaded)
+            }
+            super::TaskStatus::Failed => {
+                error
+                    .as_ref()
+                    .map(|message| super::TaskFailure::TerminateFailed {
+                        message: message.clone(),
+                    })
+            }
+            _ => None,
+        };
         super::Terminal {
             status,
             exit_code,
             signal,
             duration_ms: record.started.elapsed().as_millis() as u64,
-            failure: error.clone(),
+            failure,
             output,
             note: error,
         }
@@ -4464,15 +4623,6 @@ pub(crate) enum ConfiguredError {
     Unloaded,
     Spawn(std::io::Error),
     Wait(std::io::Error, Vec<u8>),
-}
-
-impl ConfiguredError {
-    pub(crate) fn stderr(&self) -> &[u8] {
-        match self {
-            Self::Wait(_, stderr) => stderr,
-            _ => &[],
-        }
-    }
 }
 
 impl std::fmt::Display for ConfiguredError {

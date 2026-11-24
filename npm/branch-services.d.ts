@@ -181,15 +181,29 @@ export type ConfinedReply = {
   confined: boolean
 }
 
+/** The output stream that reached its limit. */
+export type ConfinedStream = "stdout" | "stderr"
+
 export type HostPlatformError =
   | { invalid: string }
   | { invalid_path: { path: string; reason: string } }
+  | "timed_out"
+  | { output_limit: { stream: ConfinedStream } }
   | "task_unknown"
   | "task_exists"
   | "task_running"
+  | "task_ended"
   | { output_unavailable: string }
   | "cancelled"
   | "closed"
+  | { io: string }
+  | { isolation_config_invalid: string }
+  | { isolation_unavailable: string }
+  | { exec_shell_config_invalid: string }
+  | { exec_shell_unavailable: string }
+  | { exec_shell_cwd_unsupported: string }
+  | { cwd_not_found: string }
+  | { exec_shell_path_mapping_failed: string }
   | { failed: string }
 
 /**
@@ -297,9 +311,21 @@ export type WaitRequest = {
 /** How a wait reply ended, or that it is still running. */
 export type WaitStatus = "running" | "exited" | "signaled" | "timed_out" | "cancelled" | "failed"
 
+/** Why a task reached a failed or cancelled terminal record. */
+export type TaskFailure =
+  | { code: "output_write_failed"; message: string }
+  | { code: "terminate_failed"; message: string }
+  | { code: "job_unavailable"; message: string }
+  | { code: "shell_exited" }
+  | { code: "shell_reset" }
+  | { code: "command_failed" }
+  | { code: "unknown_exit" }
+  | { code: "owner_unloaded" }
+
 /** A wait reply; terminal when the task ended, `running` when the wait deadline elapsed. */
 export type WaitReply = {
   status: WaitStatus
+  text?: string | null
   exitCode?: number | null
   signal?: string | null
   durationMs: number | bigint
@@ -308,6 +334,7 @@ export type WaitReply = {
   outputTruncated: boolean
   preview: string
   previewTruncated: boolean
+  failure?: TaskFailure | null
   failureNote?: string | null
 }
 
@@ -1721,7 +1748,7 @@ export type ErrorThrown = RustError<"Error", string, undefined>
 export type HostErrorThrown = RustError<"HostError", "Failed" | "Cancelled", undefined>
 
 /** What a method returning `Err(HostPlatformError)` throws. */
-export type HostPlatformErrorThrown = RustError<"HostPlatformError", "invalid" | "invalid_path" | "task_unknown" | "task_exists" | "task_running" | "output_unavailable" | "cancelled" | "closed" | "failed", HostPlatformError>
+export type HostPlatformErrorThrown = RustError<"HostPlatformError", "invalid" | "invalid_path" | "timed_out" | "output_limit" | "task_unknown" | "task_exists" | "task_running" | "task_ended" | "output_unavailable" | "cancelled" | "closed" | "io" | "isolation_config_invalid" | "isolation_unavailable" | "exec_shell_config_invalid" | "exec_shell_unavailable" | "exec_shell_cwd_unsupported" | "cwd_not_found" | "exec_shell_path_mapping_failed" | "failed", HostPlatformError>
 
 /** What a method returning `Err(ListenAddressesError)` throws. */
 export type ListenAddressesErrorThrown = RustError<"ListenAddressesError", "invalid_path", ListenAddressesError>

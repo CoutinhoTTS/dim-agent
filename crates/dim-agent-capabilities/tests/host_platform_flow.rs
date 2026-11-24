@@ -1,4 +1,5 @@
 //! HostPlatform acceptance on Unix (`docs/architecture/rust-agent/plugins/HostPlatform.md`).
+use base64::Engine;
 use dim_agent_capabilities::execution_settings::{ExecutionSettings, ExecutionSettingsHost};
 use dim_agent_capabilities::host_platform::*;
 use dim_agent_capabilities::toolchain::{InstalledToolchain, ToolchainSourceHost};
@@ -1226,6 +1227,21 @@ async fn the_host_platform_service_answers_info() {
     );
 }
 
+#[test]
+fn task_failure_serializes_with_its_code() {
+    assert_eq!(
+        serde_json::to_value(TaskFailure::OutputWriteFailed {
+            message: "disk full".into()
+        })
+        .unwrap(),
+        serde_json::json!({"code": "output_write_failed", "message": "disk full"})
+    );
+    assert_eq!(
+        serde_json::to_value(TaskFailure::ShellExited).unwrap(),
+        serde_json::json!({"code": "shell_exited"})
+    );
+}
+
 #[tokio::test]
 async fn the_host_platform_service_starts_and_waits_for_a_command() {
     let dir = std::env::temp_dir().join(unique("dim-host-service"));
@@ -1298,6 +1314,8 @@ async fn the_host_platform_service_starts_and_waits_for_a_command() {
     )
     .unwrap();
     assert_eq!(terminal["status"], "exited");
+    assert_eq!(terminal["text"], "hi");
+    assert!(terminal.get("failure").is_none());
     assert_eq!(terminal["preview"], "hi");
     assert_eq!(terminal["outputPath"], spawn["outputPath"]);
     let page = invoke(
@@ -1321,6 +1339,59 @@ async fn the_host_platform_service_starts_and_waits_for_a_command() {
         .await
         .unwrap_err();
     assert!(matches!(missing, HostPlatformError::TaskUnknown));
+
+    platform
+        .spawn(SpawnRequest {
+            task_id: "long-task".into(),
+            command: "seq 1 2500".into(),
+            cwd: path.clone(),
+            workspace: path.clone(),
+            roots: Vec::new(),
+            output_dir: path.clone(),
+            timeout_ms: Some(10_000),
+        })
+        .await
+        .unwrap();
+    let long = platform
+        .wait(
+            WaitRequest {
+                task_id: "long-task".into(),
+                timeout_ms: None,
+            },
+            never_cancelled(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(long.status, WaitStatus::Exited);
+    let text = long.text.expect("an inline task keeps its complete text");
+    assert_eq!(text.lines().count(), 2_500);
+    assert!(long.preview.lines().count() <= 2_000);
+    assert!(long.preview.lines().count() < text.lines().count());
+    let retained = platform
+        .retain_output(TaskRequest {
+            task_id: "long-task".into(),
+        })
+        .await
+        .unwrap();
+    let file = std::fs::read_to_string(&retained.output_path).unwrap();
+    assert_eq!(file, text);
+    let page = platform
+        .output(OutputRequest {
+            task_id: "long-task".into(),
+            cursor: None,
+            limit: Some(64 * 1024),
+            wait_ms: None,
+            event_cursor: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(page.text, text);
+    platform
+        .settle(TaskRequest {
+            task_id: "long-task".into(),
+        })
+        .await
+        .unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -1950,6 +2021,40 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
     platform
         .settle(TaskRequest {
             task_id: "owner-command".into(),
+        })
+        .await
+        .unwrap();
+    let failing = "printf '%s%s' '__DIM_START_aaaabbbb_' 'ccccdddd__'; false; printf '%s%s%d\\n' '__DIM_END_eeeeffff_' '00001111__' 3\n";
+    platform
+        .write(ShellWrite {
+            task_id: "capture-shell".into(),
+            data: base64::engine::general_purpose::STANDARD.encode(failing.as_bytes()),
+            command: Some(ShellCommandStart {
+                task_id: "failing-command".into(),
+                start_marker: "__DIM_START_aaaabbbb_ccccdddd__".into(),
+                end_marker: "__DIM_END_eeeeffff_00001111__".into(),
+            }),
+            job: None,
+        })
+        .await
+        .unwrap();
+    let failed = platform
+        .wait(
+            WaitRequest {
+                task_id: "failing-command".into(),
+                timeout_ms: Some(10_000),
+            },
+            never_cancelled(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(failed.status, WaitStatus::Failed);
+    assert_eq!(failed.exit_code, Some(3));
+    assert_eq!(failed.failure, Some(TaskFailure::CommandFailed));
+    assert_eq!(failed.text, None);
+    platform
+        .settle(TaskRequest {
+            task_id: "failing-command".into(),
         })
         .await
         .unwrap();

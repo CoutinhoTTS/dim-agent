@@ -9,7 +9,8 @@ use std::{
 
 use tokio::sync::watch;
 
-use super::{WaitReply, WaitStatus, shell};
+use super::{TaskFailure, WaitReply, WaitStatus, shell};
+use crate::workspace_tools::background::{OutputPage, PAGE_CHAR_TRAILING_BYTES, decode_page};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TaskStatus {
@@ -40,7 +41,6 @@ pub(crate) struct OutputRecord {
     pub(crate) text: Option<String>,
     pub(crate) preview: String,
     pub(crate) preview_truncated: bool,
-    pub(crate) failure: Option<String>,
 }
 
 pub(crate) struct Terminal {
@@ -48,7 +48,7 @@ pub(crate) struct Terminal {
     pub(crate) exit_code: Option<i32>,
     pub(crate) signal: Option<String>,
     pub(crate) duration_ms: u64,
-    pub(crate) failure: Option<String>,
+    pub(crate) failure: Option<TaskFailure>,
     pub(crate) output: OutputRecord,
     pub(crate) note: Option<String>,
 }
@@ -125,16 +125,29 @@ impl TaskRecord {
     fn after_terminal(&self) {
         match &self.kind {
             TaskKind::ShellCommand(command) => command.shell.clear_active(self),
-            TaskKind::Shell(shell) => shell.sweep(),
+            TaskKind::Shell(shell) => shell.sweep(self.terminal()),
             TaskKind::Command(_) | TaskKind::Job(_) => {}
         }
+    }
+
+    pub(crate) fn terminal_page(&self, cursor: u64, limit: usize) -> Option<OutputPage> {
+        let terminal = self.terminal()?;
+        let text = terminal.output.text.as_ref()?;
+        let bytes = text.as_bytes();
+        let start = usize::try_from(cursor)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let end = start
+            .saturating_add(limit + PAGE_CHAR_TRAILING_BYTES)
+            .min(bytes.len());
+        decode_page(&bytes[start..end], cursor, limit, terminal.output.truncated).ok()
     }
 
     pub(crate) async fn output_snapshot(&self) -> OutputRecord {
         match &self.kind {
             TaskKind::Command(command) => command.output_record().await,
             TaskKind::ShellCommand(command) => command.output_record(),
-            TaskKind::Job(job) => job.output_record(),
+            TaskKind::Job(job) => job.output_record().0,
             TaskKind::Shell(shell) => shell.output_record(),
         }
     }
@@ -182,6 +195,7 @@ impl TaskRecord {
         };
         WaitReply {
             status,
+            text: output.text,
             exit_code,
             signal,
             duration_ms,
@@ -190,6 +204,7 @@ impl TaskRecord {
             output_truncated: output.truncated,
             preview: output.preview,
             preview_truncated: output.preview_truncated,
+            failure: terminal.and_then(|terminal| terminal.failure.clone()),
             failure_note,
         }
     }

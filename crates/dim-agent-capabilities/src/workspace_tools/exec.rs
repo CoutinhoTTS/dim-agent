@@ -12,7 +12,8 @@ use crate::{
     host_platform::{
         EXEC_SHELL_CONFIG_INVALID, EXEC_SHELL_UNAVAILABLE, HostPlatform, ISOLATION_SUMMARY,
         Isolation, Os, OutputRecord, ProcessSpec, ProcessSpecError, ProcessTree, ShellEdition,
-        ShellKind, TaskKind, TaskRecord, TaskStatus, Terminal, WaitStatus, signal_name,
+        ShellKind, TaskFailure, TaskKind, TaskRecord, TaskStatus, Terminal, WaitStatus,
+        signal_name,
     },
     tool_registry::definition,
 };
@@ -1700,7 +1701,7 @@ struct Capture {
     file_bytes: u64,
     output_bytes: u64,
     truncated: bool,
-    failure: Option<String>,
+    failure: Option<TaskFailure>,
 }
 impl Capture {
     async fn process(&mut self, text: &str) -> io::Result<()> {
@@ -1733,6 +1734,7 @@ impl Capture {
         options.mode(0o600);
         let mut file = options.open(&self.path).await?;
         tokio::io::AsyncWriteExt::write_all(&mut file, initial.as_bytes()).await?;
+        file.sync_all().await?;
         self.file_bytes = initial.len() as u64;
         if initial.len() < self.inline.len() {
             self.truncated = true;
@@ -1778,13 +1780,15 @@ impl Output {
     async fn ensure_file(&self) -> Result<String, String> {
         let mut capture = self.capture.lock().await;
         if let Some(failure) = &capture.failure {
-            return Err(failure.clone());
+            return Err(failure.to_string());
         }
         match capture.create_file().await {
             Ok(()) => Ok(capture.path.to_string_lossy().into_owned()),
             Err(error) => {
                 let error = error.to_string();
-                capture.failure = Some(error.clone());
+                capture.failure = Some(TaskFailure::OutputWriteFailed {
+                    message: error.clone(),
+                });
                 Err(error)
             }
         }
@@ -1951,7 +1955,9 @@ impl OutputSink for Output {
             return;
         }
         if let Err(error) = capture.process(text).await {
-            capture.failure = Some(error.to_string());
+            capture.failure = Some(TaskFailure::OutputWriteFailed {
+                message: error.to_string(),
+            });
             self.failed.cancel();
         }
     }
@@ -1972,6 +1978,7 @@ impl CommandExit {
 #[derive(Clone)]
 pub(super) enum Observed {
     Cancelled,
+    OwnerUnloaded,
     Exited(CommandExit),
     TimedOut,
     OutputFailed,
@@ -1987,7 +1994,7 @@ struct Settled {
     /// The preview bounds left output out of `preview`.
     preview_truncated: bool,
     inline: String,
-    failure: Option<String>,
+    failure: Option<TaskFailure>,
 }
 impl Settled {
     /// The output text that the result shows.
@@ -2033,7 +2040,7 @@ impl RunningCommand {
             _ = async { tokio::time::sleep_until(deadline.expect("guarded").into()).await }, if deadline.is_some() => Ok(Observed::TimedOut),
             _ = self.output.failed.cancelled() => Ok(Observed::OutputFailed),
             _ = task.kill.cancelled() => Ok(Observed::Cancelled),
-            _ = shutdown.cancelled() => Ok(Observed::Cancelled),
+            _ = shutdown.cancelled() => Ok(Observed::OwnerUnloaded),
         };
         let termination_error = if matches!(observed, Ok(Observed::Exited(_))) {
             None
@@ -2064,7 +2071,9 @@ impl RunningCommand {
             && let Err(error) = tokio::io::AsyncWriteExt::flush(file).await
             && capture.failure.is_none()
         {
-            capture.failure = Some(error.to_string());
+            capture.failure = Some(TaskFailure::OutputWriteFailed {
+                message: error.to_string(),
+            });
         }
         let (preview, preview_truncated) = bounded_preview(
             &capture.preview,
@@ -2079,6 +2088,16 @@ impl RunningCommand {
             inline: capture.inline.clone(),
             failure: capture.failure.clone(),
         }
+    }
+}
+
+fn terminate_failure(record: &TaskRecord) -> io::Result<()> {
+    match record
+        .terminal()
+        .and_then(|terminal| terminal.failure.clone())
+    {
+        Some(TaskFailure::TerminateFailed { message }) => Err(io::Error::other(message)),
+        _ => Ok(()),
     }
 }
 
@@ -2102,6 +2121,7 @@ fn command_terminal(
         ),
         Ok(Observed::TimedOut) => (TaskStatus::TimedOut, None, None, false),
         Ok(Observed::Cancelled) => (TaskStatus::Cancelled, None, None, false),
+        Ok(Observed::OwnerUnloaded) => (TaskStatus::Cancelled, None, None, false),
         Ok(Observed::OutputFailed) | Err(_) => (TaskStatus::Failed, None, None, false),
     };
     if termination_error.is_some() || output.failure.is_some() {
@@ -2114,6 +2134,20 @@ fn command_terminal(
                 .and_then(|isolation| isolation.failure_hint(output.shown()))
         })
         .flatten();
+    let failure = if matches!(observed, Ok(Observed::OwnerUnloaded)) {
+        Some(TaskFailure::OwnerUnloaded)
+    } else {
+        match &observed {
+            Err(message) if termination_error.is_none() && output.failure.is_none() => {
+                Some(TaskFailure::TerminateFailed {
+                    message: message.clone(),
+                })
+            }
+            _ => termination_error
+                .map(|message| TaskFailure::TerminateFailed { message })
+                .or_else(|| output.failure.clone()),
+        }
+    };
     let output = OutputRecord {
         path: task.path.to_string_lossy().into_owned(),
         bytes: output.output_bytes,
@@ -2121,14 +2155,13 @@ fn command_terminal(
         text: output.output_path.is_none().then(|| output.inline.clone()),
         preview: output.preview.clone(),
         preview_truncated: output.preview_truncated,
-        failure: output.failure.clone(),
     };
     Terminal {
         status,
         exit_code,
         signal,
         duration_ms: record.started.elapsed().as_millis() as u64,
-        failure: termination_error,
+        failure,
         output,
         note,
     }
@@ -2145,7 +2178,6 @@ impl CommandTask {
             text: capture.file.is_none().then(|| capture.inline.clone()),
             preview: preview.clone(),
             preview_truncated: preview.len() < capture.preview.len(),
-            failure: capture.failure.clone(),
         }
     }
 
@@ -2225,11 +2257,12 @@ impl ExecProcess {
             WaitStatus::TimedOut => Ok(Observed::TimedOut),
             WaitStatus::Cancelled => Ok(Observed::Cancelled),
             WaitStatus::Failed => {
-                if self
-                    .record
-                    .terminal()
-                    .is_some_and(|terminal| terminal.output.failure.is_some())
-                {
+                if self.record.terminal().is_some_and(|terminal| {
+                    matches!(
+                        terminal.failure,
+                        Some(TaskFailure::OutputWriteFailed { .. })
+                    )
+                }) {
                     Ok(Observed::OutputFailed)
                 } else {
                     Err(io::Error::other(
@@ -2255,23 +2288,21 @@ impl ExecProcess {
             preview: output.preview.clone(),
             preview_truncated: output.preview_truncated,
             inline: output.text.unwrap_or_default(),
-            failure: output.failure,
+            failure: terminal.failure.clone().and_then(|failure| match failure {
+                TaskFailure::OutputWriteFailed { message } => {
+                    Some(TaskFailure::OutputWriteFailed { message })
+                }
+                _ => None,
+            }),
         }
     }
     async fn terminate(&self) -> io::Result<()> {
         if self.record.is_terminal() {
-            return self
-                .record
-                .terminal()
-                .and_then(|terminal| terminal.failure.clone())
-                .map_or(Ok(()), |error| Err(io::Error::other(error)));
+            return terminate_failure(&self.record);
         }
         self.task.kill.cancel();
         self.record.wait(None).await;
-        self.record
-            .terminal()
-            .and_then(|terminal| terminal.failure.clone())
-            .map_or(Ok(()), |error| Err(io::Error::other(error)))
+        terminate_failure(&self.record)
     }
 
     /// Terminates, reaps and closes a process nobody will own. Preserve the
@@ -2328,7 +2359,11 @@ impl ExecProcess {
                 ExecStatus::Failed,
                 format!(
                     "exec output offload failed: {}",
-                    settled.failure.as_deref().unwrap_or_default()
+                    settled
+                        .failure
+                        .as_ref()
+                        .map(ToString::to_string)
+                        .unwrap_or_default()
                 ),
                 "failed",
             ),
@@ -2635,7 +2670,7 @@ async fn run_process(
             }
             let settled = process.close().await;
             if let Some(failure) = &settled.failure {
-                return Ok((offload_failed(failure), None));
+                return Ok((offload_failed(&failure.to_string()), None));
             }
             return Ok((
                 ToolResult::error(settled_content(&settled, Some("Command cancelled."))),
@@ -2654,7 +2689,7 @@ async fn run_process(
     };
     let exit = match observed {
         Ok(Observed::Exited(status)) => status,
-        Ok(Observed::Cancelled) => {
+        Ok(Observed::Cancelled | Observed::OwnerUnloaded) => {
             let settled = process.close().await;
             return Ok((
                 ToolResult::error(settled_content(&settled, Some("Command cancelled."))),
@@ -2667,10 +2702,12 @@ async fn run_process(
                 return Ok((terminate_failed(&error, &settled), None));
             }
             let settled = process.close().await;
-            return Ok((
-                offload_failed(settled.failure.as_deref().unwrap_or_default()),
-                None,
-            ));
+            let failure = settled
+                .failure
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            return Ok((offload_failed(&failure), None));
         }
         Ok(Observed::TimedOut) => {
             if let Err(error) = process.terminate().await {
@@ -2679,7 +2716,7 @@ async fn run_process(
             }
             let settled = process.close().await;
             if let Some(failure) = &settled.failure {
-                return Ok((offload_failed(failure), None));
+                return Ok((offload_failed(&failure.to_string()), None));
             }
             let mut fields = json!({
                 "type": "finished",
@@ -2718,7 +2755,7 @@ async fn run_process(
     };
     let settled = process.close().await;
     if let Some(failure) = &settled.failure {
-        return Ok((offload_failed(failure), None));
+        return Ok((offload_failed(&failure.to_string()), None));
     }
     let completed = exit.success();
     let note = (!completed).then(|| {

@@ -1,3 +1,7 @@
+//! HostPlatform confined helpers on Windows
+//! (`docs/architecture/rust-agent/plugins/HostPlatform.md`). The platform has
+//! no confinement backend, so the timeout, output caps and cancellation apply
+//! and the result reports `confined: false`.
 use base64::Engine;
 use dim_agent_capabilities::execution_settings::{ExecutionSettings, ExecutionSettingsHost};
 use dim_agent_capabilities::host_platform::*;
@@ -24,14 +28,14 @@ fn request(
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
     ConfinedRequest {
-        program: executable.to_string_lossy().into_owned(),
+        program: executable.to_str().expect("ComSpec is UTF-8").to_owned(),
         args: ["/d", "/s", "/v:off", "/c", script]
             .into_iter()
             .map(OsString::from)
-            .map(|arg| arg.to_string_lossy().into_owned())
+            .map(|arg| arg.to_str().expect("argument is UTF-8").to_owned())
             .collect(),
         read: Vec::new(),
-        write: vec![write.to_string_lossy().into_owned()],
+        write: vec![write.to_str().expect("temporary path is UTF-8").to_owned()],
         env: Default::default(),
         timeout_ms: timeout.as_millis() as u64,
         output_limit: OutputLimits {
@@ -85,15 +89,9 @@ async fn a_helper_without_a_backend_reports_no_confinement_and_keeps_every_limit
         )
         .await;
     assert!(
-        matches!(timed, Err(HostPlatformError::Failed(_))),
+        matches!(timed, Err(HostPlatformError::TimedOut)),
         "{:?}",
         timed.err()
-    );
-    assert!(
-        timed
-            .err()
-            .is_some_and(|error| error.to_string().contains("timeout")),
-        "the helper must time out"
     );
 
     let flooded = platform
@@ -108,15 +106,14 @@ async fn a_helper_without_a_backend_reports_no_confinement_and_keeps_every_limit
         )
         .await;
     assert!(
-        matches!(flooded, Err(HostPlatformError::Failed(_))),
+        matches!(
+            flooded,
+            Err(HostPlatformError::OutputLimit {
+                stream: ConfinedStream::Stdout
+            })
+        ),
         "{:?}",
         flooded.err()
-    );
-    assert!(
-        flooded
-            .err()
-            .is_some_and(|error| error.to_string().contains("stdout limit")),
-        "the helper must hit the output limit"
     );
 
     let cancel = CancellationToken::new();

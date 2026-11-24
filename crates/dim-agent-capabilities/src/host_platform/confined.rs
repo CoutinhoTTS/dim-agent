@@ -74,7 +74,8 @@ pub struct ConfinedOutput {
 }
 
 /// The output stream that reached its limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ConfinedStream {
     Stdout,
     Stderr,
