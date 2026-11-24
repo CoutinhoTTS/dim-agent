@@ -1,7 +1,7 @@
 # Agent tool modes: normal, codemode and shell
 
-Status: Draft. Scope: process (the default and the availability), Session (the mode and the tool
-surface), branch (the mode a request pins).
+Status: Draft. Scope: process (mode availability), Session (the mode and the tool surface),
+branch (the mode a request pins).
 Issue: [#2135](https://github.com/arcships/dim/issues/2135). Delivery status belongs in the issue.
 
 Today the model has one way to act: one tool call per decision, with every tool declared before the
@@ -114,7 +114,7 @@ behind the operator's back.
 
 | Situation | Rule | Why |
 | --- | --- | --- |
-| A new Session from a client | starts in the mode the request names, or in the user default when it names none | the operator should not re-choose for every Session |
+| A new Session from a client | starts in the mode the request names, or `normal` when it names none; the client sends the mode it last used | the operator should not re-choose for every Session |
 | A running Session | the operator can switch it at any time; the next request declares the new mode, and a turn in flight keeps the mode it pinned | otherwise a change of style means abandoning the conversation |
 | A branch (line) | has no mode of its own; every line of a Session runs the Session's mode | a line is the same agent; a line in another mode would hand the agent tools the operator excluded |
 | A member Session | starts in its creator Session's current mode, and the operator can switch it like any Session | the member is the same agent doing delegated work; the model must not decide how the agent acts |
@@ -161,42 +161,38 @@ also owns this projection. Four terms:
 Registration is dynamic, so the projection follows the current set and the current mode: a Session
 whose entry tool is not registered, is withdrawn, or is excluded runs `normal` until it appears.
 The two product clients also read which modes the daemon's assembly can serve: `hello.features`
-carries `tool-mode.codemode` and `tool-mode.shell`, so a picker can mark an unavailable mode instead
-of silently falling back.
+carries `session.tool_mode.codemode` and `session.tool_mode.shell`, so a picker can mark an
+unavailable mode instead of silently falling back.
 
 ## 5. Configuration, creation and switching
 
-One declared Settings source, user scope only, is the default for new Sessions:
+The mode is Session configuration; there is no daemon-wide default to maintain.
 
-```json
-{"mode": "normal"}
-```
-
-- Registered by the App Server with a schema whose `mode` is an enum of the three values and whose
-  default is `normal`. It is served by `settings.read` / `settings.update`, the path the `execution`
-  source already uses, and the web entry adds `tool-mode` to `WEB_SETTINGS_SOURCES`.
-- `session.create` may name the mode; absent uses the stored default. The field is additive and
-  advertised as `session.create.toolMode`, like `session.language`, because an older daemon rejects
-  an unknown field.
+- `session.create` may name the mode; a Session created without one starts `normal`. The field is
+  additive and advertised as `session.create.toolMode`, like `session.language`, because an older
+  daemon rejects an unknown field.
 - The App Server records the mode in `SessionConfig.toolMode`. `normal` omits the member, so a
   normal Session's stored configuration has the same bytes as before this field existed; an old
   record reads as `normal`. A fork copies the value, and a restore starts from it.
+- The product clients remember the last mode the operator chose in that client and send it when they
+  create a Session, so a new Session starts the way the operator last worked. That memory is client
+  state; it is not a daemon setting.
 
 The mode is live for the Session's lifetime:
 
 - `ToolRegistry` holds the Session's current mode, initialised from the configuration. Requests
   read it when they are prepared; nothing re-adopts a tool set when it changes.
-- `session.tool_mode.get` returns `{mode, effective}`. `session.tool_mode.update` writes the stored
-  record (native storage only, as `session.language.update` does) and the live value, and refuses a
-  mode whose entry tool is absent, so a client cannot store a mode that is not in force. The pair is
-  advertised as `session.tool_mode`, like `session.language`.
+- `session.tool_mode.get` returns `{mode, effective}`: the mode the operator chose and the one in
+  force. A mode whose entry tool is absent stays chosen and is not in force; that is the fallback.
+  `session.tool_mode.update` writes the stored record (native storage only, as
+  `session.language.update` does) and the live value. The pair is advertised as `session.tool_mode`,
+  like `session.language`.
 - The model has no tool for this; it is a client method only.
 
 ```text
-default `tool-mode` ──┐
-session.create.mode ──┴─▶ SessionConfig.toolMode ──▶ ToolRegistry (live mode)
-                                                         ├─ a request pins the mode ──▶ visible ──▶ model request, usage
-                                                         └─ a call checks the pinned mode ──▶ exposed ──▶ admit or refuse
+session.create.mode ──▶ SessionConfig.toolMode ──▶ ToolRegistry (live mode)
+                                                       ├─ a request pins the mode ──▶ visible ──▶ model request, usage
+                                                       └─ a call checks the pinned mode ──▶ exposed ──▶ admit or refuse
                      session.tool_mode.update ──▶ live mode + stored record
 ```
 
@@ -256,13 +252,14 @@ Both:
 
 ## 8. Clients
 
-Both clients change this Session's mode and the default for new Sessions; both use the existing
-revision CAS for the default and report a refused mode.
+Both clients switch this Session's mode and remember the choice for the Sessions they create next;
+there is no default row to set.
 
-- TUI: `/settings` gains a Tools group with two rows: "Tool mode" for this Session and "Default tool
-  mode" for new ones. The first calls `session.tool_mode.update`; the second writes the source.
-- Web: the chat composer menu next to the permission menu switches this Session; the Agent defaults
-  page holds the default.
+- TUI: `/settings` gains a Tools group with one row, "Tool mode", which calls
+  `session.tool_mode.update`. The chosen mode is kept in the client's own settings and sent on the
+  next Session creation.
+- Web: the chat composer menu next to the permission menu switches this Session; the same choice is
+  kept in the browser's local state and sent on creation.
 
 ```text
 ╭──────────────────────────────────────────────╮
@@ -272,7 +269,6 @@ revision CAS for the default and report a refused mode.
 │   ...                                        │
 │   Tools                                      │
 │ › Tool mode              Code Mode ›         │
-│   Default tool mode      Code Mode ›         │
 │   Permissions                                │
 │   Permission             Workspace write ›   │
 │   Process isolation      ›                   │
@@ -281,7 +277,7 @@ revision CAS for the default and report a refused mode.
 ```
 
 The picker lists all three modes; a mode whose `hello.features` entry is absent is shown as
-unavailable and cannot be saved. A switch takes effect from the next request; the row shows the
+unavailable and cannot be chosen. A switch takes effect from the next request, and the row shows the
 effective mode, so a mode that fell back to `normal` is not reported as in force.
 
 ## 9. Compatibility
@@ -301,7 +297,7 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
 
 ## 10. Verification
 
-- Flow: create a Session in each mode (request field and default) and assert the request's
+- Flow: create a Session in each mode (request field; absent = `normal`) and assert the request's
   declarations: `normal` = the mounted tools without `codemode`/`execute`, `codemode` = only
   `codemode`, `shell` = only `execute`.
 - Flow: switch a running Session in each direction; the next request declares the new visible set,
@@ -310,23 +306,22 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
 - Flow: in `codemode` mode, a program calls a tool the model does not see; the child
   `step/tool-call` and `step/tool-result` carry `parent_call_id`, and Permission admits the child by
   its own risk. A call outside the pinned `exposed` set is refused as an unknown tool.
-- Flow: fallback — an unavailable entry tool makes `session.tool_mode.update` refuse that mode, and
-  a mode that becomes unavailable while it is in force falls back to `normal` in `get`.
+- Flow: fallback — a mode whose entry tool is absent stays chosen in `get` and is reported as not in
+  force; the Session declares the `normal` surface.
 - Flow: a member created under `codemode` records it; switching the creator leaves the member
   unchanged.
 - Flow: restore a record without the field, and fork a Session; both keep `normal` and the source
-  mode respectively. Changing the default does not touch an open Session.
-- Settings: `tool-mode` round trip with revision conflict, the web entry's allowed source, a web
-  component test for the composer menu and the default, and one tmux TUI case for the two rows and
-  the picker.
+  mode respectively.
+- Clients: a web component test for the composer menu and the remembered choice, and one tmux TUI
+  case for the row and the picker.
 - No event type, envelope or stored format changes, so the fixture compatibility baseline is
   untouched.
 
 ## 11. Rule check
 
 - §1 Capability: no new Capability. `ToolRegistry` stays a Session part that publishes a tool set,
-  `ToolBinding` stays the branch part ToolExecution owns, and the App Server gains one declared
-  Settings source, one Session method pair and no business state.
+  `ToolBinding` stays the branch part ToolExecution owns, and the App Server gains one Session
+  method pair and no business state.
 - §4 rule 1: no module writes another owner's state; the registry owns the live mode, the App Server
   owns the record and the client method.
 - §4 rule 2: no handover of a Timeline object.
@@ -342,21 +337,17 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
   `session.language`: the current value lives in the registry, the durable copy in the stored
   record.
 - §7.1 for the live mode: the resource is the value; lifecycle is the Session's; the operations are
-  `get` and `update`, whose cancellation stops the record write, and whose one error is a mode whose
-  entry tool is absent.
-- §7.1 for the settings source: the resource is one user document; it lives as long as the App
-  Server that registered it; the operations are the existing `settings.read` / `settings.update`.
+  `get` and `update`, whose cancellation stops the record write and which report the effective mode
+  rather than refusing one.
 - §7.2: no object or resource handle crosses an owner; no new service, and the mode methods join
-  the existing Session method face; the document is data and the conflict is the existing revision
-  CAS.
-- [ADR 002](../adr/002-plugin-scope.md) D1: the default is process configuration, the mode is
-  Session configuration, and the pinned mode is branch state. D2: no wiring module. D3: ToolRegistry
-  keeps no hard dependency on Code Mode; an absent or excluded `codemode` falls back to `normal`.
-  D4: business configuration, read at creation and changed by its owner's operation. D5: the source
-  is a JSON document and the mode methods take data.
+  the existing Session method face; the parameters are data.
+- [ADR 002](../adr/002-plugin-scope.md) D1: the mode is Session configuration and the pinned mode is
+  branch state. D2: no wiring module. D3: ToolRegistry keeps no hard dependency on Code Mode; an
+  absent or excluded `codemode` falls back to `normal`. D4: business configuration, read at creation
+  and changed by its owner's operation. D5: the mode methods take data.
 ## 12. Requirements raised to mechanism owners
 
 None. The change stays within the owners that already exist: ToolRegistry projects its own set and
 holds the live mode, ToolBinding pins the mode with the callable set, ToolExecution refuses a call
-outside it, ContextUsage counts `visible`, the App Server owns the settings source, the stored
-record and the Session methods, and each client owns its controls.
+outside it, ContextUsage counts `visible`, the App Server owns the stored record and the Session
+methods, and each client owns its control and its remembered choice.
