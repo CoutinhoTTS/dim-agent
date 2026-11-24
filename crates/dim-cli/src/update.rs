@@ -156,6 +156,9 @@ pub fn registry() -> String {
 
 /// The npm package this copy was started from; the launcher names it.
 fn package() -> Result<String, String> {
+    if channel(env!("CARGO_PKG_VERSION")) == "nightly" {
+        return Err("To update this nightly, run: curl -fsSL https://raw.githubusercontent.com/arcships/dim/main/scripts/install-nightly.sh | sh".to_owned());
+    }
     if let Some(package) = std::env::var_os("DIMCODE_NPM_PACKAGE") {
         return match package.to_str() {
             Some(PACKAGE) => Ok(PACKAGE.to_owned()),

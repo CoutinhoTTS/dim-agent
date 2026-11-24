@@ -36,9 +36,29 @@ do not publish to npm or create GitHub tags/Releases.
 
 If an agent does not list a skill, ask it to read the linked repository `SKILL.md` by path. An explicit end-to-end publication request can authorize the complete workflow; a preparation or review request does not. Existing authorization does not need to be requested again at each stage.
 
+## Nightly curl channel
+
+Install or upgrade the standalone `dim-nightly` on macOS or GNU/Linux (arm64 or x64, with curl, tar and jq):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arcships/dim/main/scripts/install-nightly.sh | sh
+```
+
+The entry point is `~/.local/bin/dim-nightly`. The installer leaves npm installations alone and keeps each payload under `${XDG_DATA_HOME:-~/.local/share}/dim-nightly`. The CLI defaults to `~/.dimcode-nightly`. The release environment needs the same build-time account settings as the alpha native builds. Restrict nightly tag creation to trusted maintainers and allow the tag pattern in `release-build` if environment deployment filters are enabled. Rolling assets require a mutable GitHub prerelease.
+
+Nightly (`X.Y.Z-nightly.N`) and npm alpha (`X.Y.Z-alpha.N`) number releases independently. Push a `vX.Y.Z-nightly.N` tag on a commit from `main` without a version PR. Check the tag and source, then build and pack macOS and GNU/Linux x64 and arm64 in parallel. On each native runner, run only the packaged CLI's `--version` and compare it with the tag. Publish one GitHub prerelease when all four archives and their SHA-256 checksums are present; do not publish to npm or GHCR.
+
+Use a separate nightly workflow and concurrency group. A version tag triggers the build and identifies its exact source. Publish to one rolling GitHub prerelease at `releases/tag/Nightly`, not a Release per version. `Nightly` is the channel entry, not a build trigger or a source identifier. Never mark it Latest or modify alpha releases, tags, assets or npm dist-tags.
+
+Run the platform matrix with `fail-fast: true`. On the first platform failure, cancel remaining builds and skip publication and pruning. Do not retry a failed step or run; the tag remains reserved and the next requested release gets a new number. The tag workflow does not rerun PR/main lint, workspace tests or E2E suites. Test installer upgrades, checksum failures and retention when changing those mechanisms, not before each nightly.
+
+Updates stay within the installation's channel. The npm alpha client keeps checking npm. The nightly client does not check npm; users rerun the same curl installer to upgrade. The installer reads the promoted version from the rolling release, verifies that version's platform archive, and switches only the nightly installation. If either channel is unavailable, it does not fall back to the other.
+
+Serve `scripts/install-nightly.sh` from `main`. Give archives and checksums version-specific names. Serialize publication: upload the complete set before updating the advertised version, never promote an older build over a newer one, and prune only obsolete nightly assets after promotion. Keep the three highest complete nightly versions on the rolling release and retain their source tags, including tags for pruned builds. The [nightly release skill](../../.agents/skills/publishing-dim-nightlies/SKILL.md) covers preparation and publication.
+
 ## Version preparation
 
-Every release starts from a release PR into `main` that commits the `X.Y.Z-alpha.N` the release will publish. The release PR selects that version and writes it into the product fields below, so `main` carries the released number at the commit the release builds and tags. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
+The npm alpha release starts from a release PR into `main` that commits the `X.Y.Z-alpha.N` the release will publish. The release PR selects that version and writes it into the product fields below, so `main` carries the released number at the commit the release builds and tags. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
 
 For the next alpha, inspect registry versions across `dimcode-alpha`, `dimcode-web`, the six platform packages and legacy `dimcode`, plus reserved remote tags/GitHub Releases and open release PRs. Continue an existing PR for the same preparation task; otherwise increment the highest reserved alpha numerically. A partial publication reserves its version too. Do not infer availability from the checkout's version or a dist-tag alone. Reuse the matching release version and original archives for a CI retry instead of allocating another number. Keep the existing legacy-beta compatibility guard. Two concurrent release PRs can choose the same number: the first tag wins, and the second must be re-prepared to the next alpha.
 
