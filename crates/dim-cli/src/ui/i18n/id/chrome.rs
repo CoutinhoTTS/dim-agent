@@ -471,8 +471,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "Pilih model",
         "Loading models..." => "Memuat model…",
-        "Previous page" => "Halaman sebelumnya",
-        "Next page" => "Halaman berikutnya",
         "No models available. Connect a provider first." => {
             "Tak ada model. Hubungkan provider dulu."
         }

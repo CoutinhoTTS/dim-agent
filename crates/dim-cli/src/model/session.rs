@@ -389,7 +389,7 @@ pub enum Command {
     },
     ClearModelPreferences {
         query: String,
-        after: Option<dim_agent_types::ModelId>,
+        batches: usize,
         provider_id: String,
         model_id: String,
         expected_version: u32,
@@ -1442,7 +1442,11 @@ pub enum Update {
     /// What `/update` found: a newer version, `None` when this build is the
     /// newest, or why nothing can be offered.
     UpgradeChecked(Result<Option<crate::update::Offer>, String>),
-    Models(Result<ModelList, String>),
+    Models {
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
+        result: Result<Vec<ModelList>, String>,
+    },
     EffortChoices(Result<crate::configure::EffortChoices, String>),
     /// Sent only by a daemon that advertises the policy methods.
     ModelPolicy(ModelPolicyUpdate),

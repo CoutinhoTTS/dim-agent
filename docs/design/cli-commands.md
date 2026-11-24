@@ -1355,19 +1355,26 @@ the panel's confirmation.
 
 ### Model picker reads
 
-Opening `/models` requests one page from
+Opening `/models` starts a bounded read from
 [`provider.models.query`](appserver/provider-management.md#model-display-queries).
-Typing searches on the server and resets the page cursor. Next/Previous replace
-the displayed page; closing the picker releases its results. Capability reads for
-the adopted model pass its provider and model ID. Catalog refresh is the explicit
-management action in the provider/account panel. Counts in picker diagnostics
-refer to the displayed page.
+The conversation and fixed subagent model lists scroll continuously. Near the
+end, moving down requests the next batch and appends any selectable models
+without moving the selection. A batch with no selectable models is traversed
+automatically while it has a continuation cursor. Cursor navigation is never
+shown as a row. Until the first selectable models arrive the picker shows
+loading; an empty result is shown only once traversal ends. Diagnostics describe
+the batches loaded so far. Typing searches on the server and starts a new list;
+closing the picker releases its results. Clearing saved preferences rereads the
+loaded batches before allowing another clear: a write changes the provider
+version shared by all its model rows. Capability reads for the adopted model pass
+its provider and model ID. Catalog refresh is the explicit management action in
+the provider/account panel.
 
 ```text
-/models -> first page -> Next page -> next page
-               ^                         |
-               +------ Previous page ----+
-Type query -> first matching page
+/models    -> first selectable rows (or an empty result)
+Scroll ↓   -> append more rows near the bottom
+Scroll ↑   -> earlier rows remain in the same list
+Type query -> new matching list
 Esc        -> clear query; when empty, close and release results
 ```
 

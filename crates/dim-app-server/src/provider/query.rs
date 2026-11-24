@@ -144,6 +144,17 @@ impl ProviderService {
                     let provider_matches = query
                         .as_ref()
                         .is_none_or(|q| display.to_lowercase().contains(q));
+                    let scan_models = match &header {
+                        Ok(Some(PersistedProviderRecord::Managed(record))) => {
+                            match accounts.get(&id) {
+                                Some(account) if account.account.is_some()
+                                    && same_account(&record.account, account) => true,
+                                Some(_) => continue,
+                                None => false,
+                            }
+                        }
+                        _ => true,
+                    };
                     let mut after = input
                         .after
                         .as_ref()
@@ -152,6 +163,7 @@ impl ProviderService {
                         .unwrap_or_default();
                     let mut saw_model = false;
                     loop {
+                        if !scan_models { break; }
                         let batch = persistence::model_keys(
                             &tx,
                             &bundled,
@@ -280,11 +292,7 @@ impl ProviderService {
                                 .unwrap_or_default();
                             (catalog, preferences)
                         }
-                        Ok(Some(PersistedProviderRecord::Managed(record)))
-                            if accounts.get(&provider_id).is_some_and(|a| {
-                                a.account.is_some() && same_account(&record.account, a)
-                            }) =>
-                        {
+                        Ok(Some(PersistedProviderRecord::Managed(record))) => {
                             let catalog = record.catalog(&bundled);
                             let preferences = record
                                 .model_preferences

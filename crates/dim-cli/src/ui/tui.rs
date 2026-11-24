@@ -3148,12 +3148,14 @@ impl App {
                     panel.set_providers(providers);
                 }
             }
-            Update::Models(models) => {
-                if let Err(error) = &models {
-                    self.set_notice(error.clone());
-                }
+            Update::Models {
+                query,
+                after,
+                result,
+            } => {
                 if let Some(Prompt::Models(panel)) = &mut self.prompt {
-                    panel.set_models(models);
+                    let effect = panel.page(&query, after, result);
+                    self.apply_effect(effect);
                 }
             }
             Update::EffortChoices(result) => {
@@ -4306,10 +4308,11 @@ impl App {
                     self.host.send(Command::CloseSessions);
                 }
                 if matches!(self.prompt, Some(Prompt::Management(_)))
-                    && let Some(panel) = self.models_return.take()
+                    && let Some(mut panel) = self.models_return.take()
                 {
+                    let effect = panel.refresh();
                     self.prompt = Some(Prompt::Models(Box::new(panel)));
-                    self.host.send(Command::ListModels);
+                    self.apply_effect(effect);
                     return Outcome::Continue;
                 }
                 self.prompt = match self.prompt.take() {
@@ -4696,14 +4699,14 @@ impl App {
             }
             Effect::ClearModelPreferences {
                 query,
-                after,
+                batches,
                 provider_id,
                 model_id,
                 expected_version,
             } => {
                 self.host.send(Command::ClearModelPreferences {
                     query,
-                    after,
+                    batches,
                     provider_id,
                     model_id,
                     expected_version,
