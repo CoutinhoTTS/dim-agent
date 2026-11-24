@@ -114,18 +114,26 @@ program, so it adds `ask_user` and `recall`. `normal` declares the work tools.
 ### Goals in shell mode
 
 `shell` declares no `goal_update`, so a Session whose mode **in force** is `shell` cannot complete
-or block a goal. Everything below keys on the mode in force — the value `session.tool_mode.get`
-reports in `effective` — not on the mode the operator chose: a chosen `shell` without `execute`
-runs `normal` and keeps `goal_update`.
+or block a goal. Everything below keys on the mode in force — the `effective` value
+`session.tool_mode.get` reports — never on the chosen mode.
 
-- Switching to an effective `shell` writes Goal's pause before the mode changes, so every turn that
-  starts in `shell` has the pause in its history. For each branch with an active goal, Goal writes
-  `paused` with reason `mode` and withdraws the continuation it queued when the InputQueue has not
-  applied it; an applied continuation belongs to a turn that started earlier, which pinned the old
-  mode and finishes under it. A cancelled update after the pause leaves the goal paused and the
-  mode unchanged; the operator resumes it.
-- While `shell` is in force, a new continuation pauses the goal instead of continuing, so the model
-  is never asked to call a tool the mode does not declare.
+- **Trigger.** `ToolRegistry` publishes the effective mode to its readers. Goal settles on every
+  transition to an effective `shell` — an operator update, the entry tool registering, or an
+  exclusion change — not only on `session.tool_mode.update`.
+- **Settle.** Goal writes `paused` with reason `mode`, a pause input text carrying that reason
+  (Goal state alone does not enter the model context), and withdraws the continuation it queued
+  when the InputQueue has not applied it. An applied continuation belongs to a turn that started
+  earlier, which pinned the old mode and finishes under it.
+- **Order with an update.** The operator update runs: Goal settles (a committed effect), then the
+  record write, then the live mode. A failure before the record write leaves the mode unchanged and
+  the Goal pause in place; the operator resumes it. A Goal failure stops the update before the mode
+  changes.
+- **Guarantee.** A turn that starts after the pause is committed carries the pause text in its
+  history, and its requests declare no `goal_update`. If a held continuation is released between a
+  registration transition and Goal's settle, that one turn can carry the continuation under
+  `shell`, and its `goal_update` call is refused as an unknown tool. Closing that window needs the
+  registry's transition to settle Goal before its projection flips; §12 records it.
+- While `shell` is in force, a new continuation pauses the goal instead of continuing.
 - `session.goal.set` and `session.goal.resume` are refused while `shell` is in force, with a named
   error; `pause`, `edit`, `clear` and `get` keep working.
 - Leaving `shell` does not resume the goal: the operator resumes it explicitly, as Goal already
@@ -193,8 +201,9 @@ owns this projection. Three terms:
 - A Code Mode program discovers and calls exactly the `delegated` set: `tools.list` and
   `tools.describe` project it, and `tools.call` admits inside it. `codemode` itself is never
   delegated, so a program cannot nest one.
-- A turn pins the mode when it starts — when its driving input is applied — and every request of
-  the turn uses that pin, together with the callable set it pins today. A switch takes effect with
+- The Loop holds the turn's mode: a turn pins it when it starts — when its driving input is
+  applied — and every request of the turn uses that pin, together with the callable set ToolBinding
+  pins today. A switch takes effect with
   the next turn and needs no re-adoption: the branch's configuration, the version pins and the
   source sets stay as they are. A request retried through its own source (an in-process budget
   recovery) keeps the pin; a process restart settles the in-flight request as the loop already does
@@ -289,7 +298,7 @@ are its requirements; the ones marked missing are follow-up work, not part of th
 
 `codemode`:
 
-- Discovery and call (`tools.list`, `tools.describe`, `tools.call`) over the request's pinned set,
+- Discovery and call (`tools.list`, `tools.describe`, `tools.call`) over the turn's pinned set,
   everything except `codemode`. Exists.
 - **Content blocks on return.** A child result can carry image blocks (`read` of an image, an MCP
   result), and they reach the model only if the return path rebuilds them. When the returned value
@@ -379,7 +388,8 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   instead of every adopted tool), the admission split (a child only inside `delegated`), and the
   outer result rebuilding content blocks instead of serializing the program value as JSON. Its
   child-event contract is unchanged.
-- [Goal](plugins/Goal.md) gains the shell lifecycle in §2.
+- [Goal](plugins/Goal.md) gains the shell lifecycle in §2, and
+  [PromptSources](plugins/PromptSources.md) gains the mode-aware environment block.
 - The remaining contracts gain the mode with the implementation, each by its owner:
   `SessionConfig.toolMode` in [session access](contracts/session-access.md), and the live mode plus
   projection in [ToolRegistry](../architecture/rust-agent/plugins/ToolRegistry.md).
@@ -415,12 +425,15 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
 - Flow: restore a record without the field, and fork a Session; both keep `normal` and the source
   mode respectively, except that the minimal-execution host restores its Sessions as `shell`.
 - Flow: a goal with a queued continuation, switched to an effective `shell` before it is applied:
-  the continuation is withdrawn, the goal pauses (`mode`), and no turn carrying the `goal_update`
-  instruction starts in `shell`. Switched after it is applied, that turn pinned the old mode and
-  finishes under it. The pause is written before the live mode, so a turn that starts in `shell`
-  has it in history; a cancelled update after the pause leaves the goal paused and the mode
-  unchanged. `set`/`resume` are refused while `shell` is in force; a chosen `shell` that runs
-  `normal` (no `execute`) neither pauses nor refuses; after leaving, the operator resumes the goal.
+  the continuation is withdrawn, the goal pauses (`mode`) with its pause text, and no turn carrying
+  the `goal_update` instruction starts in `shell`. Switched after it is applied, that turn pinned
+  the old mode and finishes under it. The same settle runs when `execute` registers and makes
+  `shell` effective without an update; a held continuation released in that window can reach one
+  turn, whose `goal_update` call is refused. The pause is committed before the record write and the
+  live mode, so a turn that starts in `shell` has the pause text in history; a cancelled update
+  after the pause leaves the goal paused and the mode unchanged. `set`/`resume` are refused while
+  `shell` is in force; a chosen `shell` that runs `normal` (no `execute`) neither pauses nor
+  refuses; after leaving, the operator resumes the goal.
 - Flow: stop a shell task with `session.exec.stop` after switching the Session to `normal`; the
   route resolves the live `ExecStop` before `BackgroundExec`, and neither answers for a live task
   from history. The minimal-execution profile's Session runs `shell` and keeps `execute`.
@@ -449,8 +462,9 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   `session.language`: the current value lives in the registry, the durable copy in the stored
   record.
 - §7.1 for the live mode: the resource is the value; lifecycle is the Session's; the operations are
-  `get` and `update`. A cancellation before the record write changes nothing; after it the new value
-  stays stored and in force. Both report the effective mode rather than refusing one.
+  `get` and `update`. A cancellation before the record write leaves the mode pair unchanged; a Goal
+  pause already committed stays. After the record write, the new value stays stored and in force.
+  Both report the effective mode rather than refusing one.
 - §7.2: no object or resource handle crosses an owner; no new service, and the mode methods join
   the existing Session method face; the parameters are data.
 - [ADR 002](../adr/002-plugin-scope.md) D1: the mode is Session configuration and the pinned mode is
@@ -461,17 +475,24 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
 
 None for the mechanism. One requirement goes to another capability's owner:
 
+Requirements go to other owners:
+
 - **Goal.** Read the mode in force, the value `session.tool_mode.get` reports in `effective`, never
-  the chosen mode. When a switch makes `shell` effective, write the pause before the live mode
-  changes: pause each branch's active goal (`mode`) and withdraw a continuation the InputQueue has
-  not applied; while `shell` is in force, pause new continuations and refuse `session.goal.set` and
+  the chosen mode. Settle on every transition to an effective `shell`, including the entry tool
+  registering or an exclusion change: write `paused` (`mode`), a pause text carrying the reason,
+  and withdraw a continuation the InputQueue has not applied, before the record write and the live
+  mode; while `shell` is in force, pause new continuations and refuse `session.goal.set` and
   `resume`; leave resumption to the operator after `shell` leaves. Its owner carries this into
   [Goal](plugins/Goal.md).
-- **PromptSources.** The environment block follows the surface: in `shell` mode it drops the
-  Windows file-encoding guidance about `read`/`edit`/`write`. Its owner carries this into
-  [PromptSources](plugins/PromptSources.md).
+- **ToolRegistry.** Publish the effective mode to its readers so Goal settles on a registration or
+  exclusion transition, and make that transition settle Goal before the projection flips; until it
+  does, the one-turn window in §2 stands.
+- **PromptSources.** The environment block follows the surface: while `shell` is in force (the
+  `effective` value) it drops the Windows file-encoding guidance about `read`/`edit`/`write`. Its
+  owner carries this into [PromptSources](plugins/PromptSources.md).
 
 Everything else stays within the owners that already exist: ToolRegistry projects its own set and
-holds the live mode, ToolBinding pins the mode with the callable set, ToolExecution refuses a call
-outside it, ContextUsage counts `visible`, the App Server owns the stored record and the Session
-methods, and each client owns its control and its remembered choice.
+holds the live mode, the Loop holds the turn's mode pin, ToolBinding pins the callable set,
+ToolExecution refuses a call outside the turn's sets, ContextUsage counts `visible`, the App Server
+owns the stored record and the Session methods, and each client owns its control and its remembered
+choice.
