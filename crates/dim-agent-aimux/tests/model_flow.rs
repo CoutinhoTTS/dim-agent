@@ -1921,6 +1921,76 @@ async fn a_delayed_header_reply_still_gets_its_first_event_allowance() {
     root.shutdown().await.unwrap();
 }
 
+/// Headers inside the allowance and no first event inside its own allowance:
+/// the reply fails as a network failure naming the missing event, not the
+/// headers.
+#[tokio::test]
+async fn a_first_event_past_its_own_allowance_fails_as_a_network_failure() {
+    use tokio::io::AsyncWriteExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (read, received) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut socket = accept_request(listener).await;
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\n")
+            .await
+            .unwrap();
+        read.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let driver = host.0.clone();
+    let request = ModelRequest::new("local", "test-model", vec![Message::text(Role::User, "hi")]);
+    let connection = ModelConnection::Http(HttpModelConnection {
+        protocol: ModelProtocol::OpenaiChat,
+        base_url: base,
+        network: Default::default(),
+        headers: Default::default(),
+        bearer: None,
+        api_key: None,
+        preset: None,
+    });
+    let invoke = tokio::spawn(async move {
+        driver
+            .invoke(Arc::new(request), connection, CancellationToken::new())
+            .await
+    });
+    received.await.unwrap();
+    // Real time lets the client read the headers and start waiting for the
+    // first event before the clock is paused.
+    real_delay().await;
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(300)).await;
+    let error = match tokio::time::timeout(Duration::from_secs(2), invoke)
+        .await
+        .expect("a missing first event must not hold the request open")
+        .expect("the request must not panic")
+    {
+        Ok(_) => panic!("a reply without a first event must fail"),
+        Err(error) => error,
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("the response headers arrived, but no stream event followed within 300 seconds")
+    );
+    server.abort();
+    root.shutdown().await.unwrap();
+}
+
 /// A non-2xx response whose error body stalls is read under its own allowance:
 /// the request fails with the HTTP status and the kind that status names, not
 /// as an idle network failure that discards a known status.
