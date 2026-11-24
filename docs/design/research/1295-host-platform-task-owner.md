@@ -73,7 +73,7 @@ expiry kills the shell. A job pid arrives through a `watch<Option<u32>>`; `kill`
 subscribes before reading the pid and waits for it. The pid is accepted only when its job id
 is registered and the record belongs to the same shell. A pid after terminal is ignored; a
 kill before it sets `stop_requested`; no pid in 2 s answers `task_running`. pwsh completion
-writes its marker to `completionFile`, watched for 200 ms. Windows uses the existing PTY/job
+writes its marker to the owner-derived `<taskId>.result`, watched for 200 ms. Windows uses the existing PTY/job
 code; a stopped job is `cancelled`.
 ### 1.5 Wake and binding
 `wait` subscribes to `changed` before reading state, so a terminal in the window is seen.
@@ -91,7 +91,7 @@ table, worker tracker and shutdown token are `Arc`/cloneable fields created by
 | `spawnWithStdin` / `spawnConfined` / `removeOutputDirectory` / `childPath` | existing / UTF-8 base | existing; `childPath` `None` = nothing to append |
 
 `ShellWrite` is `{taskId, data, command?: {taskId, startMarker, endMarker}, job?:
-{taskId, endMarker, outputPath, completionFile?}}`; the optional start declares the task the
+{taskId, endMarker, outputPath}}`; the optional start declares the task the
 written bytes begin. The event API is deleted (§3.2).
 ### 2.2 Task snapshot
 | Field | Exec command | Shell command | Job | Shell |
@@ -260,7 +260,7 @@ Data-face paths are UTF-8 `String`, absolute unless stated; no `to_string_lossy`
 request or reply. A non-UTF-8 owner path makes `info`/`execRoot` answer `invalid`; a
 non-UTF-8 shell path is `exec_shell_unavailable`. In-process producers use `to_str()` and
 fail their own call; SessionStore removes a non-UTF-8 candidate with FileStorage. Log is
-`{outputDir}/{taskId}.log`; dir 0700, file 0600. Exec log is lazy at the inline threshold or
+`{outputDir}/{taskId}.log`; files are created 0600 in the output directory the caller provides. Exec log is lazy at the inline threshold or
 `retainOutput`; `symlink_metadata` rejects any entry (dangling included) as `task_exists`.
 Shell command/shell/job logs are `create_new`; a failed PTY start removes the log; a job
 completion file is checked for absence. `retainOutput` is idempotent: exec creates the file

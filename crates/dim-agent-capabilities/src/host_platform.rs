@@ -1523,7 +1523,8 @@ impl HostPlatform {
             None
         };
         let job = if let Some(start) = request.job {
-            if !valid_shell_marker(&start.end_marker) {
+            if !valid_shell_marker(&start.end_marker) || !start.end_marker.starts_with("__DIM_END_")
+            {
                 return Err(HostPlatformError::Invalid(
                     "shell job end marker must be __DIM_END_<8 hex>_<8 hex>__".into(),
                 ));
@@ -1608,7 +1609,9 @@ impl HostPlatform {
             if let Some((id, _)) = &job {
                 self.commands.lock().unwrap().remove(id);
             }
-            shell.set_active_command(None);
+            if command.is_some() {
+                shell.set_active_command(None);
+            }
             return Err(HostPlatformError::Io(error.to_string()));
         }
         if let Some((_, record)) = &command {
@@ -1704,20 +1707,34 @@ impl HostPlatform {
         if let Some(task) = self.task(&request.task_id)
             && let TaskKind::Job(job) = &task.kind
         {
-            let page = self
+            let page = match self
                 .retained_output_page(
                     std::path::Path::new(&job.output_path),
                     request.cursor.unwrap_or(0),
                     limit,
                 )
                 .await
-                .map_err(HostPlatformError::from)?;
+            {
+                Ok(page) => page,
+                Err(crate::workspace_tools::background::OutputPageError::Unavailable) => {
+                    return Ok(OutputPageReply {
+                        text: String::new(),
+                        bytes: 0,
+                        total_bytes: 0,
+                        next_cursor: None,
+                        truncated: false,
+                        retained_from: 0,
+                        reset: None,
+                    });
+                }
+                Err(error) => return Err(HostPlatformError::from(error)),
+            };
             return Ok(OutputPageReply {
                 text: page.text,
                 bytes: page.bytes,
                 total_bytes: page.total_bytes.max(page.bytes),
                 next_cursor: page.next_cursor,
-                truncated: page.truncated,
+                truncated: false,
                 retained_from: 0,
                 reset: None,
             });
@@ -2301,7 +2318,7 @@ impl ProcessTree {
 impl Drop for ProcessTree {
     fn drop(&mut self) {
         if !self.terminated && !self.released() {
-            native::signal(self.pid, libc::SIGKILL);
+            native::kill_tree(self.pid);
         }
     }
 }
@@ -2734,6 +2751,33 @@ mod unix {
         unsafe { libc::kill(-(pid as libc::pid_t), signal) };
     }
 
+    /// Kills every descendant that still names `pid` as an ancestor, then the
+    /// root group. A child that started its own session is not in the root
+    /// group, so the `/proc` walk is the part that reaches it.
+    pub fn kill_tree(pid: u32) {
+        fn children(pid: u32) -> Vec<u32> {
+            let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children"))
+            else {
+                return Vec::new();
+            };
+            text.split_whitespace()
+                .filter_map(|value| value.parse().ok())
+                .collect()
+        }
+        let mut pending = children(pid);
+        let mut seen = Vec::new();
+        while let Some(child) = pending.pop() {
+            if seen.contains(&child) {
+                continue;
+            }
+            seen.push(child);
+            pending.extend(children(child));
+            unsafe { libc::kill(-(child as libc::pid_t), libc::SIGKILL) };
+            unsafe { libc::kill(child as libc::pid_t, libc::SIGKILL) };
+        }
+        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    }
+
     /// True once the root is reaped and the group has no member left.
     async fn group_gone(tree: &mut ProcessTree, pid: u32, within: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + within;
@@ -2804,6 +2848,10 @@ mod windows {
         },
         UI::Shell::{FOLDERID_Profile, SHGetKnownFolderPath},
     };
+
+    pub fn kill_tree(pid: u32) {
+        let _ = terminate_tree(pid);
+    }
 
     const SHELL_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
     const SHELL_PROBE_CONCURRENCY: usize = 4;
@@ -3421,7 +3469,7 @@ impl PtyProcessTree {
             self.terminating = true;
             #[cfg(unix)]
             {
-                native::signal(self.pid, libc::SIGKILL);
+                native::kill_tree(self.pid);
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
                 while tokio::time::Instant::now() < deadline {
                     match self.try_wait()? {
@@ -3455,7 +3503,7 @@ impl PtyProcessTree {
 impl Drop for PtyProcessTree {
     fn drop(&mut self) {
         if !self.terminated && !self.released() {
-            native::signal(self.pid, libc::SIGKILL);
+            native::kill_tree(self.pid);
         }
     }
 }
@@ -3489,8 +3537,7 @@ pub fn terminate_job(pid: u32) -> io::Result<()> {
 pub async fn kill_job(pid: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
-        // SAFETY: plain syscall on the addressed group.
-        unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+        native::kill_tree(pid);
         wait_job_exit(pid).await
     }
     #[cfg(windows)]

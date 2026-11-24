@@ -1794,7 +1794,7 @@ impl HostPlatform {
                 reason: "output directory is not usable".into(),
             });
         }
-        if output_dir.join(format!("{task_id}.log")).exists() {
+        if std::fs::symlink_metadata(output_dir.join(format!("{task_id}.log"))).is_ok() {
             return Err(ProcessSpecError {
                 code: "task_exists",
                 reason: "Execution task already exists".into(),
@@ -1842,6 +1842,16 @@ impl HostPlatform {
         let mut tree = match self.spawn_tree(spec) {
             Ok(tree) => tree,
             Err(error) => {
+                let output = task.output_record().await;
+                record.finish(crate::host_platform::Terminal {
+                    status: crate::host_platform::TaskStatus::Failed,
+                    exit_code: None,
+                    signal: None,
+                    duration_ms: record.started.elapsed().as_millis() as u64,
+                    failure: Some(crate::host_platform::TaskFailure::CommandFailed),
+                    output,
+                    note: None,
+                });
                 self.commands.lock().unwrap().remove(task_id);
                 return Err(ProcessSpecError {
                     code: "exec_invalid_request",
