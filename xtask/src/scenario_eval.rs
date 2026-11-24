@@ -1440,6 +1440,7 @@ fn stop_name(stop: &str) -> Result<&'static str> {
         "idle" => Ok("idle"),
         "turns" => Ok("turns"),
         "seconds" => Ok("seconds"),
+        "setup_failed" => Ok("setup_failed"),
         "switch_target_not_reached" => Ok("switch_target_not_reached"),
         "switch_target_ended" => Ok("switch_target_ended"),
         "switch_target_unknown" => Ok("switch_target_unknown"),
@@ -13774,6 +13775,41 @@ mod tests {
                 .all(|request| !request.contains("SAVED VIEW unselected")),
             "a run --run did not select is not judged: {asked:?}"
         );
+    }
+
+    /// A run that the runner itself recorded with the `setup_failed` stop is
+    /// read back by the read a pool or a re-judge takes: `stop_name` keeps the
+    /// stop, so a read that meets a calls-step failure reports the run again
+    /// instead of refusing the whole set.
+    #[test]
+    fn a_saved_setup_failure_reads_back_by_its_own_stop() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-setup-failed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let saved = json!({
+            "arm": "current", "scenario": "identity-after-compaction", "run": 0,
+            "session": null, "stop": "setup_failed", "turns": 0, "window": null,
+            "durationMs": 1.0, "failed": true, "judgeOutcome": "not_asked",
+            "error": "the calls step 1 (session.branch_create) failed",
+            "judgeError": null, "judgeReasks": 0, "probes": []
+        });
+        std::fs::write(directory.join("runs.jsonl"), format!("{saved}\n")).unwrap();
+        let scenarios = read_scenarios(
+            &repository()
+                .join("xtask")
+                .join("scenario-eval")
+                .join("timeline-branches-compact"),
+        )
+        .unwrap();
+        let records = read_pooled_runs(&directory, &scenarios)
+            .expect("a saved setup failure is one of the stops the runner writes");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stop, "setup_failed");
+        assert!(records[0].failed);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A pool reports several finished evaluations under one rule: both
