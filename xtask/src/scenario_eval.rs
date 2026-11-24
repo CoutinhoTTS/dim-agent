@@ -6231,39 +6231,52 @@ enum NotesCheck {
     Observed,
     /// The run's turn cap stopped the note's request before its model call:
     /// the note was not at fault, and the probe has no request to read.
-    CapCut {
-        line: String,
-    },
+    CapCut,
     /// The request never reached the model for another reason.
     Unseen(String),
 }
 
 /// The run's switch notes as the export shows them (Timeline branches §12.4).
-/// A run that already failed is not checked.
+/// A run that already failed is not checked. The notes are read once with the
+/// turn cap's exemption; when nothing is missing, they are read again without
+/// it: a note only the exemption hid was kept from the model by the cap, not
+/// by a missing note, and the run is incomplete rather than scored
+/// (issue #2140).
 fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
     if driven.error.is_some() {
         return NotesCheck::Observed;
     }
     let cap_stop = (driven.stop == "turns").then(|| budget_stop_reason(driven.stop));
-    switch_notes_unseen(export, &driven.switch_notes.expected, cap_stop.as_deref())
+    let notes = &driven.switch_notes.expected;
+    if let Some(error) = switch_notes_unseen(export, notes, cap_stop.as_deref()) {
+        return NotesCheck::Unseen(error);
+    }
+    if cap_stop.is_some() && switch_notes_unseen(export, notes, None).is_some() {
+        return NotesCheck::CapCut;
+    }
+    NotesCheck::Observed
 }
 
-/// Why a scored switch follow-up did not see its note, or [`NotesCheck::Observed`]
-/// when every consumed follow-up's note reached the model: the first request
-/// the line began after it consumed the input whose model call exists, and the
-/// note's exact text (Timeline branches §12.4). An input no request consumed is
-/// not checked: no answer of that line is scored. A request a steer replaced
+/// Why a scored switch follow-up did not see its note, or `None` when every
+/// consumed follow-up's note reached the model: the first request the line
+/// began after it consumed the input whose model call exists, and the note's
+/// exact text (Timeline branches §12.4). An input no request consumed is not
+/// checked: no answer of that line is scored. A request a steer replaced
 /// before its model call is not checked either: the note travels in the
 /// request that replaces it in the same turn. A request the run's own
-/// turn-budget stop ended, whose reason `cap_stop` carries, is
-/// [`NotesCheck::CapCut`]: that stop, not the note, kept it from the model
-/// (issue #2140), and the run is incomplete rather than scored. Every other
-/// request that never reached the model is [`NotesCheck::Unseen`], because no
+/// turn-budget stop ended, whose reason `cap_stop` carries, is not reported
+/// either: that stop, not the note, kept it from the model (issue #2140), and
+/// [`switch_note_check`] reads that shape by asking again without the stop.
+/// Every other request that never reached the model is reported, because no
 /// request of the line carried the text being evaluated. A request whose
 /// `step/model-start` carries no turn id is exempted by neither: without the
 /// turn, neither the steer that replaced it nor the stop that ended it can be
 /// placed.
-fn switch_notes_unseen(export: &str, notes: &[SwitchNote], cap_stop: Option<&str>) -> NotesCheck {
+fn switch_notes_unseen(
+    export: &str,
+    notes: &[SwitchNote],
+    cap_stop: Option<&str>,
+) -> Option<String> {
     /// One `input/message` of the export, the line it is on, and the note it
     /// carries when it is one.
     struct Message {
@@ -6386,10 +6399,9 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote], cap_stop: Option<&str
             cut.insert((in_flight.branch.clone(), in_flight.request.clone()));
         }
     }
-    let mut cap_cut: Option<String> = None;
     for note in notes {
         let Some(message) = messages.get(&note.input) else {
-            return NotesCheck::Unseen(format!(
+            return Some(format!(
                 "the switch input {} on line {} is not in the export",
                 note.input, note.line
             ));
@@ -6408,7 +6420,7 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote], cap_stop: Option<&str
             .collect();
         requests.sort_by_key(|start| start.sequence);
         let Some(first) = requests.first() else {
-            return NotesCheck::Unseen(format!(
+            return Some(format!(
                 "line {} consumed the switch input {} but started no request after it",
                 note.line, note.input
             ));
@@ -6423,10 +6435,9 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote], cap_stop: Option<&str
         // A steer can replace the request a line began before it reaches the
         // model; the note then travels in the request that replaces it, so a
         // replaced request is passed over (issue #2140). So is a request the
-        // run's turn budget stopped: the cap ended it, not the note. Any other
-        // request without a model call ended before the note reached the model.
+        // run's turn budget stopped: the cap ended it, not the note.
         let mut call = None;
-        let mut note_cap_cut = None;
+        let mut cap_cut = false;
         for start in &requests {
             let key = (start.branch.clone(), start.request.clone());
             if let Some(found) = calls.get(&key) {
@@ -6438,18 +6449,17 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote], cap_stop: Option<&str
                     continue;
                 }
                 if cut.contains(&key) {
-                    note_cap_cut = Some(start.branch.clone());
+                    cap_cut = true;
                     continue;
                 }
             }
             break;
         }
         let Some(call) = call else {
-            if let Some(line) = note_cap_cut {
-                cap_cut.get_or_insert(line);
+            if cap_cut {
                 continue;
             }
-            return NotesCheck::Unseen(format!(
+            return Some(format!(
                 "line {} consumed the switch input {} but its request never reached the model",
                 note.line, note.input
             ));
@@ -6466,16 +6476,13 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote], cap_stop: Option<&str
             .iter()
             .any(|text| request_carries(&call["messages"], text))
         {
-            return NotesCheck::Unseen(format!(
+            return Some(format!(
                 "the request that consumed the switch input on line {} does not carry the note it must answer under",
                 note.line
             ));
         }
     }
-    match cap_cut {
-        Some(line) => NotesCheck::CapCut { line },
-        None => NotesCheck::Observed,
-    }
+    None
 }
 
 /// Whether any string in `value` carries `needle`: a request is JSON, so a
@@ -6492,8 +6499,9 @@ fn request_carries(value: &Value, needle: &str) -> bool {
 /// Why the run's fixture was never observed, when it was not: its own message
 /// and every request after the first idle must be consumed and followed by a
 /// model request on their line, and a scenario with that step must have run
-/// it. A run its own budget stopped before such a request is incomplete, not a
-/// losing candidate: the probe has no request to read (model-prompts §8.1).
+/// it. [`incomplete_reason`] decides which stops make a run that never ran
+/// such a request an incomplete fixture rather than a losing candidate: the
+/// probe has no request to read (model-prompts §8.1).
 fn fixture_incomplete(driven: &Driven, scenario: &Scenario, export: &str) -> Option<String> {
     if scenario.after_idle.is_some()
         && !driven
@@ -6575,9 +6583,10 @@ fn incomplete_reason(
         return None;
     }
     fixture_incomplete(driven, scenario, export).or_else(|| match notes {
-        NotesCheck::CapCut { line } => Some(format!(
-            "line {line}: the switch follow-up's request was stopped by the run's turn budget before it reached the model"
-        )),
+        NotesCheck::CapCut => Some(
+            "the switch follow-up's request was stopped by the run's turn budget before it reached the model"
+                .to_owned(),
+        ),
         NotesCheck::Observed | NotesCheck::Unseen(_) => None,
     })
 }
@@ -9739,7 +9748,7 @@ mod tests {
     fn unseen_note(check: NotesCheck) -> Option<String> {
         match check {
             NotesCheck::Unseen(error) => Some(error),
-            NotesCheck::Observed | NotesCheck::CapCut { .. } => None,
+            NotesCheck::Observed | NotesCheck::CapCut => None,
         }
     }
     fn metrics(scenario: &Scenario, records: &[RunRecord]) -> Metrics {
@@ -10432,18 +10441,11 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            matches!(
-                switch_notes_unseen(&export(note), &notes, None),
-                NotesCheck::Observed
-            ),
+            switch_notes_unseen(&export(note), &notes, None).is_none(),
             "the request carries the note"
         );
-        let unseen = unseen_note(switch_notes_unseen(
-            &export("the follow-up was answered"),
-            &notes,
-            None,
-        ))
-        .expect("the request without the note is unseen");
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
+            .expect("the request without the note is unseen");
         assert!(unseen.contains("line 2"), "{unseen}");
     }
 
@@ -10493,18 +10495,11 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            matches!(
-                switch_notes_unseen(&export(note), &notes, None),
-                NotesCheck::Observed
-            ),
+            switch_notes_unseen(&export(note), &notes, None).is_none(),
             "the replacement request carries the note"
         );
-        let unseen = unseen_note(switch_notes_unseen(
-            &export("the follow-up was answered"),
-            &notes,
-            None,
-        ))
-        .expect("the request without the note is still unseen");
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
+            .expect("the request without the note is still unseen");
         assert!(unseen.contains("does not carry the note"), "{unseen}");
     }
 
@@ -10553,10 +10548,10 @@ mod tests {
             default: true,
             other: "main".into(),
         }];
-        let unseen = unseen_note(switch_notes_unseen(&export(true), &notes, None))
+        let unseen = switch_notes_unseen(&export(true), &notes, None)
             .expect("the closed request never reached the model");
         assert!(unseen.contains("never reached the model"), "{unseen}");
-        let unseen = unseen_note(switch_notes_unseen(&export(false), &notes, None))
+        let unseen = switch_notes_unseen(&export(false), &notes, None)
             .expect("no request started after the consumption");
         assert!(unseen.contains("started no request after it"), "{unseen}");
     }
@@ -10594,20 +10589,34 @@ mod tests {
         .map(|record| serde_json::to_string(record).unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-        let notes = [SwitchNote {
+        let switch_note = || SwitchNote {
             line: "2".into(),
             input: "f1".into(),
             default: true,
             other: "main".into(),
-        }];
+        };
+        let notes = [switch_note()];
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![switch_note()],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
         assert!(
-            matches!(
-                switch_notes_unseen(&export, &notes, Some("budget: turns")),
-                NotesCheck::CapCut { ref line } if line == "2"
-            ),
+            matches!(switch_note_check(&driven, &export), NotesCheck::CapCut),
             "the run's turn budget ended the request before its model call"
         );
-        let unseen = unseen_note(switch_notes_unseen(&export, &notes, None))
+        let unseen = switch_notes_unseen(&export, &notes, None)
             .expect("any other stop still reports the note");
         assert!(unseen.contains("never reached the model"), "{unseen}");
     }
@@ -10724,7 +10733,7 @@ mod tests {
                 other: "main".into(),
             },
         ];
-        let unseen = unseen_note(switch_notes_unseen(&export, &notes, Some("budget: turns")));
+        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"));
         assert!(
             unseen.as_deref().is_some_and(
                 |error| error.contains("line 3") && error.contains("never reached the model")
@@ -10796,12 +10805,8 @@ mod tests {
                 json!({"turn_id": "t1", "status": "completed", "reason": "end_turn"}),
             ),
         ] {
-            let unseen = unseen_note(switch_notes_unseen(
-                &export(end),
-                &notes,
-                Some("budget: turns"),
-            ))
-            .expect("a request that ended before the stop still needs its note");
+            let unseen = switch_notes_unseen(&export(end), &notes, Some("budget: turns"))
+                .expect("a request that ended before the stop still needs its note");
             assert!(unseen.contains("never reached the model"), "{unseen}");
         }
     }
@@ -10850,7 +10855,7 @@ mod tests {
         .map(|record| serde_json::to_string(record).unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-        let unseen = unseen_note(switch_notes_unseen(&export, &notes, Some("budget: turns")))
+        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"))
             .expect("an unplaced request is not exempted by the stop");
         assert!(unseen.contains("never reached the model"), "{unseen}");
     }
@@ -11074,15 +11079,11 @@ mod tests {
             incomplete: None,
             error: None,
         };
-        let reason = incomplete_reason(
-            &driven,
-            &scenario(Vec::new()),
-            &export,
-            &NotesCheck::CapCut { line: "2".into() },
-        )
-        .unwrap();
+        let reason =
+            incomplete_reason(&driven, &scenario(Vec::new()), &export, &NotesCheck::CapCut)
+                .unwrap();
         assert!(
-            reason.contains("line 2") && reason.contains("turn budget"),
+            reason.contains("switch follow-up") && reason.contains("turn budget"),
             "{reason}"
         );
     }
