@@ -50,7 +50,6 @@ const MAX_TIMEOUT_MS: u64 = 3_600_000;
 const DESCRIPTION_CHARS: usize = 200;
 const INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_WAIT: Duration = Duration::from_secs(2);
-const PWSH_FILE_POLL: Duration = Duration::from_millis(200);
 
 /// Hex digits in each half of a marker; `marker_pair` splits a uuid into
 /// four of these runs.
@@ -1372,52 +1371,33 @@ impl ShellSession {
             }
             return Err(error.to_string());
         }
-        if let Some((result_path, error_path)) = pwsh_paths {
+        if let Some((_result_path, error_path)) = pwsh_paths {
             let this = self.clone();
-            let lifecycle = self.lifecycle.clone();
-            let marker = completion.full();
+            let host = self.host.clone();
             let watched = task_id.clone();
             let output_path = output_path.clone();
-            let tasks = self.tasks.lock().await;
-            tasks.spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = lifecycle.cancelled() => return,
-                        _ = tokio::time::sleep(PWSH_FILE_POLL) => {}
+            self.tasks.lock().await.spawn(async move {
+                let reply = host
+                    .wait(
+                        WaitRequest {
+                            task_id: watched.clone(),
+                            timeout_ms: None,
+                        },
+                        never_cancelled(),
+                    )
+                    .await;
+                if let Ok(reply) = reply {
+                    let _ = host
+                        .settle(TaskRequest {
+                            task_id: watched.clone(),
+                        })
+                        .await;
+                    this.inner.lock().await.background.remove(&watched);
+                    let mut data = ended_from_reply(&watched, &reply, &output_path);
+                    if let ToolContent::Text(text) = &mut data.result.content {
+                        text.push_str(&format!("\nStandard error: {}", error_path.display()));
                     }
-                    let finished = {
-                        let inner = this.inner.lock().await;
-                        match inner.background.get(&watched) {
-                            None => return,
-                            Some(_) => std::fs::read_to_string(&result_path)
-                                .ok()
-                                .and_then(|text| marker_code(&text, &marker)),
-                        }
-                    };
-                    if let Some(code) = finished {
-                        let task_id = watched.clone();
-                        let mut inner = this.inner.lock().await;
-                        inner.background.remove(&task_id);
-                        drop(inner);
-                        let preview = file_tail(&output_path, OUTPUT_LIMIT);
-                        let mut result = ended_result(&task_id, &output_path, &preview, &code);
-                        if let ToolContent::Text(text) = &mut result.content {
-                            text.push_str(&format!("\nStandard error: {}", error_path.display()));
-                        }
-                        let data = ExecEndedData {
-                            task_id: task_id.clone(),
-                            status: exit_status(&code),
-                            result,
-                        };
-                        this.settle(data);
-                        let _ = this
-                            .host
-                            .settle(TaskRequest {
-                                task_id: task_id.clone(),
-                            })
-                            .await;
-                        return;
-                    }
+                    this.settle(data);
                 }
             });
         }
@@ -1548,21 +1528,14 @@ impl ShellSession {
                             never_cancelled(),
                         )
                         .await;
-                    if reply.is_ok() {
+                    if let Ok(reply) = reply {
                         let _ = host
                             .settle(TaskRequest {
                                 task_id: watched.clone(),
                             })
                             .await;
                         this.inner.lock().await.background.remove(&watched);
-                        this.settle(ExecEndedData {
-                            task_id: watched.clone(),
-                            status: ExecStatus::Cancelled,
-                            result: ToolResult::text(format!(
-                                "Background command stopped.\nOutput: {}",
-                                output_path.display()
-                            )),
-                        });
+                        this.settle(ended_from_reply(&watched, &reply, &output_path));
                     }
                 });
                 return Ok(ExecEndedData {
@@ -1850,6 +1823,29 @@ fn exit_line(code: &str) -> String {
         "failed" => "[Command failed]".to_owned(),
         "unknown" => "[Command finished with unknown exit code]".to_owned(),
         code => format!("[Command finished with exit code {code}]"),
+    }
+}
+
+fn ended_from_reply(task_id: &str, reply: &WaitReply, output_path: &Path) -> ExecEndedData {
+    let code = wait_code(reply);
+    let mut result = ended_result(task_id, output_path, &reply.preview, &code);
+    if let Some(failure) = &reply.failure
+        && let ToolContent::Text(text) = &mut result.content
+    {
+        text.push('\n');
+        text.push_str(&failure.to_string());
+    }
+    let status = match reply.status {
+        WaitStatus::Exited if reply.exit_code == Some(0) && reply.failure.is_none() => {
+            ExecStatus::Completed
+        }
+        WaitStatus::Cancelled => ExecStatus::Cancelled,
+        _ => ExecStatus::Failed,
+    };
+    ExecEndedData {
+        task_id: task_id.to_owned(),
+        status,
+        result,
     }
 }
 
