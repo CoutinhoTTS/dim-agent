@@ -103,13 +103,13 @@ struct OccupyingTask {
     output_path: PathBuf,
     delivered: usize,
     ended: Arc<Notify>,
-    hold: Option<dim_agent_runtime::SessionHold>,
+    _hold: Option<dim_agent_runtime::SessionHold>,
 }
 
 struct BackgroundTask {
     task_id: String,
     output_path: PathBuf,
-    hold: Option<dim_agent_runtime::SessionHold>,
+    _hold: Option<dim_agent_runtime::SessionHold>,
 }
 
 struct Inner {
@@ -1217,7 +1217,7 @@ impl ShellSession {
                 output_path: output_path.to_path_buf(),
                 delivered: preview.len(),
                 ended: Arc::new(Notify::new()),
-                hold,
+                _hold: hold,
             });
         }
         let ended = {
@@ -1377,7 +1377,7 @@ impl ShellSession {
                 BackgroundTask {
                     task_id: task_id.clone(),
                     output_path: output_path.clone(),
-                    hold,
+                    _hold: hold,
                 },
             );
         }

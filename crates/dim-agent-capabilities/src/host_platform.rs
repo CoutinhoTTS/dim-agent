@@ -3857,7 +3857,7 @@ pub(crate) mod shell {
         ExecShellRuntime, HostPlatform, ProcessSpec, ProcessSpecError, PtyProcessTree, PtySize,
         ShellEdition, ShellStatus,
     };
-    use super::{TaskKind, TaskRecord, TaskStatus, Terminal, terminate_job};
+    use super::{TaskKind, TaskRecord, terminate_job};
     use crate::workspace_tools::background::{
         OutputPageError, PAGE_CHAR_TRAILING_BYTES, decode_page,
     };
@@ -3865,10 +3865,7 @@ pub(crate) mod shell {
         collections::VecDeque,
         io::{self, Read, Write},
         path::{Path, PathBuf},
-        sync::{
-            Arc, Condvar, Mutex, Weak,
-            atomic::{AtomicBool, Ordering},
-        },
+        sync::{Arc, Condvar, Mutex, Weak, atomic::AtomicBool},
         time::{Duration, Instant},
     };
     use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
