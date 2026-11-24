@@ -75,6 +75,16 @@ fn model_failure(
     }
 }
 
+/// What one request's output leaves for its terminal fact.
+struct Terminal<'a> {
+    /// Calls a failed terminal closes in the same batch.
+    started: &'a [StartedCall],
+    /// Whether a retry replaced an earlier attempt of this request.
+    retried: bool,
+    /// The thinking block the final attempt left open, when it showed one.
+    shown_thinking_part_id: Option<String>,
+}
+
 struct ModelProvider {
     state: Mutex<ModelState>,
     tasks: TaskTracker,
@@ -97,10 +107,13 @@ impl ModelProvider {
         model: (&str, &str),
         failure_chain: Option<&FailureChain>,
         result: std::result::Result<FinishReason, HostError>,
-        started: &[StartedCall],
-        retried: bool,
-        shown_thinking_part_id: Option<String>,
+        terminal: Terminal<'_>,
     ) -> dim_agent_runtime::Result<()> {
+        let Terminal {
+            started,
+            retried,
+            shown_thinking_part_id,
+        } = terminal;
         let (provider_id, model_id) = model;
         let outcome = match result {
             Ok(finish_reason) => ModelOutputOutcome::Completed { finish_reason },
@@ -447,9 +460,11 @@ impl ModelProvider {
                     (&provider_id, &model_id),
                     failure_chain.as_ref(),
                     Err(HostError::failed(CAPABILITY_RELOADING)),
-                    &started,
-                    false,
-                    None,
+                    Terminal {
+                        started: &started,
+                        retried: false,
+                        shown_thinking_part_id: None,
+                    },
                 )?;
             }
             let Some(next) = reply.next else {
@@ -562,9 +577,11 @@ impl ModelProvider {
                 (&call.request.provider_id, &call.request.model_id),
                 call.failure_chain.as_ref(),
                 result,
-                &output.started,
-                output.retried(),
-                output.shown_thinking_part_id(),
+                Terminal {
+                    started: &output.started,
+                    retried: output.retried(),
+                    shown_thinking_part_id: output.shown_thinking_part_id(),
+                },
             );
             state.current = None;
             (outcome, submitted)
@@ -761,9 +778,11 @@ impl DynPlugin for ModelProviderPlugin {
                                     (&call.request.provider_id, &call.request.model_id),
                                     call.failure_chain.as_ref(),
                                     Err(HostError::Cancelled(reason)),
-                                    &[],
-                                    false,
-                                    None,
+                                    Terminal {
+                                        started: &[],
+                                        retried: false,
+                                        shown_thinking_part_id: None,
+                                    },
                                 );
                             }
                             state.stop_reason = None;
