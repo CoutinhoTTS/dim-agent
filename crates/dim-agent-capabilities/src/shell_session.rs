@@ -1720,10 +1720,10 @@ impl ExecStop for ShellSession {
                 Err(TaskError::Unknown) => match &self.recovery {
                     Some(recovery) => recovery.stop(task_id).await.map_err(|error| match error {
                         crate::workspace_tools::background::TaskError::Closed => TaskError::Closed,
-                        crate::workspace_tools::background::TaskError::Unknown
-                        | crate::workspace_tools::background::TaskError::Read(_) => {
+                        crate::workspace_tools::background::TaskError::Unknown => {
                             TaskError::Unknown
                         }
+                        crate::workspace_tools::background::TaskError::Read(_) => TaskError::Read,
                     }),
                     None => Err(TaskError::Unknown),
                 },
