@@ -3756,7 +3756,7 @@ pub fn signal_name(_: ExitStatus) -> Option<String> {
 
 pub(crate) mod shell {
     use super::output::bounded_preview;
-    use super::output::{head_bytes, tail_bytes};
+    use super::output::{Decoder, head_bytes, tail_bytes};
     use super::{
         ExecShellRuntime, HostPlatform, ProcessSpec, ProcessSpecError, PtyProcessTree, PtySize,
         ShellEdition, ShellStatus,
@@ -4257,7 +4257,10 @@ pub(crate) mod shell {
                     continue;
                 }
                 if line.contains(&job.end_marker) {
-                    record.finish(job_terminal(record, job));
+                    let code = last_full_marker(line)
+                        .map(|(_, tail)| tail.trim().to_owned())
+                        .filter(|code| !code.is_empty());
+                    record.finish(job_terminal(record, job, code.as_deref()));
                 }
             }
         }
@@ -4374,6 +4377,7 @@ pub(crate) mod shell {
             let (drained, reader_finished) = tokio::sync::oneshot::channel();
             std::thread::spawn(move || {
                 let mut bytes = [0; 4096];
+                let mut decoder = Decoder::default();
                 let mut written = 0usize;
                 let mut splitter = LineSplitter::default();
                 while let Ok(n) = reader.read(&mut bytes) {
@@ -4383,7 +4387,8 @@ pub(crate) mod shell {
                     let Some(pump) = pump.upgrade() else {
                         break;
                     };
-                    let chunk = crate::shell_session::regularize_output(&bytes[..n]);
+                    let decoded = decoder.write(&bytes[..n]);
+                    let chunk = crate::shell_session::regularize_output(decoded.as_bytes());
                     for line in splitter.push(&chunk) {
                         classify_line(&line, &pump, &jobs);
                     }
@@ -4610,7 +4615,7 @@ pub(crate) mod shell {
             limit: usize,
         ) -> EventPage {
             let wait = wait_ms.unwrap_or(0);
-            let deadline = Instant::now() + Duration::from_millis(wait);
+            let deadline = Instant::now() + Duration::from_millis(wait.min(86_400_000));
             loop {
                 let page = {
                     let mut events = self.events.lock().unwrap();
@@ -4777,18 +4782,34 @@ pub(crate) mod shell {
         }
     }
 
-    fn job_terminal(record: &super::TaskRecord, job: &ShellJob) -> super::Terminal {
-        let (output, failure) = job.output_record();
-        super::Terminal {
-            status: if failure.is_some() {
-                super::TaskStatus::Failed
-            } else {
-                super::TaskStatus::Exited
+    fn job_terminal(
+        record: &super::TaskRecord,
+        job: &ShellJob,
+        code: Option<&str>,
+    ) -> super::Terminal {
+        let (output, read_failure) = job.output_record();
+        let (status, exit_code, failure) = match code {
+            Some("0") => (super::TaskStatus::Exited, Some(0), None),
+            Some(code) => match code.parse::<i32>() {
+                Ok(code) => (
+                    super::TaskStatus::Failed,
+                    Some(code),
+                    Some(super::TaskFailure::CommandFailed),
+                ),
+                Err(_) => (
+                    super::TaskStatus::Failed,
+                    None,
+                    Some(super::TaskFailure::UnknownExit),
+                ),
             },
-            exit_code: None,
+            None => (super::TaskStatus::Exited, None, None),
+        };
+        super::Terminal {
+            status,
+            exit_code,
             signal: None,
             duration_ms: record.started.elapsed().as_millis() as u64,
-            failure,
+            failure: read_failure.or(failure),
             output,
             note: None,
         }

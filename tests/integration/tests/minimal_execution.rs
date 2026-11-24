@@ -984,10 +984,8 @@ async fn stop_background_task() {
     let ended = stop.clone().stop(task_id.clone()).await.unwrap();
     assert_eq!(ended.status, ExecStatus::Cancelled);
     assert!(gone(&pid).await);
-    assert!(matches!(
-        stop.stop(task_id).await,
-        Err(dim_agent_capabilities::exec_stop::TaskError::Unknown)
-    ));
+    let repeated = stop.stop(task_id).await.unwrap();
+    assert_eq!(repeated.status, ExecStatus::Cancelled);
     session.close().await.unwrap();
     harness.shutdown().await;
 }

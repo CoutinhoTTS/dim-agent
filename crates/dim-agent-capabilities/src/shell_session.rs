@@ -154,6 +154,7 @@ pub struct ShellSession {
     /// native storage, where shell output has no owner.
     owner: Option<Arc<SessionFiles>>,
     session_id: String,
+    recovery: Option<Arc<BackgroundExec>>,
     tasks: Arc<tokio::sync::Mutex<TaskTracker>>,
 }
 
@@ -191,6 +192,7 @@ impl ShellSession {
             dispatcher,
             owner,
             session_id,
+            recovery: None,
             tasks: Arc::new(tokio::sync::Mutex::new(TaskTracker::new())),
         }
     }
@@ -303,7 +305,8 @@ impl ShellSession {
         let notified = notify.notified();
         tokio::pin!(notified);
         notified.as_mut().enable();
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(queued.timeout_ms);
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_millis(queued.timeout_ms.min(86_400_000));
         let ended = tokio::select! {
             _ = queued.cancel.cancelled() => {
                 return Some(Err("command cancelled while waiting for the shell".into()));
@@ -1640,7 +1643,21 @@ impl ExecStop for ShellSession {
         self: Arc<Self>,
         task_id: String,
     ) -> BoxFuture<'static, Result<ExecEndedData, TaskError>> {
-        Box::pin(async move { ShellSession::stop(&self, &task_id).await })
+        Box::pin(async move {
+            match ShellSession::stop(&self, &task_id).await {
+                Err(TaskError::Unknown) => match &self.recovery {
+                    Some(recovery) => recovery.stop(task_id).await.map_err(|error| match error {
+                        crate::workspace_tools::background::TaskError::Closed => TaskError::Closed,
+                        crate::workspace_tools::background::TaskError::Unknown
+                        | crate::workspace_tools::background::TaskError::Read(_) => {
+                            TaskError::Unknown
+                        }
+                    }),
+                    None => Err(TaskError::Unknown),
+                },
+                other => other,
+            }
+        })
     }
 }
 
@@ -1707,6 +1724,7 @@ impl DynPlugin for ShellSessionPlugin {
             let timeline = ctx.require_at(&self.timeline)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let host = ctx.require_at(&self.host)?;
+            let recovery = ctx.require_at(&self.recovery)?;
             let config = ctx.require_at(&self.session_config)?;
             let identity = ctx.require_at(&self.identity)?;
             let owner = ctx.get::<SessionFiles>();
@@ -1728,6 +1746,7 @@ impl DynPlugin for ShellSessionPlugin {
                 identity.session_id.clone(),
             );
             session.facts = Some((ctx.clone(), self.facts.clone()));
+            session.recovery = Some(recovery);
             let session = Arc::new(session);
             let service = session.clone();
             ctx.effect(move || async move {
