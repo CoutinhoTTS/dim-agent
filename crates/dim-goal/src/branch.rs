@@ -2021,6 +2021,14 @@ impl Owner {
                     .await?;
             }
             ConclusionAction::Continue => {
+                #[cfg(feature = "testing")]
+                crate::testing::stage_held(
+                    &self.session_id,
+                    &self.branch_id,
+                    crate::testing::Stage::Continue,
+                    sequence,
+                )
+                .await;
                 let Ok(limit) = self.limit().await else {
                     return Ok(());
                 };

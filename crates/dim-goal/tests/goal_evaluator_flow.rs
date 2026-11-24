@@ -971,6 +971,64 @@ async fn pursuit_5_a_consumed_queue_that_started_a_turn_holds_the_evaluated_cont
     env.close().await;
 }
 
+/// A Queue whose turn starts and is consumed before the `continue`
+/// conclusion takes its first capture, while the conclusion waits to read its
+/// settings: the decision is bound to the judged turn, so the newer turn
+/// decides and the conclusion writes no evaluated continuation (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_turn_already_open_before_the_conclusion_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let mut continued = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Continue,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    let held = tokio::time::timeout(Duration::from_secs(15), continued.arrived())
+        .await
+        .expect("the conclusion task reaches its settings read");
+    assert_eq!(
+        held, conclusion,
+        "the held step follows the conclusion at {conclusion}"
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    let consumed = env.consume("main", &queued.id);
+    env.dispatched("main", consumed.sequence).await;
+    continued.release();
+    let writes = env.settled("main").await;
+    let stale: Vec<String> = writes
+        .iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"evaluation="{evaluation}""#))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened a turn before its first capture, yet it wrote {stale:?}",
+        queued.sequence
+    );
+    env.close().await;
+}
+
 /// A `continue` conclusion that arrives while a background task is open waits
 /// for the task: its cancelled end takes the conclusion once, and a second
 /// cancelled end writes nothing more (Pursuit §5).
