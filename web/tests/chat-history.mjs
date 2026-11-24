@@ -2283,6 +2283,35 @@ test("a window read in flight drops a snapshot of a request the turn ended", asy
   assert.deepEqual(chat.views.session.rows.filter(row => row.kind === "assistant"), [])
 })
 
+test("a move drops the live countdown of a request its window reads ended", async t => {
+  const retry = { attempt: 2, maxAttempts: 3, retryAtMs: 5, kind: "network" }
+  let reads = 0
+  const chat = session(t, params => {
+    if (params.branchId !== "worker") return page([input(1, "on the root")], 1)
+    reads++
+    return reads === 1
+      ? page([event(1, { kind: "model-start", requestId: "r2" })], 1)
+      : page([event(1, { kind: "model-start", requestId: "r2" }), event(2, { kind: "model-end", requestId: "r2" })], 2)
+  }, {
+    "session.turn.get": params => params.branchId === "worker"
+      ? { ...params, turn: { sequence: 1, ended: false }, output: undefined }
+      : { ...params, turn: undefined, output: undefined },
+    "session.branch_set_default": () => "worker",
+  })
+  await flush()
+  chat.receive({ method: "session.state", sessionId: "session", branchId: "worker", running: true, stopping: false })
+  chat.ensureLine("session", "worker")
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r2", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1, retry } })
+  await flush()
+  assert.equal(chat.views.session.branches.worker.rows.find(row => row.kind === "thinking")?.text, "weigh", "the running side line shows its live progress before the move")
+  await chat.setDefaultBranch("session", "worker")
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.equal(chat.views.session.retry, undefined, "the window ends the request, so its countdown goes with the live snapshot")
+  assert.deepEqual(chat.views.session.rows, [], "the ended request's progress opens no row")
+})
+
 test("a snapshot that arrives after the load does not reopen an ended request", async t => {
   const chat = session(t, () => page([
     event(1, { kind: "model-end", requestId: "r1" }),
