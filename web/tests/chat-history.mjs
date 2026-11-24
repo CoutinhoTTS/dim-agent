@@ -1981,3 +1981,115 @@ test("a resync failure a move overtook does not fail the centre the move install
   await flush()
   assert.deepEqual(chat.views.session.rows.map(row => row.text), ["on worker", "on the worker live"], "the moved centre keeps consuming its live events")
 })
+
+test("a retry's durable text never follows the replaced attempt's cached progress", async t => {
+  const hydration = deferred()
+  const chat = session(t, () => page([], 0), { "session.tool.get": () => hydration.promise })
+  await flush()
+  receive(chat, "main", event(1, { kind: "tool-completed", requestId: "r1", callId: "call", result: { content: [] } }))
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  receive(chat, "main", event(2, { kind: "text", requestId: "r1", delta: "answer" }))
+  hydration.resolve({ requestId: "r1", callId: "call", name: "exec", input: {} })
+  await flush()
+  const rows = chat.views.session.rows
+  assert.equal(rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(rows))
+  assert.equal(rows.find((row) => row.kind === "assistant").text, "answer")
+})
+
+test("a retry's new progress after its durable text stays in order", async t => {
+  const hydration = deferred()
+  const chat = session(t, () => page([], 0), { "session.tool.get": () => hydration.promise })
+  await flush()
+  receive(chat, "main", event(1, { kind: "tool-completed", requestId: "r1", callId: "call", result: { content: [] } }))
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  receive(chat, "main", event(2, { kind: "text", requestId: "r1", delta: "answer" }))
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: " tail", textOffset: 6, thinking: "", thinkingOffset: 0 } })
+  hydration.resolve({ requestId: "r1", callId: "call", name: "exec", input: {} })
+  await flush()
+  const rows = chat.views.session.rows
+  assert.equal(rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(rows))
+  assert.equal(rows.find((row) => row.kind === "assistant").text, "answer tail")
+})
+
+test("a line's loaded window orders its buffered progress before the retry's text", async t => {
+  const held = deferred()
+  const chat = session(t, ({ branchId }) => branchId === "main" ? page([], 0) : held.promise)
+  await flush()
+  chat.receive({ method: "session.state", sessionId: "session", branchId: "worker", running: true, stopping: false })
+  await flush()
+  chat.ensureLine("session", "worker")
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  receive(chat, "worker", event(2, { kind: "text", requestId: "r1", delta: "answer" }))
+  await flush()
+  held.resolve(page([], 0))
+  await flush()
+  const rows = chat.views.session.branches.worker.rows
+  assert.equal(rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(rows))
+  assert.equal(rows.find((row) => row.kind === "assistant").text, "answer")
+})
+
+test("a window that already holds the request's output does not replay its earlier progress", async t => {
+  const held = deferred()
+  const chat = session(t, ({ branchId }) => branchId === "main" ? page([], 0) : held.promise)
+  await flush()
+  chat.receive({ method: "session.state", sessionId: "session", branchId: "worker", running: true, stopping: false })
+  await flush()
+  chat.ensureLine("session", "worker")
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  receive(chat, "worker", event(2, { kind: "text", requestId: "r1", delta: "answer" }))
+  await flush()
+  held.resolve(page([event(2, { kind: "text", requestId: "r1", delta: "answer" })], 2))
+  await flush()
+  const rows = chat.views.session.branches.worker.rows
+  assert.equal(rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(rows))
+  assert.equal(rows.find((row) => row.kind === "assistant").text, "answer")
+})
+
+test("a turn end in the window drops progress buffered before it and keeps the next request's", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise)
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: "old tail", textOffset: 0, thinking: "", thinkingOffset: 0 } })
+  held.resolve(page([event(1, { kind: "turn-end", outcome: "completed" })], 1))
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r2", text: "new tail", textOffset: 0, thinking: "", thinkingOffset: 0 } })
+  await flush()
+  const rows = chat.views.session.rows
+  assert.deepEqual(rows.filter((row) => row.kind === "assistant").map((row) => row.text), ["new tail"])
+})
+
+test("a failed centre buffers progress until its retry window applies it", async t => {
+  let fail = true
+  const chat = session(t, params => {
+    if (params.branchId !== "worker") return page([input(1, "on the root")], 1)
+    if (fail) throw new Error("the line could not be read")
+    return page([], 0)
+  }, { "session.branch_set_default": () => "worker" })
+  await flush()
+  await chat.setDefaultBranch("session", "worker")
+  assert.equal(chat.views.session.status, "failed")
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  receive(chat, "worker", event(2, { kind: "text", requestId: "r1", delta: "answer" }))
+  await flush()
+  assert.equal(chat.views.session.rows.length, 0, "the failed page shows no transcript")
+  fail = false
+  chat.retryCentre("session")
+  await flush()
+  const rows = chat.views.session.rows
+  assert.equal(rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(rows))
+  assert.equal(rows.find((row) => row.kind === "assistant").text, "answer")
+})
+
+test("an unopened line drops transient progress instead of caching it", async t => {
+  const chat = session(t, ({ branchId }) => branchId === "main" ? page([], 0) : page([], 0))
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1 } })
+  await flush()
+  chat.ensureLine("session", "worker")
+  await flush()
+  const rows = chat.views.session.branches.worker.rows
+  assert.equal(rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(rows))
+})

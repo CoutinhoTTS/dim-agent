@@ -372,3 +372,70 @@ test("a user row is settled by the turn end after its consumption, across an ear
   latest.apply(event(15, { kind: "turn-end", outcome: "completed" }))
   assert.deepEqual(settled(latest), { first: true, queued: true, steered: true, next: true })
 })
+
+test("a zero-output retry takes the replaced thought on its terminal fact", () => {
+  const projection = new Projection()
+  projection.progress(failedThought())
+  projection.apply(event(2, { kind: "model-end", requestId: "r1", error: "boom", failure: failure({ attempts: 2, retried: true }) }))
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+  const row = projection.rows.at(-1)
+  assert.equal(row.kind, "error")
+  assert.ok(!row.text.startsWith("The response above is incomplete."), row.text)
+})
+
+test("a retry that showed its own thought keeps it on the terminal fact", () => {
+  const projection = new Projection()
+  projection.progress(failedThought())
+  projection.progress({ ...failedThought(), thinkingPartId: "second", thinking: "final thought", thinkingStartedAt: 2_000 })
+  projection.apply(event(3, { kind: "model-end", requestId: "r1", error: "boom", failure: failure({ attempts: 2, retried: true, thinkingPartId: "second" }) }))
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].streaming, false)
+  assert.equal(thoughts[0].text, "", "only progress showed it")
+  const row = projection.rows.at(-1)
+  assert.ok(row.text.startsWith("The response above is incomplete. The provider reported a server error"), row.text)
+})
+
+test("a steer cancellation takes the replaced thought on its terminal fact", () => {
+  const projection = new Projection()
+  projection.progress(failedThought())
+  projection.apply(event(2, { kind: "model-end", requestId: "r1", cancelled: "replaced by steer" }))
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+})
+
+test("a delayed snapshot cannot reopen a thought after committed text", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "text", requestId: "r1", delta: "answer" }))
+  projection.progress(failedThought())
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+  assert.equal(projection.rows.find((row) => row.kind === "assistant").text, "answer")
+})
+
+test("a delayed snapshot cannot extend a shorter committed thought", () => {
+  const projection = new Projection()
+  projection.apply({ id: "second", sequence: 1, createAt: 1_001, content: { kind: "thinking", requestId: "r1", delta: "new" } })
+  projection.progress(failedThought())
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "new")
+})
+
+test("a new thought block after committed text is kept", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "text", requestId: "r1", delta: "answer" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "next", text: "", textOffset: 6, thinking: "next thought", thinkingOffset: 0 })
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "next thought")
+})
+
+test("committed text keeps the terminal's incomplete claim through a new thought", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "text", requestId: "r1", delta: "answer" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "next", text: "", textOffset: 6, thinking: "next thought", thinkingOffset: 0 })
+  projection.apply(event(3, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "echo" }))
+  projection.apply(event(4, { kind: "model-end", requestId: "r1", error: "boom", failure: failure() }))
+  const row = projection.rows.at(-1)
+  assert.equal(row.kind, "error")
+  assert.ok(row.text.startsWith("The response above is incomplete. The provider reported a server error"), row.text)
+})
