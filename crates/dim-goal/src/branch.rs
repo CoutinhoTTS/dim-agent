@@ -1688,26 +1688,15 @@ impl Owner {
             return Ok(());
         }
         let write = self.write_guard().await?;
-        let (evaluation, decision) = {
+        let decision = {
             let state = self.state.lock().unwrap();
             if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after)
                 || state.fold.interrupt_after(after).is_some()
             {
                 return Ok(());
             }
-            (
-                fold::decide_evaluation(&state.fold, after),
-                fold::decide_turn_end(&state.fold, limit, progress),
-            )
+            fold::decide_turn_end(&state.fold, limit, progress)
         };
-        if evaluation {
-            // A Queue that held the evaluator-first decision back was
-            // withdrawn: the turn end belongs to that decision again
-            // (Pursuit §4.1), not to a continuation or a pause.
-            drop(write);
-            self.evaluate_turn_end(after).await?;
-            return Ok(());
-        }
         let Some(decision) = decision else {
             return Ok(());
         };
