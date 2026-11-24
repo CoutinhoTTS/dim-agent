@@ -89,9 +89,9 @@ mean something, not a simplification.
 
 ## 2. Product behavior
 
-A mode declares its entry tool, plus the tools whose result the program cannot consume: `skill`
-carries instructions for the model, and a shell has no program, so it also declares `ask_user` and
-`recall`.
+`codemode` and `shell` declare their entry tool, plus the tools a program cannot consume.
+`codemode` adds `skill`, whose result is instructions for the model; `shell` has no program, so it
+adds `ask_user` and `recall`. `normal` declares the work tools.
 
 | Mode | Declared | A program may call | Hidden |
 | --- | --- | --- | --- |
@@ -112,6 +112,23 @@ carries instructions for the model, and a shell has no program, so it also decla
   mode.
 - What each entry tool must provide to carry its mode is §7.
 
+### Goals in shell mode
+
+`shell` declares no `goal_update`, so a shell Session cannot complete or block a goal. The mode
+contract:
+
+- Entering `shell` rewrites no goal. On the next continuation, Goal reads the Session's mode and, in
+  `shell`, pauses the goal (`paused`, reason `mode`) instead of continuing, so the model is never
+  asked to call a tool the mode does not declare.
+- `session.goal.set` and `session.goal.resume` are refused in `shell` with a named error; `pause`,
+  `edit`, `clear` and `get` keep working.
+- Leaving `shell` does not resume the goal: the operator resumes it explicitly, as Goal already
+  requires for a paused goal.
+- A completed or blocked goal stays as it is.
+
+Goal's owner states this lifecycle and its acceptance cases in [Goal](plugins/Goal.md); this design
+sets the requirement and writes no Goal fact itself.
+
 Rules that hold in every mode:
 
 - Approval and Permission are unchanged. Each call is admitted under the called tool's own risk,
@@ -131,7 +148,7 @@ may change it behind the operator's back.
 | Situation | Rule | Why |
 | --- | --- | --- |
 | A new Session from a client | starts in the mode the request names, or `normal` when it names none; the client sends the mode it last used | the operator should not re-choose for every Session |
-| A running Session | the operator can switch it at any time; the next model request declares the new mode, a request already prepared keeps its pin (including its own recovery), and a call already admitted finishes | otherwise a change of style means abandoning the conversation |
+| A running Session | the operator can switch it at any time; the next model request declares the new mode, a request already prepared keeps its pin (an in-process budget recovery reuses it; a process restart settles the in-flight request), and a call already admitted finishes | otherwise a change of style means abandoning the conversation |
 | A branch (line) | has no mode of its own; every line of a Session runs the Session's mode | a line is the same agent; a line in another mode would hand the agent tools the operator excluded |
 | A member Session | starts in its creator Session's current mode, and the operator can switch it like any Session | the member is the same agent doing delegated work; the model must not decide how the agent acts |
 | The model | never chooses or changes a mode | it is the operator's choice of capability |
@@ -149,8 +166,8 @@ owns this projection. Three terms:
   `SessionConfig.tools` and `excluded_tools`. The branch adopts and pins this set, and it does not
   change when the mode does.
 - **visible**: what the request declares and what a top-level model call may name.
-- **delegated**: what a Code Mode child call may name. Their union is the request's exposed set, the
-  only tools the request binds.
+- **delegated**: what a Code Mode child call may name. The request binds their union; neither is an
+  admission set by itself.
 
 | Mode | visible (top-level) | delegated (child) | entry tool absent |
 | --- | --- | --- | --- |
@@ -164,14 +181,16 @@ owns this projection. Three terms:
   inside `delegated`. Both then pass the called tool's own Permission and Approval. A call outside
   its origin's set is refused as an unknown tool, even when the tool is bound. The origin is the
   existing parent-call scope (`current_parent_call_id`), so a hidden tool cannot be reached by
-  naming it directly.
+  naming it directly. The check runs before a handler's `claim`, so a refused call registers no
+  waiter and takes no effect.
 - A Code Mode program discovers and calls exactly the `delegated` set: `tools.list` and
   `tools.describe` project it, and `tools.call` admits inside it. `codemode` itself is never
   delegated, so a program cannot nest one.
 - A request pins the mode it was prepared under, together with the callable set it pins today, and
   derives both sets from that pin. A switch takes effect with the next request and needs no
   re-adoption: the branch's configuration, the version pins and the source sets stay as they are. A
-  request retried through its own source (a budget recovery or a restart recovery) keeps the pin; a
+  request retried through its own source (an in-process budget recovery) keeps the pin; a process
+  restart settles the in-flight request as the loop already does and does not reissue it; a
   continuation request is a new request and pins the current mode, as does the request that follows
   a tool result.
 - Only `visible` reaches the model request, its token accounting and compaction. `delegated` never
@@ -189,9 +208,10 @@ unavailable mode instead of silently falling back.
 
 The mode is Session configuration; there is no daemon-wide default to maintain.
 
-- `session.create` may name the mode; a Session created without one starts `normal`. The field is
-  additive and advertised as `session.create.toolMode`, like `session.language`, because an older
-  daemon rejects an unknown field.
+- `session.create` may name the mode in `toolMode`; a Session created without one starts `normal`.
+  The field is additive and advertised as `session.create.toolMode`, like `session.language`,
+  because an older daemon rejects an unknown field. `Create` carries it as `tool_mode`, which
+  serializes as `toolMode`.
 - The App Server records the mode in `SessionConfig.toolMode`. `normal` omits the member, so a
   normal Session's stored configuration has the same bytes as before this field existed; an old
   record reads as `normal`. A fork copies the value, and a restore starts from it.
@@ -205,15 +225,17 @@ The mode is live for the Session's lifetime:
   read it when they are prepared; nothing re-adopts a tool set when it changes.
 - `session.tool_mode.get` returns `{mode, effective}`: the mode the operator chose and the one in
   force. A mode whose entry tool is absent stays chosen and is not in force; that is the fallback.
-  `session.tool_mode.update` writes the stored record (native storage only, as
-  `session.language.update` does) and the live value. The pair is advertised as `session.tool_mode`,
-  like `session.language`.
+  `session.tool_mode.update` follows `session.language.update`'s order: a failure before the record
+  write changes nothing; once the record is written the live value is replaced, and a later
+  cancellation keeps the new value stored, so the two do not diverge. The pair is advertised as
+  `session.tool_mode`, like `session.language`.
 - The model has no tool for this; it is a client method only.
 
 ```text
-session.create.mode ──▶ SessionConfig.toolMode ──▶ ToolRegistry (live mode)
-                                                       ├─ a request pins the mode ──▶ visible ──▶ model request, usage
-                                                       └─ a call checks the pinned mode ──▶ exposed ──▶ admit or refuse
+session.create.toolMode ──▶ SessionConfig.toolMode ──▶ ToolRegistry (live mode)
+                                                          ├─ a request pins the mode ──▶ visible ──▶ model request, usage
+                                                          ├─ a top-level call checks `visible` ──▶ admit or refuse
+                                                          └─ a child call checks `delegated` ──▶ admit or refuse
                      session.tool_mode.update ──▶ live mode + stored record
 ```
 
@@ -232,8 +254,10 @@ only in the minimal-execution profile, where `ShellTools` takes the Session's si
   declaration and handler with `ToolRegistry` instead of providing `ToolHost`, and still resolves
   the calling branch's `ShellSession` per call. The registry's registration already carries what a
   host tool needs: declaration, handler, risk, mount-list filtering and per-Session lifetime.
-- The minimal-execution profile is `shell` by construction: its Sessions set `toolMode: shell`,
-  because `normal` would filter the only tool it has.
+- The minimal-execution profile is `shell` by construction: its host sets `toolMode: shell` when it
+  creates a Session and when it restores one whose record lacks the field, because `normal` would
+  filter the only tool it has. It binds `ToolHost` with an empty driver, because `ShellTools` no
+  longer provides one.
 
 Why not conditional mounting: a Session has one `ToolHost` (`WorkspaceTools` provides it in the
 product), and mounting `ShellTools` instead of `WorkspaceTools` for shell Sessions would also remove
@@ -245,16 +269,17 @@ Stopping a task is a separate route. Today `session.exec.stop` resolves the bran
 `ShellSession`, which provides the branch's `dyn ExecStop`. With `execute` in the product, both
 kinds exist in one Session:
 
-- The stop route asks `BackgroundExec` first and, when it does not know the id, the branch's
-  `ExecStop`, so either kind stops and writes its `exec/ended`.
+- The stop route resolves the live owner first: the branch's `ExecStop` for a live shell task, then
+  `BackgroundExec` for a native process. A task neither owns is read from shared history for its
+  terminal result; history never answers for a live task.
 - Both parts stay mounted when the mode changes, so a task started in `shell` or `codemode` can
   still be stopped after the Session switches to `normal`.
 - `session.stop` remains the turn's stop and stops no background task.
 
 ## 7. What the entry tools must provide
 
-A mode declares one entry tool, so that tool must carry everything the mode promises. The items
-below are its requirements; the ones marked missing are follow-up work, not part of this change.
+A mode's entry is one tool, so that tool must carry everything the mode promises. The items below
+are its requirements; the ones marked missing are follow-up work, not part of this change.
 
 `codemode`:
 
@@ -278,10 +303,13 @@ below are its requirements; the ones marked missing are follow-up work, not part
   under the program row. The protocol exists (v4); grouping is a client feature.
 - A failure manifest: a failed program names the child calls that ran and their effects, beyond
   today's "some child calls may have completed". Missing.
-- Stop: stopping the program ends its children and writes a terminal result that says what may have
-  run. Missing.
+- Stop: the turn's stop and interrupt already cancel the program's children and return the
+  may-have-run warning; a per-program stop that leaves the turn running is missing.
 - Bounds on time, memory, calls and output. Exists.
-- A description and examples that teach discovery, loop bounds and partial results. Missing.
+- Approval wording: the outer approval says a program will call tools, and the child calls appear
+  under it as they happen. Missing.
+- The description exists; examples that teach discovery, loop bounds and partial results are
+  missing.
 
 `execute`:
 
@@ -326,9 +354,10 @@ there is no default row to set.
 ╰──────────────────────────────────────────────╯
 ```
 
-The picker lists all three modes; a mode whose `hello.features` entry is absent is shown as
-unavailable and cannot be chosen. A switch takes effect from the next request, and the row shows the
-effective mode, so a mode that fell back to `normal` is not reported as in force.
+The picker lists all three modes; `normal` is always available, and `codemode` or `shell` is shown
+as unavailable when its `hello.features` entry is absent. A switch takes effect from the next
+request, and the row shows the effective mode, so a mode that fell back to `normal` is not reported
+as in force.
 
 ## 9. Compatibility
 
@@ -339,9 +368,15 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
   the fallback rule makes the Session `normal`, and a v3 client can neither select nor receive Code
   Mode ([child tool batches §2.6](appserver/child-tool-batches.md#26-app-server-code-mode-gate)).
 - [CodeMode](plugins/CodeMode.md) and [child tool batches](appserver/child-tool-batches.md) change
-  in one respect: the `codemode` tool is offered in `codemode` mode, not to every v4 Session. The
-  child-event contract is unchanged.
-- A Session restored from a record that predates this field becomes `normal`. A Session that used
+  in two respects: the `codemode` tool is offered in `codemode` mode, not to every v4 Session, and
+  its request declares only `codemode` and `skill` instead of every adopted tool. The child-event
+  contract is unchanged.
+- The canonical contracts gain the mode with the implementation, each by its owner:
+  `SessionConfig.toolMode` in [session access](contracts/session-access.md), the live mode and
+  projection in [ToolRegistry](../architecture/rust-agent/plugins/ToolRegistry.md), and the
+  declaration set plus admission split in [CodeMode](plugins/CodeMode.md).
+- A Session restored from a record that predates this field becomes `normal`, except in the
+  minimal-execution profile, whose host sets `shell` on create and restore (§6). A Session that used
   the `codemode` tool therefore loses it on upgrade until the operator selects `codemode`. That is
   the intended product change.
 
@@ -362,17 +397,21 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
   `session.question.respond`; its result drives the program and is not duplicated into the model
   context unless the program returns it.
 - Flow: switch a running Session in each direction; the next request declares the new visible set,
-  the request after a tool result uses the new mode, a request retried through its own source
-  (budget or restart recovery) keeps its pin, and a call already admitted finishes.
+  the request after a tool result uses the new mode, an in-process budget recovery keeps its pin, a
+  process restart settles the in-flight request without reissuing it, and a call already admitted
+  finishes.
 - Flow: fallback — a mode whose entry tool is absent stays chosen in `get` and is reported as not in
   force; the Session declares the `normal` surface.
 - Flow: a member created under `codemode` records it; switching the creator leaves the member
   unchanged.
 - Flow: restore a record without the field, and fork a Session; both keep `normal` and the source
-  mode respectively.
-- Flow: stop a shell task with `session.exec.stop` after switching the Session to `normal`; the same
-  route stops a native process from `BackgroundExec`. The minimal-execution profile's Session runs
-  `shell` and keeps `execute`.
+  mode respectively, except that the minimal-execution host restores its Sessions as `shell`.
+- Flow: a goal set before switching to `shell` pauses at the next continuation with reason `mode`;
+  `session.goal.set` and `resume` are refused in `shell`; after leaving, the operator resumes it and
+  it continues.
+- Flow: stop a shell task with `session.exec.stop` after switching the Session to `normal`; the
+  route resolves the live `ExecStop` before `BackgroundExec`, and neither answers for a live task
+  from history. The minimal-execution profile's Session runs `shell` and keeps `execute`.
 - Clients: a web component test for the composer menu and the remembered choice, and one tmux TUI
   case for the row and the picker.
 - No event type, envelope or stored format changes, so the fixture compatibility baseline is
@@ -392,8 +431,8 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
 - §4 rule 5: no batches.
 - §4 rule 6: the visible set is exactly what the request declares; no new context path.
 - §4 rule 7: parts coordinate through the Session configuration and the registry's own read.
-- §4 rule 8: no infrastructure change; Timeline, Dispatcher, the event envelope, assembly and the
-  Session facades are untouched.
+- §4 rule 8: no infrastructure change; the product profile's tool wiring changes (§6), while
+  Timeline, Dispatcher, the event envelope, rutis assembly and the Session facades are untouched.
 - §4 rule 9: the mode is Session configuration, not a Timeline fact, and follows
   `session.language`: the current value lives in the registry, the durable copy in the stored
   record.
