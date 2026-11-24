@@ -4296,6 +4296,7 @@ impl App {
             Effect::UseSkill(name) => {
                 self.prompt = None;
                 self.composer.prepend_skill(&format!("/skill:{name}"));
+                self.command_entry = true;
             }
             Effect::Close => {
                 if matches!(self.prompt, Some(Prompt::Sessions(_))) {

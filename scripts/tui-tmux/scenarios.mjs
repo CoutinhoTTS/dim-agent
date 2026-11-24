@@ -1036,6 +1036,62 @@ const scenarios = [
       await exitWith(terminal);
     },
   },
+  ...['scrollback', 'fullscreen'].map((mode) => ({
+    name: `${mode}_skill_draft_at_home_and_over_a_question`,
+    area: 'skills',
+    title: 'A Skill completes at Home and keeps the task draft in focus over a question',
+    async run(tui) {
+      await tui.setup({
+        files: {
+          '.agents/skills/review-demo/SKILL.md': '---\nname: review-demo\ndescription: Review a draft\n---\nUse the fixture reviewer.',
+        },
+        respond: (request) => {
+          if (lastMessage(request).role === 'user' && userText(request).includes('ask before review')) {
+            const question = {header: 'Review', question: 'Which draft?', options: [{label: 'First'}, {label: 'Second'}]};
+            return {toolCalls: [{name: 'ask_user', arguments: {questions: [question]}}]};
+          }
+          return {text: ANSWER};
+        },
+      });
+      const args = ['--cwd', path.join(tui.root, 'workspace')];
+      if (mode === 'fullscreen') args.push('--fullscreen');
+      const terminal = await tui.launch(args, {waitForComposer: true});
+      terminal.send('/review-de');
+      await terminal.waitFor('Tab / Enter complete');
+      terminal.key('Enter');
+      terminal.send('ask before review');
+      await terminal.waitFor('/skill:review-demo ask before review');
+      assert.equal(turnRequests(tui.model).length, 0);
+      terminal.key('Enter');
+      await terminal.waitFor('Which draft?');
+      for (const finish of ['Escape', 'Enter']) {
+        terminal.send('/skills');
+        terminal.key('Enter');
+        await terminal.waitFor('Enter use');
+        terminal.key('Enter');
+        terminal.send('check the draft');
+        await terminal.waitFor('/skill:review-demo check the draft');
+        assert.equal(turnRequests(tui.model).length, 1);
+        terminal.key(finish);
+        await terminal.waitFor('Which draft?');
+      }
+      terminal.key('Down', 'Enter');
+      await terminal.waitFor('Review your answers');
+      terminal.key('Enter');
+      await waitForRequest(tui.model, (request) => request.messages?.some((m) => m.role === 'tool' && JSON.stringify(m.content).includes('Second')));
+      await waitForRequest(tui.model, (request) => request.messages?.some((m) => m.role === 'user' && JSON.stringify(m.content).includes('check the draft')));
+      await terminal.waitFor(ANSWER);
+      terminal.send('/new');
+      terminal.key('Enter');
+      await terminal.waitFor('─ new session ─');
+      await terminal.untilComposer();
+      terminal.send('/review-de');
+      await terminal.waitFor('Tab / Enter complete');
+      terminal.key('Tab');
+      terminal.send('back at home');
+      await terminal.waitFor('/skill:review-demo back at home');
+    },
+  })),
   {
     name: 'question_panel_answer_reaches_the_next_request',
     area: 'approvals',

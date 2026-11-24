@@ -18,8 +18,7 @@ pub const CHROME_ROWS: usize = 4;
 const HINT: &str = "type filter · enter select · esc clear/close";
 
 fn skill_hint(state: &PaletteState, rows: &[Row]) -> Option<&'static str> {
-    matches!(rows.get(state.current(rows))?.kind, Kind::Skill)
-        .then(|| t("Tab complete · Enter send"))
+    matches!(rows.get(state.current(rows))?.kind, Kind::Skill).then(|| t("Tab / Enter complete"))
 }
 
 /// Listed commands matching `query`, best first: the exact name, a name

@@ -196,13 +196,11 @@ outside the menu.
 A Skill row reads `/skill:<name>` with its description. Only an enabled, unshadowed,
 user-invocable Skill whose name the token can carry is listed: a name holding a character outside
 `A-Z`, `a-z`, `0-9`, `_`, `-` and `.`, or ending with a full stop, cannot be referenced, so it is
-not listed either. The list
-follows the
-Session's catalog: the client rereads it on attach, on a Session switch, after
+not listed either. Home reads the launch workspace's catalog on startup and on return
+from a Session. In a Session the client reads that Session's workspace on attach, on a switch, after
 `/reload-skills`, and after a change in `/skills`. A daemon that does not serve
 `skills.catalog` shows the commands alone, without an error. On a selected Skill,
-the hint reads `Tab complete · Enter send`. Tab inserts `/skill:<name> ` for further editing;
-Enter sends the selected reference as a message. Typing `/skill:`
+Tab and Enter both insert `/skill:<name> ` for further editing without sending. Typing `/skill:`
 narrows the menu to Skills: the query after the `skill:` namespace matches Skill
 names only. A draft that begins with `/skill:` is sent as a message and never run as
 a command, and a token may stand mid-sentence as long as it starts the message or
@@ -1103,6 +1101,7 @@ In both TUI modes, `/skills` lists names and states by source. Selecting a Skill
 display its description, file path or file contents. In this panel Tab toggles the selected
 Skill and leaves the list open. Enter uses an invocable selection: it closes the list and
 puts `/skill:<name> ` in the chat composer. Type the task there and press Enter to send.
+If a question was pending, the composer keeps keyboard focus until the draft is sent or cancelled.
 Enter on a disabled or otherwise non-invocable row neither sends nor changes its state.
 
 ```text

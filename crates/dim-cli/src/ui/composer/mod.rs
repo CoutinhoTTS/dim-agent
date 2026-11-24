@@ -543,12 +543,8 @@ impl Composer {
             }
             KeyCode::Enter => {
                 let row = rows.get(self.palette.current(&rows))?;
-                if matches!(row.kind, crate::ui::rows::Kind::Skill) {
-                    if newline_key(&key) {
-                        return None;
-                    }
-                    self.clear();
-                    return Some(Outcome::Submit(row.label.clone()));
+                if matches!(row.kind, crate::ui::rows::Kind::Skill) && newline_key(&key) {
+                    return None;
                 }
                 match Self::row_command(row, &query) {
                     Some(command) => {
@@ -783,7 +779,6 @@ impl Composer {
                 // No row matches, so `palette_key`'s `?` leaves the draft to the
                 // editor, which submits it or opens a new line.
                 None => !newline_key(key),
-                Some(row) if matches!(row.kind, crate::ui::rows::Kind::Skill) => !newline_key(key),
                 Some(row) => Self::row_command(row, &query).is_some(),
             };
         }
@@ -2428,7 +2423,7 @@ mod tests {
     }
 
     #[test]
-    fn a_skill_row_sends_on_enter_and_completes_on_tab() {
+    fn a_skill_row_completes_without_sending_and_preserves_newline_keys() {
         for event in [
             key(KeyCode::Enter),
             key(KeyCode::Tab),
@@ -2443,17 +2438,14 @@ mod tests {
                 display_description: None,
             }]);
             typed(&mut c, "/comm");
-            assert_eq!(c.submits(&event), event == key(KeyCode::Enter));
+            assert!(!c.submits(&event));
             let result = c.handle_key(event);
             if event.mods != Modifiers::NONE {
                 assert_eq!(result, Outcome::Handled);
                 assert_eq!(c.text(), "/comm\n");
-            } else if event.code == KeyCode::Tab {
+            } else {
                 assert_eq!(result, Outcome::Handled);
                 assert_eq!(c.text(), "/skill:commit ");
-            } else {
-                assert_eq!(result, Outcome::Submit("/skill:commit".into()));
-                assert!(c.is_empty());
             }
             assert!(!c.palette_open());
         }
