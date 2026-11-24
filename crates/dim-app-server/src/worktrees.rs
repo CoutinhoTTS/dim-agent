@@ -262,6 +262,13 @@ impl ManagedWorktrees {
                 ));
                 continue;
             }
+            // A removal registers a path under the ownership lock and clears
+            // it only when the deletion returns; a directory that registration
+            // still covers is not built in, even if its files are already gone.
+            if let Err(error) = self.sessions.reject_worktree_creation(&directory).await {
+                last = Some(error.into());
+                continue;
+            }
             let branch_name = match branch {
                 Some(branch) => branch.to_owned(),
                 None => format!("dim/{task_id}"),

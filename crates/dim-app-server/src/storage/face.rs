@@ -161,6 +161,14 @@ impl Store {
     ) -> impl Future<Output = Result<bool>> {
         self.0.remove_unregistered_directory(path, remove)
     }
+    /// Refuses a worktree directory a removal registered as being deleted; the
+    /// check takes the ownership lock the removal registers under.
+    pub(crate) fn reject_worktree_creation(
+        &self,
+        path: &std::path::Path,
+    ) -> impl Future<Output = Result<()>> {
+        self.0.reject_worktree_creation(path)
+    }
 }
 
 #[derive(Deserialize)]

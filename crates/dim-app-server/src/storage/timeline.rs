@@ -2049,6 +2049,15 @@ impl SessionStore {
         }
     }
 
+    /// Refuses a worktree directory a removal is deleting now, taking the same
+    /// ownership lock and reading the same set a removal registers under. A
+    /// creation picks its directory before it builds there, so this keeps it
+    /// out of a path whose deletion is still finishing.
+    pub(crate) async fn reject_worktree_creation(&self, path: &Path) -> Result<()> {
+        let _ownership = self.ownership.lock().await;
+        self.reject_deletion(path).await
+    }
+
     /// Lists the Session associations of a recorded directory. An unknown
     /// directory or a candidate without remaining associations has no usages.
     pub async fn worktree_usages(
