@@ -872,6 +872,93 @@ fn configured_top_k_on_the_openai_chat_protocol_names_the_setting_and_the_altern
     AimuxModels::from_config(configuration("openai-compatible", Some(1.0))).unwrap();
 }
 
+/// The development file's `network` block states the same connection facts a
+/// product record does, and refuses the values the transport cannot use.
+#[test]
+fn a_network_block_refuses_values_the_transport_cannot_use() {
+    let configuration = |network: Value| {
+        serde_json::from_value::<ModelConfigFile>(json!({
+            "defaultModel": {"providerId": "local", "modelId": "test-model"},
+            "providers": [{"id": "local", "kind": "openai-compatible",
+                "baseUrl": "http://127.0.0.1:9/v1",
+                "network": network,
+                "models": [{"id": "test-model", "contextWindow": 128_000,
+                    "maxOutputTokens": 4096, "config": {"maxTokens": 4096}}]}]
+        }))
+        .unwrap()
+    };
+    for network in [
+        json!({"proxy": "socks5://localhost:1080"}),
+        json!({"proxy": "https://host/path"}),
+        json!({"proxy": "https://host?secret=value"}),
+    ] {
+        let error = AimuxModels::from_config(configuration(network.clone()))
+            .expect_err("a proxy the transport cannot use");
+        assert_eq!(
+            error.to_string(),
+            "Invalid proxy for local: an HTTP or HTTPS root URL is required",
+            "{network}"
+        );
+    }
+    for network in [
+        json!({"timeoutMs": 0}),
+        json!({"timeoutMs": 9_007_199_254_740_992u64}),
+    ] {
+        let error = AimuxModels::from_config(configuration(network.clone()))
+            .expect_err("a timeout outside the safe integer range");
+        assert_eq!(
+            error.to_string(),
+            "Invalid network timeout for local: a positive integer is required",
+            "{network}"
+        );
+    }
+    for network in [
+        json!({"proxy": "https://proxy.example.test/"}),
+        json!({"timeoutMs": 30_000}),
+        json!({}),
+    ] {
+        AimuxModels::from_config(configuration(network)).unwrap();
+    }
+}
+
+/// The block reaches the connection every request of the provider resolves, so
+/// a development configuration can set the connection's proxy and timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_network_block_reaches_the_connection_a_request_resolves() {
+    let server = TestServer::start().await;
+    let config: ModelConfigFile = serde_json::from_value(json!({
+        "defaultModel": {"providerId": "local", "modelId": "test-model"},
+        "providers": [{"id": "local", "kind": "openai-compatible",
+            "baseUrl": server.url,
+            "network": {"proxy": "http://127.0.0.1:9/", "timeoutMs": 45},
+            "models": [{"id": "test-model", "contextWindow": 128_000,
+                "maxOutputTokens": 4096, "config": {"maxTokens": 4096}}]}]
+    }))
+    .unwrap();
+    let agent = model_agent(Arc::new(AimuxModels::from_config(config).unwrap()), None).await;
+    let resolver = agent.root().get::<ProviderConnectionResolver>().unwrap();
+    let request = Arc::new(ModelRequest::new(
+        "local",
+        "test-model",
+        vec![Message::text(Role::User, "hi")],
+    ));
+    let resolved = resolver
+        .0
+        .resolve(request, CancellationToken::new())
+        .await
+        .unwrap();
+    let ModelConnection::Http(connection) = resolved.connection else {
+        panic!("the development profile resolves an HTTP connection")
+    };
+    assert_eq!(
+        connection.network.proxy.as_deref(),
+        Some("http://127.0.0.1:9/")
+    );
+    assert_eq!(connection.network.timeout_ms, Some(45));
+    agent.close().await.unwrap();
+    server.close().await;
+}
+
 struct OverrideRequest {
     remove_tools: bool,
     timeline: rutis::host::Key<Timeline>,
@@ -924,6 +1011,7 @@ async fn before_committed_request_controls_model_settings_and_tool_admission() {
             kind: dim_agent_aimux::config::ProviderKind::OpenaiCompatible,
             api_key_env: None,
             base_url: selected.url.clone(),
+            network: Default::default(),
             headers: Default::default(),
             compatible: None,
             models: vec![dim_agent_aimux::config::ModelEntry {
