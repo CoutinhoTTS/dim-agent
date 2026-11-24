@@ -250,15 +250,24 @@ fn anthropic_base_url(base_url: &str) -> String {
     }
 }
 
+/// What the transport saw when it produced the response headers.
+struct ResponseReport {
+    status: http::StatusCode,
+    /// The clock reading at which the exchange produced the headers. A
+    /// deadline is judged against this reading, not against the next poll.
+    received: tokio::time::Instant,
+}
+
 /// The transport of one model call, watched by its driver.
 ///
-/// The driver cannot see how far a provider has got inside `do_stream`: the
-/// OpenAI Chat provider reads one stream event after the headers and before it
-/// returns, while the compatible provider returns at the headers, so a
-/// deadline around the whole call cannot tell a late set of headers from a
-/// late first event. The driver only sees the events the stream produces, so
-/// this decorator reports the status as soon as the transport produces a
-/// response.
+/// The driver cannot see how far a provider has got inside `do_stream`: some
+/// providers (OpenAI Chat, Anthropic, Gemini, xAI Responses) read one stream
+/// event after the headers before they return, the OpenAI Responses provider
+/// reads until its SDK's startup scan finds output, and the compatible and
+/// Bedrock providers return at the headers, so a deadline around the whole
+/// call cannot tell a late set of headers from a late stream start. The driver
+/// only sees the events the stream produces, so this decorator reports the
+/// status and the instant the transport produced it.
 ///
 /// It also bounds a non-2xx body: the provider reads that body before it
 /// returns the failure, and a stalled body would otherwise outlive the
@@ -268,15 +277,19 @@ fn anthropic_base_url(base_url: &str) -> String {
 /// status it already received with the bytes that arrived.
 struct ResponseWatch {
     inner: FetchFunction,
-    status: Mutex<Option<tokio::sync::oneshot::Sender<http::StatusCode>>>,
+    status: Mutex<Option<tokio::sync::oneshot::Sender<ResponseReport>>>,
 }
 
 #[async_trait::async_trait]
 impl Fetch for ResponseWatch {
     async fn fetch(&self, request: FetchRequest) -> Result<FetchResponse, FetchError> {
         let response = self.inner.fetch(request).await?;
+        let received = tokio::time::Instant::now();
         if let Some(status) = self.status.lock().unwrap().take() {
-            let _ = status.send(response.status());
+            let _ = status.send(ResponseReport {
+                status: response.status(),
+                received,
+            });
         }
         if response.status().is_success() {
             return Ok(response);
@@ -561,6 +574,22 @@ fn build_model(
     }
 }
 
+/// Why the wait after the response headers expired: the headers are in, but
+/// the stream has not started. Providers that peek at the stream read one
+/// event before they return it; the OpenAI Responses SDK reads response
+/// metadata first, so its wait ends at the stream's start, not at an event
+/// the driver can see.
+fn headers_arrived_reason(protocol: ModelProtocol) -> String {
+    let ended = match protocol {
+        ModelProtocol::OpenaiResponses => "the stream did not start",
+        _ => "no stream event followed",
+    };
+    format!(
+        "the response headers arrived, but {ended} within {} seconds",
+        stream::STREAM_IDLE_TIMEOUT.as_secs()
+    )
+}
+
 pub(crate) struct AimuxDriver {
     files: Option<Arc<dim_agent_capabilities::host::SessionFiles>>,
     /// The identity this driver's model requests carry, owned by the Aimux
@@ -773,15 +802,17 @@ impl ModelDriver for AimuxDriver {
                 capture.pending()
             });
             // Three waits carry the idle allowance: sending the request until
-            // the response headers, the headers until the first stream event
-            // (a provider may read one before it returns the stream), and one
-            // part until the next. `ResponseWatch` reports the headers here
-            // and the deadline moves to the first event.
+            // the response headers, the headers until the stream starts (a
+            // provider may read the stream before it returns it, and the
+            // Responses SDK reads response metadata first), and one part
+            // until the next. `ResponseWatch` reports the headers with the
+            // instant it produced them, so the second wait runs from receipt.
             let result = {
                 let mut awaiting_headers = true;
                 let mut headers_arrived = false;
                 let mut bounded = true;
-                let mut deadline = Box::pin(tokio::time::sleep(stream::STREAM_IDLE_TIMEOUT));
+                let mut deadline_at = tokio::time::Instant::now() + stream::STREAM_IDLE_TIMEOUT;
+                let mut deadline = Box::pin(tokio::time::sleep_until(deadline_at));
                 let exchange = async {
                     match &recording {
                         Some(capture) => capture.scope(model.do_stream(&options)).await,
@@ -803,12 +834,27 @@ impl ModelDriver for AimuxDriver {
                             return Err(HostError::Cancelled("Model invocation cancelled".into()));
                         }
                         _ = &mut deadline, if bounded => {
+                            // A report the transport wrote before the deadline
+                            // is on time even when this poll is late.
+                            if awaiting_headers
+                                && let Ok(report) = response.try_recv()
+                                && report.received <= deadline_at
+                            {
+                                awaiting_headers = false;
+                                headers_arrived = true;
+                                if report.status.is_success() {
+                                    deadline_at = report.received + stream::STREAM_IDLE_TIMEOUT;
+                                    deadline.as_mut().reset(deadline_at);
+                                    continue;
+                                }
+                                // A non-2xx reply fails with the status it
+                                // carries; the exchange reports it.
+                                bounded = false;
+                                continue;
+                            }
                             abort.abort();
                             let error = stream::idle_failure(if headers_arrived {
-                                format!(
-                                    "the response headers arrived, but no stream event followed within {} seconds",
-                                    stream::STREAM_IDLE_TIMEOUT.as_secs()
-                                )
+                                headers_arrived_reason(protocol)
                             } else {
                                 format!(
                                     "no response headers arrived within {} seconds of sending the request",
@@ -820,14 +866,13 @@ impl ModelDriver for AimuxDriver {
                             }
                             return Err(error);
                         }
-                        status = &mut response, if awaiting_headers => {
+                        report = &mut response, if awaiting_headers => {
                             awaiting_headers = false;
-                            if let Ok(status) = status {
+                            if let Ok(report) = report {
                                 headers_arrived = true;
-                                if status.is_success() {
-                                    deadline.as_mut().reset(
-                                        tokio::time::Instant::now() + stream::STREAM_IDLE_TIMEOUT,
-                                    );
+                                if report.status.is_success() {
+                                    deadline_at = report.received + stream::STREAM_IDLE_TIMEOUT;
+                                    deadline.as_mut().reset(deadline_at);
                                 } else {
                                     // A non-2xx reply fails with the status it
                                     // carries; its body is bounded by the
