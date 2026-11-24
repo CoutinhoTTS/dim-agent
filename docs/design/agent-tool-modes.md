@@ -115,16 +115,17 @@ program, so it adds `ask_user` and `recall`. `normal` declares the work tools.
 
 `shell` declares no `goal_update`, so a Session whose mode **in force** is `shell` cannot complete
 or block a goal. Everything below keys on the mode in force — the `effective` value
-`session.tool_mode.get` reports — never on the chosen mode.
+`session.tool_mode.get` reports — never on the chosen mode. The one exception is an update, which
+hands Goal the pending mode and Goal checks that it would be effective.
 
 - **Update.** `session.tool_mode.update` calls Goal's settle operation with the pending mode before
   the record write and waits for it. Goal settles only when that mode would be effective `shell` —
   its entry tool is in the callable set — because a chosen `shell` without `execute` runs `normal`.
-- **Registration.** When the entry tool registers or withdraws and makes `shell` effective without
-  an update, `ToolRegistry` publishes the effective mode; Goal settles on that signal. A held
-  continuation released before Goal settles can reach one turn under `shell`, and its `goal_update`
-  call is refused as an unknown tool. Closing that window needs a pre-change signal from the
-  registry; §12 records it.
+- **Registration.** When the entry tool registers and makes `shell` effective without an update,
+  `ToolRegistry` publishes the effective mode; Goal settles on that signal. A held continuation
+  released before Goal settles can reach one turn under `shell`, and its `goal_update` call is
+  refused as an unknown tool; that window is accepted. A withdrawal that removes the entry tool
+  runs `normal` and does not resume a paused goal.
 - **Settle.** The Goal Session part fans out to every branch with an active goal: it writes
   `paused` with reason `mode`, a pause input text carrying that reason (Goal state alone does not
   enter the model context), and withdraws the continuation it queued when the InputQueue has not
@@ -242,10 +243,11 @@ The mode is live for the Session's lifetime:
   it when it starts; nothing re-adopts a tool set when it changes.
 - `session.tool_mode.get` returns `{mode, effective}`: the mode the operator chose and the one in
   force. A mode whose entry tool is absent stays chosen and is not in force; that is the fallback.
-  `session.tool_mode.update` follows `session.language.update`'s order: a failure before the record
-  write changes nothing; once the record is written the live value is replaced, and a later
-  cancellation keeps the new value stored, so the two do not diverge. The pair is advertised as
-  `session.tool_mode`, like `session.language`.
+  `session.tool_mode.update` runs, in order: Goal settles for the pending mode when it would be
+  effective `shell` (§2), the record is written, the live value is replaced. A failure before the
+  record write leaves the mode pair unchanged and a committed Goal pause in place; once the record
+  is written, a later cancellation keeps the new value stored, so the record and the live value do
+  not diverge. The pair is advertised as `session.tool_mode`, like `session.language`.
 - The model has no tool for this; it is a client method only.
 
 ```text
@@ -480,16 +482,16 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
 Requirements go to other owners:
 
 - **Goal.** Read the mode in force, the value `session.tool_mode.get` reports in `effective`, never
-  the chosen mode. Settle on every transition to an effective `shell`: on an update, when the App
-  Server calls it with the pending mode before the record write; on a registration or withdrawal, on
-  the registry's published effective mode. Fan out from the Goal Session part to every branch with
+  the chosen mode. On an update, take the pending mode from the App Server and check its entry tool
+  in the callable set; the general lifecycle reads the effective mode. Settle on every transition to
+  an effective `shell`: on an update, before the record write; on a registration, on the registry's
+  published effective mode. Fan out from the Goal Session part to every branch with
   an active goal: write `paused` (`mode`), a pause text carrying the reason, and withdraw a
   continuation the InputQueue has not applied. While `shell` is in force, pause new continuations
   and refuse `session.goal.set` and `resume`; leave resumption to the operator after `shell`
   leaves. Its owner carries this into [Goal](plugins/Goal.md).
-- **ToolRegistry.** Publish the effective mode to its readers so Goal settles on a registration or
-  withdrawal transition; a pre-change signal that lets Goal settle before the projection flips
-  closes the one-turn window in §2.
+- **ToolRegistry.** Publish the effective mode to its readers so Goal settles on a registration
+  transition; the one-turn window in §2 stands.
 - **PromptSources.** The environment block follows the surface: while `shell` is in force (the
   `effective` value) it drops the Windows file-encoding guidance about `read`/`edit`/`write`. Its
   owner carries this into [PromptSources](plugins/PromptSources.md).
