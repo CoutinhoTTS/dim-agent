@@ -4638,13 +4638,17 @@ This line is now the session's default branch, switched from line main. While th
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_default_configuration_writes_no_guidance_block() {
     let purpose = "the purpose of B";
+    let config = BranchToolConfig::default();
+    assert!(
+        config.default_note.is_none()
+            && config.user_default_note.is_none()
+            && config.former_default_note.is_none(),
+        "the product configures no note member"
+    );
     let probe = Arc::new(Probe::default());
-    let agent = MinimalHost::start(&builder_with_branch_config(
-        &probe,
-        BranchToolConfig::default(),
-    ))
-    .await
-    .unwrap();
+    let agent = MinimalHost::start(&builder_with_branch_config(&probe, config))
+        .await
+        .unwrap();
     let session = soon(agent.create_session(SessionConfig::default()))
         .await
         .unwrap();
