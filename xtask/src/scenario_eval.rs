@@ -180,7 +180,10 @@
 //!   with no `completed` compaction of this run is compacted with
 //!   `session.context.compact`, then each line is asked `request`. A
 //!   compaction that does not complete fails the run there, so the requests
-//!   after it are only judged when a compaction happened.
+//!   after it are only judged when a compaction happened. A run its own budget
+//!   stops before that step, or before a submitted request ran on its line, is
+//!   an incomplete fixture: it is neither failed nor judged and enters no
+//!   probe rate.
 //! - `sources` declares the event producers a scenario runs with and the
 //!   Session's subscription to them. One producer row is installed, only
 //!   when `sources` is present, and it declares every source through the
@@ -1185,6 +1188,7 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
         window: run.window,
         duration_ms: run.duration_ms,
         failed: run.failed,
+        incomplete: run.incomplete,
         judge_outcome: run.judge_outcome,
         error: run.error,
         judge_error: run.judge_error,
@@ -1260,7 +1264,9 @@ async fn rejudge_one(
     limits: JudgeWindow,
     cancel: &CancellationToken,
 ) -> Result<RunRecord> {
-    let judging = if saved.judge_outcome == JudgeOutcome::NotAsked {
+    let judging = if saved.incomplete.is_some() {
+        Judging::unobserved(scenario)
+    } else if saved.judge_outcome == JudgeOutcome::NotAsked {
         Judging::not_asked(scenario, saved.judge_error.clone())
     } else {
         let path = source
@@ -1284,6 +1290,7 @@ async fn rejudge_one(
         window: saved.window,
         duration_ms: saved.duration_ms,
         failed: failed(stop, saved.error.as_deref(), judging.outcome),
+        incomplete: saved.incomplete.clone(),
         judge_outcome: judging.outcome,
         error: saved.error.clone(),
         judge_error: judging.error,
@@ -1318,6 +1325,10 @@ struct SavedRun {
     duration_ms: f64,
     #[serde(default)]
     failed: bool,
+    /// Why the harness never produced a request the scenario's probe reads;
+    /// `None` in a record written before the runner wrote it.
+    #[serde(default)]
+    incomplete: Option<String>,
     judge_outcome: JudgeOutcome,
     #[serde(default)]
     error: Option<String>,
@@ -2394,6 +2405,24 @@ pub(crate) struct AfterIdle {
     pub(crate) request: String,
 }
 
+/// One input the runner submitted on the fixture's behalf. A run that its own
+/// budget stopped before a request ran after the input was consumed did not
+/// run the fixture its probe reads: it is incomplete, not scored
+/// (model-prompts §8.1).
+struct FixtureInput {
+    /// What the input is, named in the report when it was not observed.
+    what: &'static str,
+    /// The line the input was submitted to.
+    line: String,
+    /// The input id the Session answered; `None` when its reply named none.
+    input: Option<String>,
+}
+
+/// The scenario's own message.
+const MESSAGE_INPUT: &str = "the message";
+/// One of the requests the step after the first idle submitted.
+const AFTER_IDLE_INPUT: &str = "the request after the idle";
+
 /// One source a scenario declares through the `eventHub` service, and
 /// optionally subscribes its Session's `main` branch to (EventHub design A.1,
 /// A.3). Without `subscribe` the source starts unsubscribed, for a scenario
@@ -2803,6 +2832,10 @@ struct RunRecord {
     /// Whether the run is a failed run, set once when the record is built
     /// (model-prompts §8.1).
     failed: bool,
+    /// Why the harness never produced a request the scenario's probe reads,
+    /// when it did not: the run is neither failed nor judged, enters no probe
+    /// rate, and does not count toward the floor.
+    incomplete: Option<String>,
     /// How the run's judging ended (model-prompts §8.1).
     judge_outcome: JudgeOutcome,
     error: Option<String>,
@@ -2846,10 +2879,11 @@ impl RunRecord {
             )
     }
     /// Whether the run is judged (model-prompts §8.1): it failed neither on
-    /// its own nor on its judging, and the judge answered every call with
-    /// usable verdicts. Only such a run counts toward the floor.
+    /// its own nor on its judging, the fixture was observed, and the judge
+    /// answered every call with usable verdicts. Only such a run counts
+    /// toward the floor.
     fn judged(&self) -> bool {
-        !self.failed && self.judge_outcome == JudgeOutcome::Judged
+        !self.failed && self.incomplete.is_none() && self.judge_outcome == JudgeOutcome::Judged
     }
 }
 
@@ -2919,6 +2953,10 @@ enum JudgeOutcome {
     /// The judge was never asked: the view of the run's export does not fit
     /// the judge's budget. The run is unjudged.
     Unfit,
+    /// The judge was never asked: the harness stopped the run before a request
+    /// its probes read existed, so the run is an incomplete fixture, not a
+    /// scored one.
+    Unobserved,
     /// The judge answered every call and gave no usable verdicts after the
     /// re-asks.
     Unreadable,
@@ -3127,6 +3165,10 @@ struct ChildOutcome {
     decline_retries: u32,
     switch_retries: u32,
     error: Option<String>,
+    /// Why the harness never produced a request the scenario's probe reads;
+    /// `None` when the fixture was observed.
+    #[serde(default)]
+    incomplete: Option<String>,
     judge_outcome: JudgeOutcome,
     judge_error: Option<String>,
     judge_reasks: u32,
@@ -3163,6 +3205,7 @@ fn harness_outcome(error: String, preflight: Vec<PreflightCheck>) -> ChildOutcom
         decline_retries: 0,
         switch_retries: 0,
         error: None,
+        incomplete: None,
         judge_outcome: JudgeOutcome::NotAsked,
         judge_error: None,
         judge_reasks: 0,
@@ -3708,6 +3751,7 @@ async fn child_drive(
         decline_retries: driven.decline_retries,
         switch_retries: driven.switch_retries,
         error: driven.error,
+        incomplete: driven.incomplete,
         judge_outcome: judging.outcome,
         judge_error: judging.error,
         judge_reasks: judging.reasks,
@@ -5311,6 +5355,7 @@ fn supervisor_outcome(
         decline_retries: 0,
         switch_retries: 0,
         error: Some(error),
+        incomplete: None,
         judge_outcome: JudgeOutcome::NotAsked,
         judge_error: Some(judge_error),
         judge_reasks: 0,
@@ -5673,6 +5718,7 @@ fn child_record(
         window: outcome.window,
         duration_ms: outcome.duration_ms,
         failed: failed(stop, error.as_deref(), outcome.judge_outcome),
+        incomplete: outcome.incomplete.clone(),
         judge_outcome: outcome.judge_outcome,
         error,
 
@@ -5750,6 +5796,8 @@ impl Finished {
                 decline_retries: 0,
                 switch_retries: 0,
                 switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
                 error: Some(error),
             },
             export: None,
@@ -5797,6 +5845,20 @@ impl Judging {
             outcome: JudgeOutcome::CallFailed,
             probes: unparsed(scenario),
             error: Some(error),
+            reasks: 0,
+            calls: Vec::new(),
+            temperature_dropped: false,
+        }
+    }
+    /// A run the harness stopped before a request its probes read existed:
+    /// the judge is not asked, and every probe stays unparsed. The run is
+    /// incomplete, not failed; its reason travels on the record
+    /// (model-prompts §8.1).
+    fn unobserved(scenario: &Scenario) -> Self {
+        Self {
+            outcome: JudgeOutcome::Unobserved,
+            probes: unparsed(scenario),
+            error: None,
             reasks: 0,
             calls: Vec::new(),
             temperature_dropped: false,
@@ -5980,14 +6042,29 @@ async fn drive_once(
     // whose request consumed the input without it is failed before the judge,
     // so the policy comparison cannot score an answer that did not see the
     // text being evaluated (Timeline branches §12.4).
-    if let Some(error) = switch_note_failure(&driven, &export) {
+    let notes = switch_note_check(&driven, &export);
+    if let NotesCheck::Unseen(error) = &notes {
         driven.stop = "switch_note_missing";
         driven.error = Some(error.clone());
         return Ok(Finished {
             driven,
             export: Some(export),
             view: None,
-            judging: Judging::not_asked(scenario, Some(error)),
+            judging: Judging::not_asked(scenario, Some(error.clone())),
+        });
+    }
+    // A run the harness stopped before the requests its probes read existed is
+    // incomplete, not scored: the probe's absence has no candidate behavior to
+    // read. A run that already failed keeps its failure (model-prompts §8.1).
+    if driven.error.is_none()
+        && let Some(reason) = incomplete_reason(&driven, scenario, &export, &notes)
+    {
+        driven.incomplete = Some(reason);
+        return Ok(Finished {
+            driven,
+            export: Some(export),
+            view: None,
+            judging: Judging::unobserved(scenario),
         });
     }
     let (Some(host), Some(resolver)) = (
@@ -6144,34 +6221,48 @@ fn budget_stop_reason(stop: &str) -> String {
     format!("budget: {stop}")
 }
 
-/// The run's first missing switch note, or `None` when the run is not scored
-/// on its notes: a run that already failed is not (Timeline branches §12.4).
-fn switch_note_failure(driven: &Driven, export: &str) -> Option<String> {
+/// How a run's counted switch follow-ups ended (Timeline branches §12.4):
+/// every one was carried by a request that reached the model, one was stopped
+/// by the run's own turn cap before its model call, or one never reached the
+/// model for another reason.
+#[derive(Debug)]
+enum NotesCheck {
+    Observed,
+    /// The run's turn cap stopped the note's request before its model call:
+    /// the note was not at fault, and the probe has no request to read.
+    CapCut {
+        line: String,
+    },
+    /// The request never reached the model for another reason.
+    Unseen(String),
+}
+
+/// The run's switch notes as the export shows them (Timeline branches §12.4).
+/// A run that already failed is not checked.
+fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
     if driven.error.is_some() {
-        return None;
+        return NotesCheck::Observed;
     }
     let cap_stop = (driven.stop == "turns").then(|| budget_stop_reason(driven.stop));
     switch_notes_unseen(export, &driven.switch_notes.expected, cap_stop.as_deref())
 }
 
-/// Why a scored switch follow-up did not see its note, or `None` when every
-/// consumed follow-up's note reached the model: the first request the line
-/// began after it consumed the input whose model call exists, and the note's
-/// exact text (Timeline branches §12.4). An input no request consumed is not
-/// checked: no answer of that line is scored. A request a steer replaced
+/// Why a scored switch follow-up did not see its note, or [`NotesCheck::Observed`]
+/// when every consumed follow-up's note reached the model: the first request
+/// the line began after it consumed the input whose model call exists, and the
+/// note's exact text (Timeline branches §12.4). An input no request consumed is
+/// not checked: no answer of that line is scored. A request a steer replaced
 /// before its model call is not checked either: the note travels in the
-/// request that replaces it in the same turn. Nor is a request the run's own
-/// turn-budget stop ended, whose reason `cap_stop` carries: that stop, not the
-/// note, kept it from the model (issue #2140). Every other request that never
-/// reached the model is reported, because no request of the line carried the
-/// text being evaluated. A request whose `step/model-start` carries no turn id
-/// is exempted by neither: without the turn, neither the steer that replaced
-/// it nor the stop that ended it can be placed.
-fn switch_notes_unseen(
-    export: &str,
-    notes: &[SwitchNote],
-    cap_stop: Option<&str>,
-) -> Option<String> {
+/// request that replaces it in the same turn. A request the run's own
+/// turn-budget stop ended, whose reason `cap_stop` carries, is
+/// [`NotesCheck::CapCut`]: that stop, not the note, kept it from the model
+/// (issue #2140), and the run is incomplete rather than scored. Every other
+/// request that never reached the model is [`NotesCheck::Unseen`], because no
+/// request of the line carried the text being evaluated. A request whose
+/// `step/model-start` carries no turn id is exempted by neither: without the
+/// turn, neither the steer that replaced it nor the stop that ended it can be
+/// placed.
+fn switch_notes_unseen(export: &str, notes: &[SwitchNote], cap_stop: Option<&str>) -> NotesCheck {
     /// One `input/message` of the export, the line it is on, and the note it
     /// carries when it is one.
     struct Message {
@@ -6294,9 +6385,10 @@ fn switch_notes_unseen(
             cut.insert((in_flight.branch.clone(), in_flight.request.clone()));
         }
     }
-    'notes: for note in notes {
+    let mut cap_cut: Option<String> = None;
+    for note in notes {
         let Some(message) = messages.get(&note.input) else {
-            return Some(format!(
+            return NotesCheck::Unseen(format!(
                 "the switch input {} on line {} is not in the export",
                 note.input, note.line
             ));
@@ -6315,7 +6407,7 @@ fn switch_notes_unseen(
             .collect();
         requests.sort_by_key(|start| start.sequence);
         let Some(first) = requests.first() else {
-            return Some(format!(
+            return NotesCheck::Unseen(format!(
                 "line {} consumed the switch input {} but started no request after it",
                 note.line, note.input
             ));
@@ -6333,6 +6425,7 @@ fn switch_notes_unseen(
         // run's turn budget stopped: the cap ended it, not the note. Any other
         // request without a model call ended before the note reached the model.
         let mut call = None;
+        let mut note_cap_cut = None;
         for start in &requests {
             let key = (start.branch.clone(), start.request.clone());
             if let Some(found) = calls.get(&key) {
@@ -6344,13 +6437,18 @@ fn switch_notes_unseen(
                     continue;
                 }
                 if cut.contains(&key) {
-                    continue 'notes;
+                    note_cap_cut = Some(start.branch.clone());
+                    continue;
                 }
             }
             break;
         }
         let Some(call) = call else {
-            return Some(format!(
+            if let Some(line) = note_cap_cut {
+                cap_cut.get_or_insert(line);
+                continue;
+            }
+            return NotesCheck::Unseen(format!(
                 "line {} consumed the switch input {} but its request never reached the model",
                 note.line, note.input
             ));
@@ -6367,13 +6465,16 @@ fn switch_notes_unseen(
             .iter()
             .any(|text| request_carries(&call["messages"], text))
         {
-            return Some(format!(
+            return NotesCheck::Unseen(format!(
                 "the request that consumed the switch input on line {} does not carry the note it must answer under",
                 note.line
             ));
         }
     }
-    None
+    match cap_cut {
+        Some(line) => NotesCheck::CapCut { line },
+        None => NotesCheck::Observed,
+    }
 }
 
 /// Whether any string in `value` carries `needle`: a request is JSON, so a
@@ -6385,6 +6486,94 @@ fn request_carries(value: &Value, needle: &str) -> bool {
         Value::Object(map) => map.values().any(|item| request_carries(item, needle)),
         _ => false,
     }
+}
+
+/// Why the run's fixture was never observed, when it was not: its own message
+/// and every request after the first idle must be consumed and followed by a
+/// model request on their line, and a scenario with that step must have run
+/// it. A run its own budget stopped before such a request is incomplete, not a
+/// losing candidate: the probe has no request to read (model-prompts §8.1).
+fn fixture_incomplete(driven: &Driven, scenario: &Scenario, export: &str) -> Option<String> {
+    if scenario.after_idle.is_some()
+        && !driven
+            .inputs
+            .iter()
+            .any(|input| input.what == AFTER_IDLE_INPUT)
+    {
+        return Some(format!(
+            "the run stopped on {} before the step after the first idle",
+            driven.stop
+        ));
+    }
+    let mut consumed: Vec<(String, u64, String)> = Vec::new();
+    let mut calls: Vec<(String, u64)> = Vec::new();
+    for line in export.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["kind"] != "event" {
+            continue;
+        }
+        let event = &record["event"];
+        let branch = record["branch_id"].as_str().unwrap_or_default().to_owned();
+        let sequence = event["sequence"].as_u64().unwrap_or_default();
+        match (event["type"].as_str(), event["name"].as_str()) {
+            (Some("input"), Some("consumed")) => {
+                if let Some(input) = event["data"]["input_id"].as_str() {
+                    consumed.push((branch, sequence, input.to_owned()));
+                }
+            }
+            (Some("model"), Some("call")) => calls.push((branch, sequence)),
+            _ => {}
+        }
+    }
+    for input in &driven.inputs {
+        let Some(id) = input.input.as_deref() else {
+            return Some(format!(
+                "line {}: the Session named no input for {}, so the run cannot show it reached the model",
+                input.line, input.what
+            ));
+        };
+        let Some(consumed_at) = consumed
+            .iter()
+            .filter(|(branch, _, seen)| branch == &input.line && seen == id)
+            .map(|(_, sequence, _)| *sequence)
+            .min()
+        else {
+            return Some(format!(
+                "line {}: {} was never consumed before the run stopped on {}",
+                input.line, input.what, driven.stop
+            ));
+        };
+        if !calls
+            .iter()
+            .any(|(branch, sequence)| branch == &input.line && *sequence > consumed_at)
+        {
+            return Some(format!(
+                "line {}: no request ran after {} before the run stopped on {}",
+                input.line, input.what, driven.stop
+            ));
+        }
+    }
+    None
+}
+
+/// Why the run its own budget stopped is an incomplete fixture, when it is: a
+/// request its probes read never ran, or the turn cap stopped the one switch
+/// follow-up request whose note was checked. A run that already failed keeps
+/// its failure and is not incomplete (model-prompts §8.1).
+fn incomplete_reason(
+    driven: &Driven,
+    scenario: &Scenario,
+    export: &str,
+    notes: &NotesCheck,
+) -> Option<String> {
+    fixture_incomplete(driven, scenario, export).or_else(|| match notes {
+        NotesCheck::CapCut { line } => Some(format!(
+            "line {line}: the switch follow-up's request was stopped by the run's turn budget before it reached the model"
+        )),
+        NotesCheck::Observed | NotesCheck::Unseen(_) => None,
+    })
 }
 
 pub(crate) async fn selection(
@@ -6462,6 +6651,13 @@ struct Driven {
     /// The switch follow-ups the run sent and the notes each line's request
     /// must carry; the run is not judged when one is missing.
     switch_notes: SwitchNotes,
+    /// The inputs the runner submitted on the fixture's behalf: the scenario's
+    /// message and the requests after the first idle.
+    inputs: Vec<FixtureInput>,
+    /// Why the fixture's observation never happened, when it did not: the run
+    /// is neither failed nor judged, enters no probe rate, and the report
+    /// lists it apart from both.
+    incomplete: Option<String>,
     error: Option<String>,
 }
 
@@ -6502,6 +6698,8 @@ async fn drive(
             decline_retries: 0,
             switch_retries: 0,
             switch_notes: SwitchNotes::default(),
+            inputs: Vec::new(),
+            incomplete: None,
             error: Some(error),
         };
     }
@@ -6531,6 +6729,8 @@ async fn drive(
                 decline_retries: 0,
                 switch_retries: 0,
                 switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
                 error: Some(format!("session.create failed: {error}")),
             };
         }
@@ -6545,6 +6745,8 @@ async fn drive(
         decline_retries: 0,
         switch_retries: 0,
         switch_notes: SwitchNotes::default(),
+        inputs: Vec::new(),
+        incomplete: None,
         error: None,
     };
     if let Err(error) = client
@@ -6648,11 +6850,19 @@ async fn drive(
             return driven;
         }
     }
-    if let Err(error) = submit(client, &session, &scenario.message, None, None).await {
-        driven.stop = "error";
-        driven.error = Some(error);
-        return driven;
-    }
+    let message = match submit(client, &session, &scenario.message, None, None).await {
+        Ok(input) => input,
+        Err(error) => {
+            driven.stop = "error";
+            driven.error = Some(error);
+            return driven;
+        }
+    };
+    driven.inputs.push(FixtureInput {
+        what: MESSAGE_INPUT,
+        line: "main".to_owned(),
+        input: message,
+    });
     let started = Instant::now();
     // The lines the run knows before its message: `main` and the line the calls
     // step opened, whose id is known before its `branch/create` notice arrives
@@ -6881,7 +7091,16 @@ async fn drive(
                     )
                     .await;
                     match settled {
-                        Ok(Ok(())) => awaiting = true,
+                        Ok(Ok(submitted)) => {
+                            for (line, input) in submitted {
+                                driven.inputs.push(FixtureInput {
+                                    what: AFTER_IDLE_INPUT,
+                                    line,
+                                    input,
+                                });
+                            }
+                            awaiting = true;
+                        }
                         Ok(Err(error)) => {
                             driven.stop = "error";
                             driven.error = Some(error);
@@ -8374,14 +8593,15 @@ impl IdleCalls {
 /// branches §12.3). A compaction that does not complete ends the run here
 /// instead of letting the next request be judged as one after a compaction:
 /// the probe reads identity across a compaction, and a run that did not compact
-/// measures nothing else.
+/// measures nothing else. Answers each line's input, in the order sent, so the
+/// caller can tell whether a request followed it.
 async fn settle_after_idle(
     client: &mut impl SwitchClient,
     session: &str,
     lines: &[String],
     after: &AfterIdle,
     compacted: &BTreeSet<String>,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<Vec<(String, Option<String>)>, String> {
     for line in lines {
         if compacted.contains(line) {
             continue;
@@ -8409,12 +8629,14 @@ async fn settle_after_idle(
             }
         }
     }
+    let mut submitted = Vec::with_capacity(lines.len());
     for line in lines {
-        submit(client, session, &after.request, None, Some(line))
+        let input = submit(client, session, &after.request, None, Some(line))
             .await
             .map_err(|error| format!("{line}: the request after the idle failed: {error}"))?;
+        submitted.push((line.clone(), input));
     }
-    Ok(())
+    Ok(submitted)
 }
 
 /// Whether every known line is idle and no notice arrived while it asked.
@@ -8857,6 +9079,9 @@ struct Metrics {
 impl Metrics {
     fn add(&mut self, scenario: &Scenario, record: &RunRecord) {
         self.runs += 1;
+        if record.incomplete.is_some() {
+            return;
+        }
         if record.unjudged() {
             self.unjudged += 1;
             return;
@@ -9075,7 +9300,7 @@ impl Instrument {
         self.judge_window = self.judge_window.take().or(measured.judge_window);
         let asked = !matches!(
             record.judge_outcome,
-            JudgeOutcome::NotAsked | JudgeOutcome::Unfit
+            JudgeOutcome::NotAsked | JudgeOutcome::Unfit | JudgeOutcome::Unobserved
         );
         match record.temperature_dropped {
             Some(dropped) => self.judge_temperature_dropped += usize::from(dropped),
@@ -9325,6 +9550,27 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             );
         }
     }
+    // A run the harness stopped before a request its probes read existed is an
+    // incomplete fixture, not the model's answer: the report names it apart
+    // from the failed runs and the rates it left, so a probe no run was judged
+    // on is not read as a lost identity (model-prompts §8.1).
+    let incomplete_runs: Vec<&RunRecord> = records
+        .iter()
+        .filter(|record| record.incomplete.is_some())
+        .collect();
+    if !incomplete_runs.is_empty() {
+        text += "\n| arm | scenario | run | incomplete |\n| --- | --- | --- | --- |\n";
+        for record in incomplete_runs {
+            let reason = record.incomplete.as_deref().unwrap_or_default();
+            text += &format!(
+                "| {} | {} | {} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                reason.lines().next().unwrap_or_default(),
+            );
+        }
+    }
     text.push('\n');
     text.push_str(&rule::verdict_line(
         &judged,
@@ -9457,6 +9703,7 @@ mod tests {
             window: None,
             duration_ms: 0.,
             failed: failed("idle", None, judge_outcome),
+            incomplete: None,
             judge_outcome,
             error: None,
             judge_error: None,
@@ -9480,6 +9727,13 @@ mod tests {
                     quote: None,
                 })
                 .collect(),
+        }
+    }
+    /// The error a `NotesCheck` reported, when it found an unseen request.
+    fn unseen_note(check: NotesCheck) -> Option<String> {
+        match check {
+            NotesCheck::Unseen(error) => Some(error),
+            NotesCheck::Observed | NotesCheck::CapCut { .. } => None,
         }
     }
     fn metrics(scenario: &Scenario, records: &[RunRecord]) -> Metrics {
@@ -10172,11 +10426,18 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            switch_notes_unseen(&export(note), &notes, None).is_none(),
+            matches!(
+                switch_notes_unseen(&export(note), &notes, None),
+                NotesCheck::Observed
+            ),
             "the request carries the note"
         );
-        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
-            .expect("the request without the note is unseen");
+        let unseen = unseen_note(switch_notes_unseen(
+            &export("the follow-up was answered"),
+            &notes,
+            None,
+        ))
+        .expect("the request without the note is unseen");
         assert!(unseen.contains("line 2"), "{unseen}");
     }
 
@@ -10226,11 +10487,18 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            switch_notes_unseen(&export(note), &notes, None).is_none(),
+            matches!(
+                switch_notes_unseen(&export(note), &notes, None),
+                NotesCheck::Observed
+            ),
             "the replacement request carries the note"
         );
-        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
-            .expect("the request without the note is still unseen");
+        let unseen = unseen_note(switch_notes_unseen(
+            &export("the follow-up was answered"),
+            &notes,
+            None,
+        ))
+        .expect("the request without the note is still unseen");
         assert!(unseen.contains("does not carry the note"), "{unseen}");
     }
 
@@ -10279,19 +10547,20 @@ mod tests {
             default: true,
             other: "main".into(),
         }];
-        let unseen = switch_notes_unseen(&export(true), &notes, None)
+        let unseen = unseen_note(switch_notes_unseen(&export(true), &notes, None))
             .expect("the closed request never reached the model");
         assert!(unseen.contains("never reached the model"), "{unseen}");
-        let unseen = switch_notes_unseen(&export(false), &notes, None)
+        let unseen = unseen_note(switch_notes_unseen(&export(false), &notes, None))
             .expect("no request started after the consumption");
         assert!(unseen.contains("started no request after it"), "{unseen}");
     }
 
     /// A run that stopped on its turn budget ended the request before its
-    /// model call, so the note the missing call would have answered is not
-    /// reported; the same export with any other stop is (issue #2140).
+    /// model call: the note is not a missing note, but the run has no request
+    /// for its probe to read, so it is an incomplete fixture. The same export
+    /// with any other stop is a missing note (issue #2140).
     #[test]
-    fn a_turn_budget_stop_does_not_report_a_note_its_stop_ended() {
+    fn a_turn_budget_stop_makes_a_note_its_stop_ended_incomplete() {
         let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
         let export = [
             json!({"kind": "event", "branch_id": "2",
@@ -10326,10 +10595,13 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            switch_notes_unseen(&export, &notes, Some("budget: turns")).is_none(),
+            matches!(
+                switch_notes_unseen(&export, &notes, Some("budget: turns")),
+                NotesCheck::CapCut { ref line } if line == "2"
+            ),
             "the run's turn budget ended the request before its model call"
         );
-        let unseen = switch_notes_unseen(&export, &notes, None)
+        let unseen = unseen_note(switch_notes_unseen(&export, &notes, None))
             .expect("any other stop still reports the note");
         assert!(unseen.contains("never reached the model"), "{unseen}");
     }
@@ -10446,7 +10718,7 @@ mod tests {
                 other: "main".into(),
             },
         ];
-        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"));
+        let unseen = unseen_note(switch_notes_unseen(&export, &notes, Some("budget: turns")));
         assert!(
             unseen.as_deref().is_some_and(
                 |error| error.contains("line 3") && error.contains("never reached the model")
@@ -10518,8 +10790,12 @@ mod tests {
                 json!({"turn_id": "t1", "status": "completed", "reason": "end_turn"}),
             ),
         ] {
-            let unseen = switch_notes_unseen(&export(end), &notes, Some("budget: turns"))
-                .expect("a request that ended before the stop still needs its note");
+            let unseen = unseen_note(switch_notes_unseen(
+                &export(end),
+                &notes,
+                Some("budget: turns"),
+            ))
+            .expect("a request that ended before the stop still needs its note");
             assert!(unseen.contains("never reached the model"), "{unseen}");
         }
     }
@@ -10568,7 +10844,7 @@ mod tests {
         .map(|record| serde_json::to_string(record).unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"))
+        let unseen = unseen_note(switch_notes_unseen(&export, &notes, Some("budget: turns")))
             .expect("an unplaced request is not exempted by the stop");
         assert!(unseen.contains("never reached the model"), "{unseen}");
     }
@@ -10619,10 +10895,147 @@ mod tests {
                     other: "main".into(),
                 }],
             },
+            inputs: Vec::new(),
+            incomplete: None,
             error: None,
         };
-        let unseen = switch_note_failure(&driven, &export).expect("the note is missing");
+        let unseen = unseen_note(switch_note_check(&driven, &export)).expect("the note is missing");
         assert!(unseen.contains("does not carry the note"), "{unseen}");
+    }
+
+    /// The fixture's own inputs must be consumed and followed by a request on
+    /// their line. A run its own budget stopped before the step after the first
+    /// idle, or before the follow-up request, leaves the probe with nothing to
+    /// read: it is an incomplete fixture, not a losing candidate
+    /// (model-prompts §8.1).
+    #[test]
+    fn a_fixture_its_budget_stopped_before_its_requests_is_incomplete() {
+        let event = |branch: &str, sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let mut scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let mut driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let export = [
+            event(
+                "main",
+                1,
+                ["input", "message"],
+                json!({"user": {"content": "message"}}),
+            ),
+            event("main", 2, ["input", "consumed"], json!({"input_id": "m1"})),
+            event("main", 3, ["model", "call"], json!({"request": {}})),
+        ]
+        .join("\n");
+        let reason = fixture_incomplete(&driven, &scenario, &export).unwrap();
+        assert!(
+            reason.contains("before the step after the first idle"),
+            "{reason}"
+        );
+
+        driven.inputs.push(FixtureInput {
+            what: AFTER_IDLE_INPUT,
+            line: "main".into(),
+            input: Some("f1".into()),
+        });
+        let consumed = [
+            event(
+                "main",
+                4,
+                ["input", "message"],
+                json!({"user": {"content": "Re-run the tests."}}),
+            ),
+            event("main", 5, ["input", "consumed"], json!({"input_id": "f1"})),
+        ]
+        .join("\n");
+        let reason =
+            fixture_incomplete(&driven, &scenario, &format!("{export}\n{consumed}")).unwrap();
+        assert!(reason.contains("no request ran after"), "{reason}");
+
+        let after = [
+            consumed.clone(),
+            event("main", 6, ["model", "call"], json!({"request": {}})),
+        ]
+        .join("\n");
+        assert_eq!(
+            fixture_incomplete(&driven, &scenario, &format!("{export}\n{after}")),
+            None,
+            "the request after the follow-up makes the fixture complete"
+        );
+    }
+
+    /// A switch follow-up request the run's turn cap stopped has no request
+    /// for its probe to read: the note check reports the cap, and the run is
+    /// incomplete rather than scored (model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_switch_follow_up_makes_the_run_incomplete() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(
+                1,
+                ["input", "message"],
+                json!({"user": {"content": "message"}}),
+            ),
+            event(2, ["input", "consumed"], json!({"input_id": "m1"})),
+            event(3, ["model", "call"], json!({"request": {}})),
+        ]
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 4,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let reason = incomplete_reason(
+            &driven,
+            &scenario(Vec::new()),
+            &export,
+            &NotesCheck::CapCut { line: "2".into() },
+        )
+        .unwrap();
+        assert!(
+            reason.contains("line 2") && reason.contains("turn budget"),
+            "{reason}"
+        );
     }
 
     /// A switch that has started its target stays with it: a tool line opened
@@ -11199,9 +11612,17 @@ mod tests {
         let after = AfterIdle {
             request: "re-run the tests".into(),
         };
-        settle_after_idle(&mut client, "session", &lines, &after, &compacted)
+        let submitted = settle_after_idle(&mut client, "session", &lines, &after, &compacted)
             .await
             .unwrap();
+        assert_eq!(
+            submitted,
+            [
+                ("main".to_owned(), Some("input".to_owned())),
+                ("line".to_owned(), Some("input".to_owned()))
+            ],
+            "every line's request is returned with the input the Session named"
+        );
         assert_eq!(
             client.methods(),
             [
@@ -12749,6 +13170,8 @@ mod tests {
                 decline_retries: 0,
                 switch_retries: 0,
                 switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
                 error: None,
             }
         }
@@ -15260,6 +15683,57 @@ mod tests {
         }
     }
 
+    /// A run that reaches its turn budget before the step after the first idle
+    /// never compacts and never asks the follow-up request: the identity probe
+    /// has no request to read, so the run is incomplete, is not judged, and
+    /// stays out of the probe's denominator and the floor (model-prompts
+    /// §8.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_that_reaches_the_turn_budget_before_the_after_idle_step_is_incomplete() {
+        let fixture = Fixture::start(
+            "incomplete-turn-cap",
+            |text| judged(text).or_else(|| Some(content("done"))),
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 1, "seconds": 60, "window": 24000},
+                "afterIdle": {"request": "Re-run the tests."},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["stop"], "turns", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "unobserved", "{record}");
+            let incomplete = record["incomplete"].as_str().unwrap_or_default();
+            assert!(
+                incomplete.contains("before the step after the first idle"),
+                "{record}"
+            );
+        }
+        assert!(
+            fixture.judge().is_empty(),
+            "an incomplete fixture is not sent to the judge"
+        );
+        assert!(
+            report.contains("| arm | scenario | run | incomplete |"),
+            "the report lists the incomplete fixture apart: {report}"
+        );
+        assert!(
+            report.contains("| case/ran (must_show) | – | – |"),
+            "the probe counts no run in either arm: {report}"
+        );
+        assert!(
+            report.contains("| failed runs | 0/1 (0.000) | 0/1 (0.000) |"),
+            "an incomplete run is not a failed run: {report}"
+        );
+    }
+
     /// Asserts that a run's `judge-view.jsonl` is its export line for line,
     /// with every request rebuilt from the view alone into the one the export
     /// carried, and answers the view's rendered requests in order.
@@ -15777,6 +16251,11 @@ mod tests {
         /// `session.create` reports, and the submitted turn starts and ends
         /// at once: a scenario's `session_open` call has a sequence to use.
         OpensAtTheSessionStart,
+        /// The submitted turn starts and ends once; the step after the first
+        /// idle submits its request, and the peer writes the second turn's end
+        /// before that request can start, so the run reaches its turn budget
+        /// between the submission and the model call.
+        AfterIdleSubmitAtTheCap,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -15924,7 +16403,10 @@ mod tests {
             // The line is busy until the peer writes the call's result, the
             // way a running turn is: `session.idle` stays unanswered and the
             // driver's own deadline reports the line busy.
-            let mut settled = matches!(script, PeerScript::OpensAtTheSessionStart);
+            let mut settled = matches!(
+                script,
+                PeerScript::OpensAtTheSessionStart | PeerScript::AfterIdleSubmitAtTheCap
+            );
             // [`PeerScript::HeldIdle`]'s hold: the calls it kept, and the
             // deadline it answers them at. The deadline stands after the
             // release, so a later call starts no second hold.
@@ -16092,6 +16574,7 @@ mod tests {
                         | PeerScript::ChainedToolLineAfterActivation => None,
                         PeerScript::DeferredUsageFails => None,
                         PeerScript::OpensAtTheSessionStart => None,
+                        PeerScript::AfterIdleSubmitAtTheCap => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -16146,6 +16629,7 @@ mod tests {
                         }
                     }
                     "session.idle" => json!({"result": {"sequence": PEER_SEQUENCE}}),
+                    "session.context.compact" => json!({"result": {"status": "completed"}}),
                     "session.branch_set_default"
                         if matches!(script, PeerScript::SwitchMoveRetries) =>
                     {
@@ -16203,6 +16687,24 @@ mod tests {
                         .unwrap();
                 }
                 if method == "session.submit" {
+                    if matches!(script, PeerScript::AfterIdleSubmitAtTheCap) {
+                        // The first turn runs and ends; the step after the idle
+                        // submits its request, and the peer ends the second
+                        // turn before that request can start.
+                        let events = if submits == 1 {
+                            vec![("start", 1), ("end", 2)]
+                        } else {
+                            vec![("end", 3)]
+                        };
+                        for (name, sequence) in events {
+                            write
+                                .write_all(&notice(json!({"type": "turn", "name": name,
+                                                         "sequence": sequence, "data": {}})))
+                                .await
+                                .unwrap();
+                        }
+                        continue;
+                    }
                     write
                         .write_all(&notice(
                             json!({"type": "turn", "name": "start", "sequence": 1, "data": {}}),
@@ -16615,6 +17117,64 @@ mod tests {
         assert!(
             failed(driven.stop, driven.error.as_deref(), JudgeOutcome::Judged),
             "the incomplete switch is a failed run and enters no probe rate"
+        );
+    }
+
+    /// A run that reaches its turn budget after the step after the first idle
+    /// submitted a request, but before that request reached the model, has no
+    /// request for the identity probe to read: the runner keeps the
+    /// submission, and the export decides that it was never observed
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_budget_after_the_after_idle_submit_leaves_the_request_unobserved() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-after-idle-cap-{}",
+            std::process::id()
+        ));
+        let (socket, _) =
+            scripted_peer(&directory, 8_000, PeerScript::AfterIdleSubmitAtTheCap).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 2;
+        scenario.budget.seconds = 10.;
+        scenario.budget.window = 8_000;
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "turns", "{:?}", driven.error);
+        assert_eq!(driven.turns, 2, "the run stopped on its turn budget");
+        let after: Vec<&FixtureInput> = driven
+            .inputs
+            .iter()
+            .filter(|input| input.what == AFTER_IDLE_INPUT)
+            .collect();
+        assert_eq!(
+            after.len(),
+            1,
+            "the step after the idle submitted its request"
+        );
+        assert_eq!(after[0].line, "main");
+        assert_eq!(after[0].input.as_deref(), Some("input-2"));
+        assert_eq!(
+            driven.inputs.len(),
+            2,
+            "the message and the request after the idle are the fixture's inputs"
+        );
+        assert!(
+            driven.incomplete.is_none(),
+            "the runner has no export yet: the export decides the observation"
         );
     }
 
