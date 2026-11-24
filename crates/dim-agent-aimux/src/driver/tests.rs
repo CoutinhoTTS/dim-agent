@@ -148,6 +148,13 @@ fn poll_until_idle<F: Future + ?Sized>(mut future: Pin<&mut F>) -> Option<F::Out
     }
 }
 
+/// Polls `future` once and leaves any wake-up it registers to the next poll:
+/// the task is not run again until the test says so.
+fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
+    let waker = Waker::from(Arc::new(WakeFlag(AtomicBool::new(false))));
+    future.poll(&mut Context::from_waker(&waker))
+}
+
 fn next_chunk(stream: &mut ModelStream) -> Option<Result<ModelChunk, HostError>> {
     let mut next = Box::pin(stream.next());
     poll_until_idle(next.as_mut()).flatten()
@@ -305,4 +312,230 @@ async fn a_stalled_error_body_keeps_the_response_status() {
     );
     assert_eq!(model.kind, ModelFailureKind::AuthRejected);
     assert_eq!(model.status, Some(401));
+}
+
+/// The transport produces the headers at 299 seconds but the task is not
+/// polled again until after the header allowance: the report carries the
+/// instant it was written, so the reply starts and its first event is
+/// measured from that instant.
+#[tokio::test(start_paused = true)]
+async fn a_header_report_read_past_its_allowance_is_on_time() {
+    let (fetch, reply) = scripted();
+    let body = ScriptedBody::default();
+    let driver = driver(fetch);
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiChat),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT - Duration::from_secs(1)).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body: body.clone(),
+        })
+        .unwrap();
+    // One poll lets the transport report the headers at 299 seconds; the task
+    // is not polled again until 301, past the header allowance.
+    assert!(
+        poll_once(invoke.as_mut()).is_pending(),
+        "the exchange must stop after the headers"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "a report written inside the header allowance must not be read as late"
+    );
+    body.push(format!(
+        "data: {}\n\n",
+        json!({"id": "remote-id", "choices": [{"index": 0, "delta": {"content": "hello"}, "finish_reason": Value::Null}]})
+    ));
+    let mut stream = poll_until_idle(invoke.as_mut())
+        .expect("the first event must start the reply")
+        .expect("the reply must start after the first event");
+    let start = next_chunk(&mut stream)
+        .expect("the reply must deliver its start")
+        .expect("the reply must not fail before its start");
+    assert!(matches!(start, ModelChunk::MessageStart { .. }));
+    let text = next_chunk(&mut stream)
+        .expect("the reply must deliver its text")
+        .expect("the first event must deliver text");
+    assert!(matches!(text, ModelChunk::Text(text) if text == "hello"));
+}
+
+/// A 401 produced at 299 seconds and read after the header allowance keeps
+/// its status: the report is on time, and the stalled error body still ends
+/// under its own allowance.
+#[tokio::test(start_paused = true)]
+async fn a_header_report_read_past_its_allowance_keeps_the_response_status() {
+    let (fetch, reply) = scripted();
+    let body = ScriptedBody::default();
+    body.push(r#"{"error":{"message":"Expired credential"#);
+    let driver = driver(fetch);
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiCompatible),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT - Duration::from_secs(1)).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::UNAUTHORIZED,
+            headers: headers("application/json"),
+            body,
+        })
+        .unwrap();
+    assert!(
+        poll_once(invoke.as_mut()).is_pending(),
+        "the exchange must stop after the headers"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "a report written inside the header allowance must not become a timeout"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT).await;
+    let error = match poll_until_idle(invoke.as_mut()) {
+        Some(Err(error)) => error,
+        Some(Ok(_)) => panic!("a 401 response must fail the request"),
+        None => panic!("a stalled error body must fail within its allowance"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        *kind,
+        HostErrorKind::Http {
+            status: Some(401),
+            code: None,
+        }
+    );
+    assert_eq!(model.kind, ModelFailureKind::AuthRejected);
+    assert_eq!(model.status, Some(401));
+}
+
+/// The OpenAI Responses startup scan decodes response metadata before it
+/// returns the stream. The wait after the headers ends when the stream
+/// starts, and its failure says so instead of reporting a missing event.
+#[tokio::test(start_paused = true)]
+async fn a_responses_startup_past_its_allowance_names_the_stream_start() {
+    let (fetch, reply) = scripted();
+    let body = ScriptedBody::default();
+    let driver = driver(fetch);
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiResponses),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body: body.clone(),
+        })
+        .unwrap();
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the reply must wait for the start of its stream"
+    );
+    body.push(format!(
+        "data: {}\n\n",
+        json!({"type": "response.created", "response": {"id": "resp-1", "created_at": 1, "model": "test-model"}})
+    ));
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "decoded metadata must not start the stream"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT).await;
+    let error = match poll_until_idle(invoke.as_mut()) {
+        Some(Err(error)) => error,
+        Some(Ok(_)) => panic!("a stream that never starts must fail"),
+        None => panic!("a stream that never starts must fail within the allowance"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("the response headers arrived, but the stream did not start within 300 seconds")
+    );
+}
+
+/// A Responses reply that decodes metadata first and delivers output inside
+/// the allowance starts and delivers that output.
+#[tokio::test(start_paused = true)]
+async fn a_responses_start_inside_its_allowance_delivers_the_output() {
+    let (fetch, reply) = scripted();
+    let body = ScriptedBody::default();
+    let driver = driver(fetch);
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiResponses),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body: body.clone(),
+        })
+        .unwrap();
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the reply must wait for the start of its stream"
+    );
+    body.push(format!(
+        "data: {}\n\n",
+        json!({"type": "response.created", "response": {"id": "resp-1", "created_at": 1, "model": "test-model"}})
+    ));
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "decoded metadata must not start the stream"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT - Duration::from_secs(1)).await;
+    for event in [
+        json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "message", "id": "msg-1", "role": "assistant", "content": []}}),
+        json!({"type": "response.output_text.delta", "item_id": "msg-1", "output_index": 0, "content_index": 0, "delta": "hello"}),
+    ] {
+        body.push(format!("data: {event}\n\n"));
+    }
+    let mut stream = poll_until_idle(invoke.as_mut())
+        .expect("the output must start the reply")
+        .expect("the reply must start after the output");
+    let mut text = String::new();
+    while let Some(chunk) = next_chunk(&mut stream) {
+        if let ModelChunk::Text(part) = chunk.expect("the reply must not fail") {
+            text.push_str(&part);
+        }
+    }
+    assert_eq!(text, "hello");
 }
