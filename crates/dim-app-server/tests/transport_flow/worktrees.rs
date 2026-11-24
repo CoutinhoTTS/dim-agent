@@ -2435,3 +2435,177 @@ async fn dropping_the_caller_keeps_the_removal_and_its_path_refused() {
     server.shutdown();
     server.join().await.unwrap();
 }
+
+/// Two creations that reach the same task id do not share it: the one that
+/// meets the other's registration of the path moves to another id, and the one
+/// that registered it still builds there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_creation_moves_off_the_path_a_creation_registered() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let hold = server
+        .hold_next_worktree_creation()
+        .expect("the ManagedWorktrees part exists");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut first_client = Client::new_version(&server, false, 3).await;
+    let repo = work.repo.clone();
+    let first = tokio::spawn(async move {
+        first_client
+            .rpc("session.create", json!({"cwd": repo, "worktree": {}}))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), hold.reached.notified())
+        .await
+        .expect("the first creation registers its directory before it builds");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut second_client = Client::new_version(&server, false, 3).await;
+    let second_repo = work.repo.clone();
+    let second = tokio::spawn(async move {
+        second_client
+            .rpc("session.create", json!({"cwd": second_repo, "worktree": {}}))
+            .await
+    });
+    let built = tokio::time::timeout(Duration::from_secs(30), second)
+        .await
+        .expect("the second creation does not wait for the first")
+        .unwrap();
+    assert_ok(&built);
+    assert_ne!(
+        built["result"]["worktree"]["taskId"], "aaaaaa",
+        "the second creation does not build at the path the first registered"
+    );
+    hold.release.notify_one();
+    let created = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .expect("the first creation builds where it registered")
+        .unwrap();
+    assert_ok(&created);
+    let root = work.home.join("worktrees/aaaaaa/repo");
+    assert_eq!(created["result"]["worktree"]["taskId"], "aaaaaa");
+    assert_eq!(
+        PathBuf::from(created["result"]["worktree"]["root"].as_str().unwrap()),
+        root
+    );
+    assert!(root.is_dir());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A failed creation's rollback removes the worktree and the branch it built
+/// even though a creation that found the path free before the failure meets it:
+/// the rollback's registration of the path keeps the second creation off it
+/// until the removal ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_creation_cannot_take_the_path_a_failed_creation_rolls_back() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let repo = work.repo.clone();
+    git(&repo, &["rm", "--cached", "-r", "-q", "packages/b"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "drop the subtree",
+        ],
+    );
+    let building = server
+        .hold_next_worktree_creation()
+        .expect("the ManagedWorktrees part exists");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut failing_client = Client::new_version(&server, false, 3).await;
+    let failing_cwd = repo.join("packages/b");
+    let failed = tokio::spawn(async move {
+        failing_client
+            .rpc("session.create", json!({"cwd": failing_cwd, "worktree": {}}))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), building.reached.notified())
+        .await
+        .expect("the failed creation registers its directory before it builds");
+    let checking = server
+        .hold_next_worktree_creation_check()
+        .expect("the ManagedWorktrees part exists");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut second_client = Client::new_version(&server, false, 3).await;
+    let second_repo = repo.clone();
+    let second = tokio::spawn(async move {
+        second_client
+            .rpc("session.create", json!({"cwd": second_repo, "worktree": {}}))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), checking.reached.notified())
+        .await
+        .expect("the second creation finds the path free before it registers it");
+    let rollback = server
+        .hold_next_worktree_rollback()
+        .expect("the ManagedWorktrees part exists");
+    let registered = server
+        .hold_next_worktree_creation()
+        .expect("the ManagedWorktrees part exists");
+    building.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), rollback.reached.notified())
+        .await
+        .expect("the failed creation reaches its rollback");
+    checking.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), registered.reached.notified())
+        .await
+        .expect("the second creation registers a directory of its own");
+    rollback.release.notify_one();
+    let failed = tokio::time::timeout(Duration::from_secs(30), failed)
+        .await
+        .expect("the rollback finishes")
+        .unwrap();
+    assert!(
+        failed["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("packages/b")),
+        "{failed}"
+    );
+    let path = work.home.join("worktrees/aaaaaa/repo");
+    assert!(
+        !path.exists(),
+        "the failed creation removes the worktree the rollback holds"
+    );
+    registered.release.notify_one();
+    let built = tokio::time::timeout(Duration::from_secs(30), second)
+        .await
+        .expect("the second creation does not wait for the rollback")
+        .unwrap();
+    assert_ok(&built);
+    assert_ne!(
+        built["result"]["worktree"]["taskId"], "aaaaaa",
+        "the second creation does not build at the path the rollback holds"
+    );
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut client = Client::new_version(&server, false, 3).await;
+    let reused = client
+        .rpc("session.create", json!({"cwd": repo, "worktree": {}}))
+        .await;
+    assert_ok(&reused);
+    assert_eq!(
+        reused["result"]["worktree"]["taskId"], "aaaaaa",
+        "the failed creation kept neither its directory nor its branch"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}

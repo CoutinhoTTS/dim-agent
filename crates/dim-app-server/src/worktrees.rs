@@ -44,6 +44,10 @@ pub struct ManagedWorktrees {
     #[cfg(feature = "testing")]
     creation_hold: std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
     #[cfg(feature = "testing")]
+    creation_check_hold: std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
+    #[cfg(feature = "testing")]
+    rollback_hold: std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
+    #[cfg(feature = "testing")]
     task_id_hold: std::sync::Mutex<Option<String>>,
 }
 
@@ -165,6 +169,10 @@ impl ManagedWorktrees {
             #[cfg(feature = "testing")]
             creation_hold: std::sync::Mutex::new(None),
             #[cfg(feature = "testing")]
+            creation_check_hold: std::sync::Mutex::new(None),
+            #[cfg(feature = "testing")]
+            rollback_hold: std::sync::Mutex::new(None),
+            #[cfg(feature = "testing")]
             task_id_hold: std::sync::Mutex::new(None),
         }
     }
@@ -198,18 +206,21 @@ impl ManagedWorktrees {
     /// there. Feature `testing` only.
     #[cfg(feature = "testing")]
     pub(crate) fn hold_next_creation(&self) -> Arc<crate::WorktreeCreationHold> {
-        let hold = Arc::new(crate::WorktreeCreationHold::default());
-        *self.creation_hold.lock().expect("creation hold") = Some(hold.clone());
-        hold
+        hold_creation(&self.creation_hold)
     }
 
+    /// Holds the next creation after it found its directory free and before it
+    /// registers that path. Feature `testing` only.
     #[cfg(feature = "testing")]
-    async fn wait_for_creation_hold(&self) {
-        let hold = self.creation_hold.lock().expect("creation hold").take();
-        if let Some(hold) = hold {
-            hold.reached.notify_one();
-            hold.release.notified().await;
-        }
+    pub(crate) fn hold_next_creation_check(&self) -> Arc<crate::WorktreeCreationHold> {
+        hold_creation(&self.creation_check_hold)
+    }
+
+    /// Holds the next failed creation before its rollback removes the worktree
+    /// it built. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_rollback(&self) -> Arc<crate::WorktreeCreationHold> {
+        hold_creation(&self.rollback_hold)
     }
 
     #[cfg(feature = "testing")]
@@ -300,6 +311,8 @@ impl ManagedWorktrees {
             // still covers is not built in, even if its files are already gone.
             // Registering this directory in the same call keeps a removal that
             // starts while it is built away from it.
+            #[cfg(feature = "testing")]
+            wait_creation_hold(&self.creation_check_hold).await;
             let creating = match self.sessions.begin_worktree_creation(&directory).await {
                 Ok(creating) => creating,
                 Err(error) => {
@@ -308,7 +321,7 @@ impl ManagedWorktrees {
                 }
             };
             #[cfg(feature = "testing")]
-            self.wait_for_creation_hold().await;
+            wait_creation_hold(&self.creation_hold).await;
             let branch_name = match branch {
                 Some(branch) => branch.to_owned(),
                 None => format!("dim/{task_id}"),
@@ -403,6 +416,8 @@ impl ManagedWorktrees {
         registration: &WorktreeCreation,
     ) {
         registration.end();
+        #[cfg(feature = "testing")]
+        wait_creation_hold(&self.rollback_hold).await;
         let directory = WorktreeDirectory {
             repository: repository.to_owned(),
             root: root.to_owned(),
@@ -987,6 +1002,27 @@ async fn git(
     }
     String::from_utf8(output.stdout)
         .map_err(|_| WorktreeError::Git("Git returned non-UTF-8 output".into()))
+}
+
+/// Feature `testing`: arms one hold slot and answers the hold the next creation
+/// or rollback at that slot waits on.
+#[cfg(feature = "testing")]
+fn hold_creation(
+    slot: &std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
+) -> Arc<crate::WorktreeCreationHold> {
+    let hold = Arc::new(crate::WorktreeCreationHold::default());
+    *slot.lock().expect("creation hold") = Some(hold.clone());
+    hold
+}
+
+/// Feature `testing`: waits at the slot if it is armed. Feature `testing` only.
+#[cfg(feature = "testing")]
+async fn wait_creation_hold(slot: &std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>) {
+    let hold = slot.lock().expect("creation hold").take();
+    if let Some(hold) = hold {
+        hold.reached.notify_one();
+        hold.release.notified().await;
+    }
 }
 
 /// Whether Git definitively answers that `root` is not a worktree of its own.
