@@ -2131,3 +2131,27 @@ test("a moved line's window keeps the progress of a request that started after i
   assert.equal(chat.views.session.retry?.attempt, 2, "the retrying request's countdown stays")
   assert.deepEqual(rows.filter((row) => row.kind === "assistant").map((row) => row.text), [], "the superseded request's progress is dropped")
 })
+
+test("a move keeps the live countdown of a request the turn read still reports running", async t => {
+  const retry = { attempt: 2, maxAttempts: 3, retryAtMs: 5, kind: "network" }
+  const chat = session(t, params => {
+    if (params.branchId !== "worker") return page([input(1, "on the root")], 1)
+    return page([event(1, { kind: "turn-end", outcome: "completed" })], 1)
+  }, {
+    "session.turn.get": params => params.branchId === "worker"
+      ? { ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r2", textCharacters: 0, thinkingCharacters: 0 } }
+      : { ...params, turn: undefined, output: undefined },
+    "session.branch_set_default": () => "worker",
+  })
+  await flush()
+  chat.receive({ method: "session.state", sessionId: "session", branchId: "worker", running: true, stopping: false })
+  chat.ensureLine("session", "worker")
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "worker", requestId: "r2", thinkingPartId: "first", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1, retry } })
+  await flush()
+  assert.equal(chat.views.session.branches.worker.rows.find((row) => row.kind === "thinking")?.text, "weigh", "the running side line shows its live progress before the move")
+  await chat.setDefaultBranch("session", "worker")
+  await flush()
+  assert.equal(chat.views.session.defaultBranchId, "worker")
+  assert.deepEqual(chat.views.session.retry, retry, "the countdown of a request the window's turn ended before stays")
+})
