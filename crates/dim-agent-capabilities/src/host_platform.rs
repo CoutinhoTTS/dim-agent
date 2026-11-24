@@ -3964,10 +3964,16 @@ pub(crate) mod shell {
                 if last_full_marker(rest).is_some() {
                     return None;
                 }
-                append_command_output(&mut state, rest);
+                append_command_output(
+                    &mut state,
+                    &crate::shell_session::regularize_output(rest.as_bytes()),
+                );
                 return None;
             };
-            append_command_output(&mut state, &rest[..position]);
+            append_command_output(
+                &mut state,
+                &crate::shell_session::regularize_output(&rest.as_bytes()[..position]),
+            );
             let code = rest[position + self.end_marker.len()..].trim().to_owned();
             state.code = Some(code.clone());
             Some(code)
@@ -4266,12 +4272,16 @@ pub(crate) mod shell {
             }
         }
 
-        fn push(&mut self, bytes: &[u8]) -> String {
-            crate::shell_session::regularize_output(self.decoder.write(bytes).as_bytes())
+        fn push(&mut self, bytes: &[u8]) -> (String, String) {
+            let raw = self.decoder.write(bytes);
+            let display = crate::shell_session::regularize_output(raw.as_bytes());
+            (raw, display)
         }
 
-        fn finish(&mut self) -> String {
-            crate::shell_session::regularize_output(self.decoder.end().as_bytes())
+        fn finish(&mut self) -> (String, String) {
+            let raw = self.decoder.end();
+            let display = crate::shell_session::regularize_output(raw.as_bytes());
+            (raw, display)
         }
     }
 
@@ -4481,8 +4491,8 @@ pub(crate) mod shell {
                     let Some(pump) = pump.upgrade() else {
                         break;
                     };
-                    let chunk = filter.push(&bytes[..n]);
-                    for line in splitter.push(&chunk) {
+                    let (raw, chunk) = filter.push(&bytes[..n]);
+                    for line in splitter.push(&raw) {
                         classify_line(&line, &pump, &jobs);
                     }
                     let mut capture = pump.capture.lock().unwrap();
@@ -4514,33 +4524,35 @@ pub(crate) mod shell {
                     }
                     pump.event_notify.notify_waiters();
                 }
-                let tail = filter.finish();
-                if !tail.is_empty() {
-                    for line in splitter.push(&tail) {
+                let (raw_tail, tail) = filter.finish();
+                if !raw_tail.is_empty() {
+                    for line in splitter.push(&raw_tail) {
                         if let Some(pump) = pump.upgrade() {
                             classify_line(&line, &pump, &jobs);
                         }
                     }
-                    if let Some(pump) = pump.upgrade() {
-                        let mut capture = pump.capture.lock().unwrap();
-                        capture.total += tail.len() as u64;
-                        capture.text.push_str(&tail);
-                        if capture.text.len() > RETAINED {
-                            let dropped =
-                                capture.text.len() - tail_bytes(&capture.text, RETAINED).len();
-                            capture.text.drain(..dropped);
-                        }
-                        let room = (crate::host_platform::output::OUTPUT_FILE_BYTE_LIMIT as usize)
-                            .saturating_sub(written);
-                        if room > 0 {
-                            let take = tail.len().min(room);
-                            let _ = file.write_all(&tail.as_bytes()[..take]);
-                        }
-                        drop(capture);
-                        let mut events = pump.events.lock().unwrap();
-                        events.trim();
-                        events.push(tail);
+                }
+                if !tail.is_empty()
+                    && let Some(pump) = pump.upgrade()
+                {
+                    let mut capture = pump.capture.lock().unwrap();
+                    capture.total += tail.len() as u64;
+                    capture.text.push_str(&tail);
+                    if capture.text.len() > RETAINED {
+                        let dropped =
+                            capture.text.len() - tail_bytes(&capture.text, RETAINED).len();
+                        capture.text.drain(..dropped);
                     }
+                    let room = (crate::host_platform::output::OUTPUT_FILE_BYTE_LIMIT as usize)
+                        .saturating_sub(written);
+                    if room > 0 {
+                        let take = tail.len().min(room);
+                        let _ = file.write_all(&tail.as_bytes()[..take]);
+                    }
+                    drop(capture);
+                    let mut events = pump.events.lock().unwrap();
+                    events.trim();
+                    events.push(tail);
                 }
                 if let Some(pump) = pump.upgrade() {
                     if let Some(line) = splitter.finish() {
