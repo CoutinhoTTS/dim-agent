@@ -246,6 +246,15 @@ fn text_events(events: &[Arc<AgentEvent>]) -> Vec<String> {
         .collect()
 }
 
+/// The terminal fact's failure, as the wire carries it.
+fn model_end_failure(events: &[Arc<AgentEvent>]) -> serde_json::Value {
+    let event = events
+        .iter()
+        .find(|event| matches!(event.kind, EventKind::ModelOutputEnd(_)))
+        .expect("a model output end");
+    serde_json::to_value(event.as_ref()).unwrap()["data"]["failure"].clone()
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_stream_cut_before_any_committed_event_retries_in_place() {
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -1522,4 +1531,194 @@ async fn thinking_progress_volume_is_throttled() {
         "the throttle keeps the snapshots under 2 MB, got {bytes}"
     );
     agent.close().await.unwrap();
+}
+
+/// A retry that replaces a shown attempt and stops without showing anything
+/// of its own must say so on the terminal fact: the empty progress frame
+/// between the attempts can be coalesced away.
+#[tokio::test(start_paused = true)]
+async fn a_retry_that_emits_no_output_names_its_boundary_on_the_terminal() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (cut, cut_stream) = mpsc::unbounded_channel();
+        let (retry, retry_stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![cut_stream, retry_stream]));
+        let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+        send(
+            &cut,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "cut".into(),
+                }),
+                Ok(ModelChunk::Thinking("first attempt".into())),
+            ],
+        );
+        progress
+            .wait_for(|progress| progress.thinking == "first attempt")
+            .await
+            .unwrap();
+        assert!(
+            thinking_events(&chain_events(&session, "main", ..).await.unwrap()).is_empty(),
+            "the shown thought was never committed"
+        );
+        send(&cut, vec![Err(failure(ModelFailureKind::ServerError, None))]);
+        drop(cut);
+        let ended = tokio::select! {
+            _ = model.second_attempt.notified() => None,
+            outcome = turn_end(&session) => Some(outcome),
+        };
+        assert!(
+            ended.is_none(),
+            "a cut before any committed output retries in place; the turn ended with {ended:?}"
+        );
+        model.release.notify_one();
+        send(&retry, vec![Err(failure(ModelFailureKind::InvalidRequest, None))]);
+        drop(retry);
+        session.idle("main").await.unwrap();
+
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let failure = model_end_failure(&events);
+        assert_eq!(failure["attempts"], 2, "{failure}");
+        assert_eq!(failure["retried"], true, "{failure}");
+        assert!(
+            failure.get("thinkingPartId").is_none(),
+            "the retry showed no thought of its own: {failure}"
+        );
+        assert!(thinking_events(&events).is_empty());
+        assert_eq!(
+            session.get::<ModelProgress>("main").unwrap().unwrap(),
+            ModelProgress::default()
+        );
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// The final attempt's own shown thought is not the replaced attempt's: the
+/// terminal fact names the block it left open, so clients keep that row.
+#[tokio::test(start_paused = true)]
+async fn a_retry_that_shows_its_own_thought_names_that_block_on_the_terminal() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (cut, cut_stream) = mpsc::unbounded_channel();
+        let (retry, retry_stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![cut_stream, retry_stream]));
+        let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let mut progress = session.on::<ModelProgress>("main").unwrap().unwrap();
+        send(
+            &cut,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "cut".into(),
+                }),
+                Ok(ModelChunk::Thinking("first attempt".into())),
+            ],
+        );
+        progress
+            .wait_for(|progress| progress.thinking == "first attempt")
+            .await
+            .unwrap();
+        send(&cut, vec![Err(failure(ModelFailureKind::ServerError, None))]);
+        drop(cut);
+        let ended = tokio::select! {
+            _ = model.second_attempt.notified() => None,
+            outcome = turn_end(&session) => Some(outcome),
+        };
+        assert!(
+            ended.is_none(),
+            "the first attempt retries in place; the turn ended with {ended:?}"
+        );
+        model.release.notify_one();
+        send(
+            &retry,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "retry".into(),
+                }),
+                Ok(ModelChunk::Thinking("second attempt".into())),
+            ],
+        );
+        let shown = progress
+            .wait_for(|progress| progress.thinking == "second attempt")
+            .await
+            .unwrap();
+        let part = shown
+            .thinking_part_id
+            .clone()
+            .expect("the shown thought names its block");
+        send(&retry, vec![Err(failure(ModelFailureKind::InvalidRequest, None))]);
+        drop(retry);
+        session.idle("main").await.unwrap();
+
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let failure = model_end_failure(&events);
+        assert_eq!(failure["attempts"], 2, "{failure}");
+        assert_eq!(failure["retried"], true, "{failure}");
+        assert_eq!(failure["thinkingPartId"], part, "{failure}");
+        assert!(thinking_events(&events).is_empty());
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// A request that was never retried omits the retry boundary.
+#[tokio::test(start_paused = true)]
+async fn a_failure_without_a_retry_omits_the_retry_boundary() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (chunks, stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![stream]));
+        let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        send(
+            &chunks,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "only".into(),
+                }),
+                Ok(ModelChunk::Thinking("only attempt".into())),
+                Err(failure(ModelFailureKind::InvalidRequest, None)),
+            ],
+        );
+        drop(chunks);
+        session.idle("main").await.unwrap();
+
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let failure = model_end_failure(&events);
+        assert_eq!(failure["attempts"], 1, "{failure}");
+        assert!(failure.get("retried").is_none(), "{failure}");
+        assert!(failure.get("thinkingPartId").is_none(), "{failure}");
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
 }
