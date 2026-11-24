@@ -88,9 +88,9 @@ mean something, not a simplification.
 
 ## 2. Product behavior
 
-`codemode` and `shell` declare their entry tool, plus the tools a program cannot consume.
-`codemode` adds `skill`, whose result is instructions for the model; `shell` has no program, so it
-adds `ask_user` and `recall`. `normal` declares the work tools.
+`codemode` and `shell` declare what the table lists: their entry tool and the extras their mode
+needs. `codemode` adds `skill`, whose instructions the model reads directly; `shell` has no
+program, so it adds `ask_user` and `recall`. `normal` declares the work tools.
 
 | Mode | Declared | A program may call | Hidden |
 | --- | --- | --- | --- |
@@ -113,14 +113,19 @@ adds `ask_user` and `recall`. `normal` declares the work tools.
 
 ### Goals in shell mode
 
-`shell` declares no `goal_update`, so a shell Session cannot complete or block a goal. The mode
-contract:
+`shell` declares no `goal_update`, so a Session whose mode **in force** is `shell` cannot complete
+or block a goal. Everything below keys on the mode in force — the value `session.tool_mode.get`
+reports in `effective` — not on the mode the operator chose: a chosen `shell` without `execute`
+runs `normal` and keeps `goal_update`.
 
-- Entering `shell` rewrites no goal. On the next continuation, Goal reads the Session's mode and, in
-  `shell`, pauses the goal (`paused`, reason `mode`) instead of continuing, so the model is never
-  asked to call a tool the mode does not declare.
-- `session.goal.set` and `session.goal.resume` are refused in `shell` with a named error; `pause`,
-  `edit`, `clear` and `get` keep working.
+- Switching to an effective `shell` settles Goal before the update returns. For every branch with
+  an active goal, Goal writes `paused` with reason `mode` and withdraws the continuation it queued
+  when the InputQueue has not applied it; an applied continuation is the request in flight, which
+  pinned the old surface and finishes under it.
+- While `shell` is in force, a new continuation pauses the goal instead of continuing, so the model
+  is never asked to call a tool the mode does not declare.
+- `session.goal.set` and `session.goal.resume` are refused while `shell` is in force, with a named
+  error; `pause`, `edit`, `clear` and `get` keep working.
 - Leaving `shell` does not resume the goal: the operator resumes it explicitly, as Goal already
   requires for a paused goal.
 - A completed or blocked goal stays as it is.
@@ -135,8 +140,9 @@ Rules that hold in every mode:
 - Tool sources are unchanged. MCP servers, extension tools and other registered tools still
   contribute to the Session's tool set; the mode decides what the model sees and, in `codemode`,
   what a program may call. It does not enable or disable a source.
-- Client surfaces are unchanged. Mention search (`session.files`), command-output paging, skills,
-  approvals and settings work in every mode.
+- Apart from the mode control and the Goal control in §8, client surfaces are unchanged. Mention
+  search (`session.files`), command-output paging, skills, approvals and settings work in every
+  mode.
 
 ## 3. Who owns the mode
 
@@ -322,6 +328,8 @@ are its requirements; the ones marked missing are follow-up work, not part of th
 - Pageable output, and operator-visible state: the current directory, the running job, a command
   waiting for input. Output paging exists for native tasks; the state view is missing.
 - The description exists; examples for the dialect, backgrounding and timeouts are missing.
+- A mode-aware environment block: on Windows it carries guidance about `read`/`edit`/`write` text
+  encoding, which is noise in shell mode. Missing.
 
 The boundary is §2's: a shell Session cannot load a skill, read an image, call an MCP tool, open a
 line, start a member, schedule or manage settings and plugins. A task that needs one runs in another
@@ -407,16 +415,18 @@ and shows the named refusal otherwise.
   unchanged.
 - Flow: restore a record without the field, and fork a Session; both keep `normal` and the source
   mode respectively, except that the minimal-execution host restores its Sessions as `shell`.
-- Flow: a goal set before switching to `shell` pauses at the next continuation with reason `mode`;
-  `session.goal.set` and `resume` are refused in `shell`; after leaving, the operator resumes it and
-  it continues.
+- Flow: a goal with a queued continuation, switched to an effective `shell` before it is applied:
+  the continuation is withdrawn, the goal pauses (`mode`), and no request carrying the
+  `goal_update` instruction is prepared. Switched after it is applied, that request finishes under
+  the old surface. `set`/`resume` are refused while `shell` is in force; a chosen `shell` that runs
+  `normal` (no `execute`) neither pauses nor refuses; after leaving, the operator resumes the goal.
 - Flow: stop a shell task with `session.exec.stop` after switching the Session to `normal`; the
   route resolves the live `ExecStop` before `BackgroundExec`, and neither answers for a live task
   from history. The minimal-execution profile's Session runs `shell` and keeps `execute`.
 - Clients: a web component test for the composer menu and the remembered choice, and one tmux TUI
   case for the row and the picker.
-- No event type, envelope or stored format changes, so the fixture compatibility baseline is
-  untouched.
+- No event type or envelope changes. The stored configuration gains an optional field that old
+  records omit, so the fixture compatibility baseline is untouched and old records load as before.
 
 ## 11. Rule check
 
@@ -450,10 +460,11 @@ and shows the named refusal otherwise.
 
 None for the mechanism. One requirement goes to another capability's owner:
 
-- **Goal.** On each continuation, read the Session's mode and, in `shell`, pause with reason `mode`
-  instead of continuing; refuse `session.goal.set` and `resume` in `shell`; leave resumption to the
-  operator after the Session leaves `shell` (§2). Goal reads `ToolRegistry`'s current mode, the
-  value `session.tool_mode.get` reports, not another owner's state. Its owner carries this into
+- **Goal.** Read the mode in force, the value `session.tool_mode.get` reports in `effective`, never
+  the chosen mode. When a switch makes `shell` effective, settle before the update returns: pause
+  each branch's active goal (`mode`) and withdraw a continuation the InputQueue has not applied;
+  while `shell` is in force, pause new continuations and refuse `session.goal.set` and `resume`;
+  leave resumption to the operator after `shell` leaves. Its owner carries this into
   [Goal](plugins/Goal.md).
 
 Everything else stays within the owners that already exist: ToolRegistry projects its own set and
