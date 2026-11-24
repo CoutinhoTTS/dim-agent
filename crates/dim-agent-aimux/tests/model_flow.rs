@@ -1737,5 +1737,78 @@ async fn a_same_origin_redirect_chain_stops_at_the_limit() {
     .unwrap();
 }
 
+/// A provider that accepts the request and never sends the response headers
+/// fails as a network failure once the idle allowance has passed, like a
+/// stream that stops delivering parts.
+#[tokio::test]
+async fn a_wait_for_response_headers_past_the_idle_allowance_fails_as_a_network_failure() {
+    use tokio::io::AsyncReadExt;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let (accepted, received) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut head = Vec::new();
+        let mut buffer = [0; 8192];
+        loop {
+            let count = socket.read(&mut buffer).await.unwrap();
+            assert_ne!(count, 0, "the client closed before sending its request");
+            head.extend_from_slice(&buffer[..count]);
+            if head.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        accepted.send(()).unwrap();
+        std::future::pending::<()>().await;
+    });
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let driver = host.0.clone();
+    let request = ModelRequest::new("local", "test-model", vec![Message::text(Role::User, "hi")]);
+    let connection = ModelConnection::Http(HttpModelConnection {
+        protocol: ModelProtocol::OpenaiCompatible,
+        base_url: base,
+        network: Default::default(),
+        headers: Default::default(),
+        bearer: None,
+        api_key: None,
+        preset: None,
+    });
+    let invoke = tokio::spawn(async move {
+        driver
+            .invoke(Arc::new(request), connection, CancellationToken::new())
+            .await
+    });
+    received.await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(300)).await;
+    let outcome = tokio::time::timeout(Duration::from_secs(2), invoke)
+        .await
+        .expect("a request whose response headers never arrive must fail")
+        .expect("the request must not panic");
+    let error = match outcome {
+        Ok(_) => panic!("the wait for the response headers must fail"),
+        Err(error) => error,
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("the response headers did not arrive within 300 seconds")
+    );
+    server.abort();
+    root.shutdown().await.unwrap();
+}
+
 #[path = "model_flow/native.rs"]
 mod native;
