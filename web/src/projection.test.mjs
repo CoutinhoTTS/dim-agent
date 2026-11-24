@@ -225,16 +225,16 @@ test("a history read's counts cover the rows of a request that began before its 
   ])
 })
 
-test("a retry starts a request's committed counts from nothing", () => {
+test("an empty notice keeps a request's committed counts", () => {
   const projection = new Projection()
   projection.apply(event(2, { kind: "text", requestId: "r1", delta: "Write the file" }))
   projection.apply(event(3, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} }))
-  // The producer restarts the request: its offsets count from the start, so a retry opens at zero.
+  // The producer opens every request with an empty notice at offset zero; it is not a restart.
   projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: "", textOffset: 0, thinking: "", thinkingOffset: 0 })
-  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " and run it", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " and run it", textOffset: 14, thinking: "", thinkingOffset: 0 })
 
   const answers = projection.rows.filter((row) => row.kind === "assistant").map((row) => [row.text, row.streaming])
-  assert.deepEqual(answers, [["Write the file", false], [" and run it", true]], "the new attempt's tail is not swallowed by the replaced attempt's count")
+  assert.deepEqual(answers, [["Write the file", false], [" and run it", true]], "the notice keeps the committed count, so the tail beyond it draws")
 })
 
 test("a progress frame that arrives after its turn ended draws no row", () => {

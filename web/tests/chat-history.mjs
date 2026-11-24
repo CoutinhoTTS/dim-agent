@@ -2323,3 +2323,35 @@ test("a snapshot that arrives after the load does not reopen an ended request", 
   await flush()
   assert.deepEqual(chat.views.session.rows.filter(row => row.kind === "assistant"), [])
 })
+
+test("a replayed empty snapshot keeps the text a window committed", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise, {
+    "session.turn.get": params => ({ ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r1", textCharacters: 14, thinkingCharacters: 0 } }),
+  })
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: "", textOffset: 0, thinking: "", thinkingOffset: 0 } })
+  held.resolve(page([
+    event(1, { kind: "text", requestId: "r1", delta: "Write the file" }),
+    event(2, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} }),
+  ], 2))
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: " and run it", textOffset: 14, thinking: "", thinkingOffset: 0 } })
+  await flush()
+  const rows = chat.views.session.rows
+  assert.deepEqual(rows.filter(row => row.kind === "assistant").map(row => [row.text, row.streaming]), [["Write the file", false], [" and run it", true]], JSON.stringify(rows))
+})
+
+test("a replayed empty snapshot keeps the counts a truncated window seeds", async t => {
+  const held = deferred()
+  const chat = session(t, () => held.promise, {
+    "session.turn.get": params => ({ ...params, turn: { sequence: 1, ended: false }, output: { requestId: "r1", textCharacters: 14, thinkingCharacters: 0 } }),
+  })
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: "", textOffset: 0, thinking: "", thinkingOffset: 0 } })
+  held.resolve(page([event(1, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} })], 1))
+  await flush()
+  chat.receive({ method: "session.model.progress", progress: { sessionId: "session", branchId: "main", requestId: "r1", text: " and run it", textOffset: 14, thinking: "", thinkingOffset: 0 } })
+  await flush()
+  const rows = chat.views.session.rows
+  assert.deepEqual(rows.filter(row => row.kind === "tool").map(row => row.callId), ["call"], JSON.stringify(rows))
+  assert.deepEqual(rows.filter(row => row.kind === "assistant").map(row => [row.text, row.streaming]), [[" and run it", true]], JSON.stringify(rows))
+})
