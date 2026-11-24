@@ -212,6 +212,16 @@ pub struct UnregisteredRemovalHold {
     pub release: tokio::sync::Notify,
 }
 
+/// Feature `testing`: a hold on one managed worktree creation after it picked
+/// and checked its directory and before it builds there. It notifies `reached`
+/// once held and returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct WorktreeCreationHold {
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 /// Feature `testing`: a hold on one subscription's `follow` task. It notifies
 /// `waiting` once it is held, `cancelled` once retirement cancels it, and
 /// returns once `release` is notified.
@@ -376,6 +386,15 @@ impl RunningServer {
             }
             None => false,
         }
+    }
+    /// Holds the next managed worktree creation after it checked its directory
+    /// and before it builds there, so a test can remove that path in between.
+    /// Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_worktree_creation(&self) -> Option<Arc<WorktreeCreationHold>> {
+        self.root
+            .get::<worktrees::ManagedWorktrees>()
+            .map(|managed| managed.hold_next_creation())
     }
     /// Holds the next subscription's `follow` task open until `release`, so a
     /// test can keep an attach or detach in flight at a known point. Feature

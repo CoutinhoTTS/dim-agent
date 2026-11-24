@@ -38,6 +38,8 @@ pub struct ManagedWorktrees {
     #[cfg(feature = "testing")]
     removal_hold: std::sync::Mutex<Option<Arc<crate::UnregisteredRemovalHold>>>,
     #[cfg(feature = "testing")]
+    creation_hold: std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
+    #[cfg(feature = "testing")]
     task_id_hold: std::sync::Mutex<Option<String>>,
 }
 
@@ -153,6 +155,8 @@ impl ManagedWorktrees {
             #[cfg(feature = "testing")]
             removal_hold: std::sync::Mutex::new(None),
             #[cfg(feature = "testing")]
+            creation_hold: std::sync::Mutex::new(None),
+            #[cfg(feature = "testing")]
             task_id_hold: std::sync::Mutex::new(None),
         }
     }
@@ -180,6 +184,24 @@ impl ManagedWorktrees {
     #[cfg(feature = "testing")]
     pub(crate) fn prefer_next_task_id(&self, task_id: &str) {
         *self.task_id_hold.lock().expect("task id hold") = Some(task_id.to_owned());
+    }
+
+    /// Holds the next creation after its directory check and before it builds
+    /// there. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_creation(&self) -> Arc<crate::WorktreeCreationHold> {
+        let hold = Arc::new(crate::WorktreeCreationHold::default());
+        *self.creation_hold.lock().expect("creation hold") = Some(hold.clone());
+        hold
+    }
+
+    #[cfg(feature = "testing")]
+    async fn wait_for_creation_hold(&self) {
+        let hold = self.creation_hold.lock().expect("creation hold").take();
+        if let Some(hold) = hold {
+            hold.reached.notify_one();
+            hold.release.notified().await;
+        }
     }
 
     #[cfg(feature = "testing")]
@@ -272,6 +294,8 @@ impl ManagedWorktrees {
                 last = Some(error.into());
                 continue;
             }
+            #[cfg(feature = "testing")]
+            self.wait_for_creation_hold().await;
             let branch_name = match branch {
                 Some(branch) => branch.to_owned(),
                 None => format!("dim/{task_id}"),
