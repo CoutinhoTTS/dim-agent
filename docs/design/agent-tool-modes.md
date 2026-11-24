@@ -42,11 +42,11 @@ repository; the shell is the one without a product form.
 | `codemode` | one program | discover tools, call them, branch, loop, aggregate; child results stay out of the model context | the `codemode` tool beside the direct tools |
 | `shell` | one shell session | compose commands; working directory, environment and jobs persist across calls | the minimal-execution profile only |
 
-In `codemode` and `shell` the ordinary tool declarations do not appear. That absence is a property
-of the mode — the model acts through one surface — not the goal of the change. Fewer declarations
-per request, fewer round trips and less context churn follow from it; the 23 tools declared today
-carry about 12 kB of description and about 20 kB with schemas, but saving that is a result, not the
-requirement.
+In `codemode` and `shell` the Workspace tool declarations do not appear; the Session tools stay
+(§2). That absence is a property of the mode — the model does its workspace work through one
+surface — not the goal of the change. Fewer declarations per request, fewer round trips and less
+context churn follow from it; the Workspace tools declared today carry about 5 kB of that
+description, but saving it is a result, not the requirement.
 
 ### 1.3 The one real risk: how well the model uses the mode
 
@@ -88,29 +88,32 @@ mean something, not a simplification.
 
 ## 2. Product behavior
 
-| Mode | The model sees | How it works |
+A mode changes how workspace work is done. It does not change how the agent talks to the operator,
+looks things up, or coordinates its own lines, so those tools stay in every mode.
+
+Tools fall into two roles, and the two entry tools stand apart. Each owner declares its tool's role
+when it registers the tool; a tool that declares none is a Session tool. The role is not a field of
+the model-facing declaration and is never sent to the model.
+
+| Role | What it does | Today's members |
 | --- | --- | --- |
-| `normal` (default) | every tool the Session mounts, except `codemode` and `execute` | one tool call per decision |
-| `codemode` | `codemode` only | one program uses `tools.list` / `tools.describe` / `tools.call` |
-| `shell` | `execute` only | commands in one persistent shell |
+| Workspace | reads, writes or runs in the workspace; a shell command does the same job | `read`, `write`, `edit`, `glob`, `grep`, `exec`, `exec_stop` |
+| Session | talks to the operator, another line or agent, schedules this Session's own future, or gets information and configuration; also every extension and MCP tool | everything else |
+| Entry | gives the mode its unit of action | `codemode`, `execute` |
 
-### The product profile's tool list
+| Mode | Workspace tools | Session tools | Entry tool |
+| --- | --- | --- | --- |
+| `normal` (default) | declared | declared | — |
+| `codemode` | hidden; a program may call them | declared | `codemode` declared |
+| `shell` | hidden | declared | `execute` declared |
 
-The product profile mounts the same tool set in every Session; the mode decides what is declared and
-what a program may call. These are the lists the assembly yields today. The rule in §4 derives them,
-so a mount list, an Agent profile's tool list, an absent part, a disabled source or an unavailable
-tool narrows them; this table is a reading, not a second source.
-
-| Mode | Declared (model-visible) | Delegated to Code Mode |
-| --- | --- | --- |
-| `normal` | `read`, `write`, `edit`, `glob`, `grep`, `exec`, `exec_stop`, `wait`, `recall`, `skill`, `branch`, `settings`, `ask_user`, `goal_update`, `events`, `schedule`, `wakeup`, `loop`, `image_understand`, `agent`, `plugin`, `web_fetch` | — |
-| `codemode` | `codemode` | the `normal` list and `execute` |
-| `shell` | `execute` | — |
-
-`normal` is today's list without `codemode`; `execute` is mounted by this change and stays hidden
-there, so switching to `shell` or `codemode` uses the already-registered tool. `web_search`, when a
-search service is usable, and every MCP tool follow the same rule: declared in `normal`, delegated
-in `codemode`, hidden in `shell`.
+- An entry tool is declared only in its own mode: `codemode` only in `codemode`, `execute` only in
+  `shell`. In `codemode` a program may call `execute` like any other tool it does not see.
+- A Code Mode program may call every tool except `codemode`: the Workspace tools its model does not
+  see, and the Session tools it may also call directly. Interaction stays possible from the
+  program, and the child path already carries an `ask_user`.
+- A new tool needs no edit here: a Workspace tool added by `WorkspaceTools` or `ShellTools` joins
+  the role and the rule, and a new capability's tool is a Session tool, declared in every mode.
 
 Rules that hold in every mode:
 
@@ -121,14 +124,12 @@ Rules that hold in every mode:
   what a program may call. It does not enable or disable a source.
 - Client surfaces are unchanged. Mention search (`session.files`), command-output paging, skills,
   approvals and settings work in every mode.
-- `shell` mode has no `ask_user` tool, so its model cannot ask the operator a question. It can still
-  be stopped, and an `execute` approval still reaches the operator.
 
 ## 3. Who owns the mode
 
 The mode belongs to a Session, and the operator owns it. A mode is a capability choice — `shell`
-removes the file tools, `codemode` hides every other declaration — so nobody else may change it
-behind the operator's back.
+replaces the workspace tools with one shell, `codemode` hides them behind one program — so nobody
+else may change it behind the operator's back.
 
 | Situation | Rule | Why |
 | --- | --- | --- |
@@ -145,22 +146,24 @@ declarations.
 
 The Session's tools are one set with one owner. `ToolRegistry` already owns the mount list and the
 Session's tool set ([ToolRegistry](../architecture/rust-agent/plugins/ToolRegistry.md)), so it also
-owns this projection. Four terms:
+owns this projection. Three terms:
 
 - **callable**: what the Session mounts: host tools, registered tools and each source's sets, after
   `SessionConfig.tools` and `excluded_tools`. The branch adopts and pins this set, and it does not
   change when the mode does.
-- **entry tool**: `codemode` → `codemode`, `shell` → `execute`, `normal` → none.
 - **visible**: what the request declares and what a top-level model call may name.
 - **delegated**: what a Code Mode child call may name. Their union is the request's exposed set, the
   only tools the request binds.
 
 | Mode | visible (top-level) | delegated (child) | entry tool absent |
 | --- | --- | --- | --- |
-| `normal` | callable − {`codemode`, `execute`} | none | — |
-| `codemode` | {`codemode`} | callable − {`codemode`} | the Session runs `normal` |
-| `shell` | {`execute`} | none | the Session runs `normal` |
+| `normal` | every Workspace tool and every Session tool | none | — |
+| `codemode` | every Session tool and `codemode` | every tool except `codemode` | the Session runs `normal` |
+| `shell` | every Session tool and `execute` | none | the Session runs `normal` |
 
+- The entry tools are their own role and are declared only in their own mode, and no other tool is
+  named here: the roles in §2 decide the sets, so a new Workspace tool joins the rule and a new tool
+  that declares no role is a Session tool in every mode.
 - Admission is by call origin: a top-level call is admitted only inside `visible`, a child call only
   inside `delegated`. Both then pass the called tool's own Permission and Approval. A call outside
   its origin's set is refused as an unknown tool, even when the tool is bound. The origin is the
@@ -178,7 +181,7 @@ owns this projection. Four terms:
 - Only `visible` reaches the model request, its token accounting and compaction. `delegated` never
   appears in a prompt, a declaration or the usage counter.
 - The mount list and an Agent profile's tool list narrow the surface and never widen it. `normal`
-  hides the two mode tools even when a list names them.
+  hides the two entry tools even when a list names them.
 
 Registration is dynamic, so the projection follows the current set and the current mode: a Session
 whose entry tool is not registered, is withdrawn, or is excluded runs `normal` until it appears.
@@ -332,14 +335,17 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
 ## 10. Verification
 
 - Flow: create a Session in each mode (request field; absent = `normal`) and assert the request's
-  declarations: `normal` = the mounted tools without `codemode`/`execute`, `codemode` = only
-  `codemode`, `shell` = only `execute`.
+  declarations: `normal` declares the Workspace tools and the Session tools but not `codemode` or
+  `execute`; `codemode` declares `codemode` and the Session tools but no Workspace tool; `shell`
+  declares `execute` and the Session tools but no other Workspace tool.
+- Flow: a tool registered without a role is declared in every mode; a Workspace tool added to the
+  host joins the rule, so `codemode` hides it and `shell` hides it.
 - Flow: in `codemode` mode a top-level call naming `read` is refused as an unknown tool even though
   the request pinned it for children, and a child call to `codemode` is refused as outside
-  `delegated`. In `normal` mode a top-level call naming `codemode` or `execute` is refused.
-- Flow: in `codemode` mode, a program calls a tool the model does not see; the child
-  `step/tool-call` and `step/tool-result` carry `parent_call_id`, and Permission admits the child by
-  its own risk.
+  `delegated`. In `normal` and `shell` a top-level call naming a hidden Workspace tool is refused.
+- Flow: in `codemode` mode, a program calls a Workspace tool the model does not see and a Session
+  tool the model does see; the child `step/tool-call` and `step/tool-result` carry `parent_call_id`,
+  and Permission admits each child by its own risk.
 - Flow: switch a running Session in each direction; the next request declares the new visible set,
   the request after a tool result uses the new mode, a request retried through its own source
   (budget or restart recovery) keeps its pin, and a call already admitted finishes.
