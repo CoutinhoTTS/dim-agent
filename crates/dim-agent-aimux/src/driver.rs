@@ -815,7 +815,9 @@ impl ModelDriver for AimuxDriver {
                                     stream::STREAM_IDLE_TIMEOUT.as_secs()
                                 )
                             });
-                            if let Some(pending) = pending.as_mut() { pending.failed(&error.to_string()); }
+                            if let Some(pending) = pending.as_mut() {
+                                pending.failed(&error.to_string());
+                            }
                             return Err(error);
                         }
                         status = &mut response, if awaiting_headers => {
