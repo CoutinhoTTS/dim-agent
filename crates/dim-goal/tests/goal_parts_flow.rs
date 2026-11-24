@@ -1029,8 +1029,8 @@ async fn a_failed_state_record_takes_no_second_decision() {
 
 /// A state record whose append fails releases the settlement it held without
 /// taking up the interrupt that settlement deferred: no new fact, so the
-/// interrupt states no pause of its own, and a live read still answers the goal
-/// the branch holds in memory (#2119).
+/// interrupt states no pause of its own, and the branch reports the failure to
+/// a read because the settlement cancelled the writer's caller (#2119).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_failed_state_record_takes_up_no_interrupt_it_deferred() {
     let env = Env::start().await;
@@ -1137,9 +1137,9 @@ async fn a_failed_state_record_takes_up_no_interrupt_it_deferred() {
         "a failed record states no pause of its own, yet it wrote {pauses:?}"
     );
 
-    // The settlement cancelled the writer's caller, so the failure is published
-    // to the branch as it was before this fix: a live read reports it instead
-    // of a state the branch could not state.
+    // The settlement cancelled the writer's caller, so the branch publishes the
+    // failure as it does for any write whose caller is gone: a live read
+    // reports it instead of a state the branch could not state.
     let error = env
         .goal("get", json!({}))
         .await
@@ -1200,6 +1200,8 @@ async fn a_failed_change_takes_up_no_interrupt_it_deferred() {
         let failure = env.probe.fail_next_state();
         change.release();
         failure.await.expect("the writer refuses the pause");
+        // The bound only keeps the case from waiting forever: reaching the hold
+        // is what the writer that failed must not do.
         tokio::time::timeout(std::time::Duration::from_millis(750), again.arrived())
             .await
             .ok()
