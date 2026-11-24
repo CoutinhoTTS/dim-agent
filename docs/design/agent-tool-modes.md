@@ -1,7 +1,7 @@
 # Agent tool modes: normal, codemode and shell
 
 Status: Draft. Scope: process (mode availability), Session (the mode and the tool surface),
-branch (the mode a request pins).
+branch (the mode a turn pins).
 Issue: [#2135](https://github.com/arcships/dim/issues/2135). Delivery status belongs in the issue.
 
 Today the model has one way to act: one tool call per decision, with every tool declared before the
@@ -118,10 +118,12 @@ or block a goal. Everything below keys on the mode in force — the value `sessi
 reports in `effective` — not on the mode the operator chose: a chosen `shell` without `execute`
 runs `normal` and keeps `goal_update`.
 
-- Switching to an effective `shell` settles Goal before the update returns. For every branch with
-  an active goal, Goal writes `paused` with reason `mode` and withdraws the continuation it queued
-  when the InputQueue has not applied it; an applied continuation is the request in flight, which
-  pinned the old surface and finishes under it.
+- Switching to an effective `shell` writes Goal's pause before the mode changes, so every turn that
+  starts in `shell` has the pause in its history. For each branch with an active goal, Goal writes
+  `paused` with reason `mode` and withdraws the continuation it queued when the InputQueue has not
+  applied it; an applied continuation belongs to a turn that started earlier, which pinned the old
+  mode and finishes under it. A cancelled update after the pause leaves the goal paused and the
+  mode unchanged; the operator resumes it.
 - While `shell` is in force, a new continuation pauses the goal instead of continuing, so the model
   is never asked to call a tool the mode does not declare.
 - `session.goal.set` and `session.goal.resume` are refused while `shell` is in force, with a named
@@ -153,12 +155,12 @@ may change it behind the operator's back.
 | Situation | Rule | Why |
 | --- | --- | --- |
 | A new Session from a client | starts in the mode the request names, or `normal` when it names none; the client sends the mode it last used | the operator should not re-choose for every Session |
-| A running Session | the operator can switch it at any time; the next model request declares the new mode, a request already prepared keeps its pin (an in-process budget recovery reuses it; a process restart settles the in-flight request), and a call already admitted finishes | otherwise a change of style means abandoning the conversation |
+| A running Session | the operator can switch it at any time; the next turn declares the new mode, a turn already started keeps its pin (an in-process budget recovery reuses it; a process restart settles the in-flight request), and a call already admitted finishes | otherwise a change of style means abandoning the conversation |
 | A branch (line) | has no mode of its own; every line of a Session runs the Session's mode | a line is the same agent; a line in another mode would hand the agent tools the operator excluded |
 | A member Session | starts in its creator Session's current mode, and the operator can switch it like any Session | the member is the same agent doing delegated work; the model must not decide how the agent acts |
 | The model | never chooses or changes a mode | it is the operator's choice of capability |
 
-A switch does not rewrite the history the model already has: the next request carries the new
+A switch does not rewrite the history the model already has: the next turn carries the new
 declarations.
 
 ## 4. The tool surface rule
@@ -191,13 +193,12 @@ owns this projection. Three terms:
 - A Code Mode program discovers and calls exactly the `delegated` set: `tools.list` and
   `tools.describe` project it, and `tools.call` admits inside it. `codemode` itself is never
   delegated, so a program cannot nest one.
-- A request pins the mode it was prepared under, together with the callable set it pins today, and
-  derives both sets from that pin. A switch takes effect with the next request and needs no
-  re-adoption: the branch's configuration, the version pins and the source sets stay as they are. A
-  request retried through its own source (an in-process budget recovery) keeps the pin; a process
-  restart settles the in-flight request as the loop already does and does not reissue it; a
-  continuation request is a new request and pins the current mode, as does the request that follows
-  a tool result.
+- A turn pins the mode when it starts — when its driving input is applied — and every request of
+  the turn uses that pin, together with the callable set it pins today. A switch takes effect with
+  the next turn and needs no re-adoption: the branch's configuration, the version pins and the
+  source sets stay as they are. A request retried through its own source (an in-process budget
+  recovery) keeps the pin; a process restart settles the in-flight request as the loop already does
+  and does not reissue it; the request that follows a tool result keeps the turn's pin.
 - A tool that is only delegated never appears in a prompt, a declaration or the usage counter;
   `skill` is in both sets.
 - The mount list and an Agent profile's tool list narrow the surface and never widen it. `normal`
@@ -226,8 +227,8 @@ The mode is Session configuration; there is no daemon-wide default to maintain.
 
 The mode is live for the Session's lifetime:
 
-- `ToolRegistry` holds the Session's current mode, initialised from the configuration. Requests
-  read it when they are prepared; nothing re-adopts a tool set when it changes.
+- `ToolRegistry` holds the Session's current mode, initialised from the configuration. A turn reads
+  it when it starts; nothing re-adopts a tool set when it changes.
 - `session.tool_mode.get` returns `{mode, effective}`: the mode the operator chose and the one in
   force. A mode whose entry tool is absent stays chosen and is not in force; that is the fallback.
   `session.tool_mode.update` follows `session.language.update`'s order: a failure before the record
@@ -238,7 +239,7 @@ The mode is live for the Session's lifetime:
 
 ```text
 session.create.toolMode ──▶ SessionConfig.toolMode ──▶ ToolRegistry (live mode)
-                                                          ├─ a request pins the mode ──▶ visible ──▶ model request, usage
+                                                          ├─ a turn pins the mode ──▶ visible ──▶ model request, usage
                                                           ├─ a top-level call checks `visible` ──▶ admit or refuse
                                                           └─ a child call checks `delegated` ──▶ admit or refuse
                      session.tool_mode.update ──▶ live mode + stored record
@@ -328,8 +329,6 @@ are its requirements; the ones marked missing are follow-up work, not part of th
 - Pageable output, and operator-visible state: the current directory, the running job, a command
   waiting for input. Output paging exists for native tasks; the state view is missing.
 - The description exists; examples for the dialect, backgrounding and timeouts are missing.
-- A mode-aware environment block: on Windows it carries guidance about `read`/`edit`/`write` text
-  encoding, which is noise in shell mode. Missing.
 
 The boundary is §2's: a shell Session cannot load a skill, read an image, call an MCP tool, open a
 line, start a member, schedule or manage settings and plugins. A task that needs one runs in another
@@ -362,10 +361,10 @@ there is no default row to set.
 ```
 
 The picker lists all three modes; `normal` is always available, and `codemode` or `shell` is shown
-as unavailable when its `hello.features` entry is absent. A switch takes effect from the next
-request, and the row shows the effective mode, so a mode that fell back to `normal` is not reported
-as in force. A client that offers Goal disables `set` and `resume` while the Session is in `shell`
-and shows the named refusal otherwise.
+as unavailable when its `hello.features` entry is absent. A switch takes effect from the next turn,
+and the row shows the effective mode, so a mode that fell back to `normal` is not reported as in
+force. A client that offers Goal disables `set` and `resume` while `shell` is in force (the
+`effective` value) and shows the named refusal otherwise.
 
 ## 9. Compatibility
 
@@ -405,10 +404,10 @@ and shows the named refusal otherwise.
 - Flow: a child `ask_user` is shown under the program and is answerable through
   `session.question.respond`; its result drives the program and is not duplicated into the model
   context unless the program returns it.
-- Flow: switch a running Session in each direction; the next request declares the new visible set,
-  the request after a tool result uses the new mode, an in-process budget recovery keeps its pin, a
-  process restart settles the in-flight request without reissuing it, and a call already admitted
-  finishes.
+- Flow: switch a running Session in each direction; the next turn declares the new visible set, a
+  request after a tool result in the same turn keeps the turn's pin, an in-process budget recovery
+  keeps its pin, a process restart settles the in-flight request without reissuing it, and a call
+  already admitted finishes.
 - Flow: fallback — a mode whose entry tool is absent stays chosen in `get` and is reported as not in
   force; the Session declares the `normal` surface.
 - Flow: a member created under `codemode` records it; switching the creator leaves the member
@@ -416,9 +415,11 @@ and shows the named refusal otherwise.
 - Flow: restore a record without the field, and fork a Session; both keep `normal` and the source
   mode respectively, except that the minimal-execution host restores its Sessions as `shell`.
 - Flow: a goal with a queued continuation, switched to an effective `shell` before it is applied:
-  the continuation is withdrawn, the goal pauses (`mode`), and no request carrying the
-  `goal_update` instruction is prepared. Switched after it is applied, that request finishes under
-  the old surface. `set`/`resume` are refused while `shell` is in force; a chosen `shell` that runs
+  the continuation is withdrawn, the goal pauses (`mode`), and no turn carrying the `goal_update`
+  instruction starts in `shell`. Switched after it is applied, that turn pinned the old mode and
+  finishes under it. The pause is written before the live mode, so a turn that starts in `shell`
+  has it in history; a cancelled update after the pause leaves the goal paused and the mode
+  unchanged. `set`/`resume` are refused while `shell` is in force; a chosen `shell` that runs
   `normal` (no `execute`) neither pauses nor refuses; after leaving, the operator resumes the goal.
 - Flow: stop a shell task with `session.exec.stop` after switching the Session to `normal`; the
   route resolves the live `ExecStop` before `BackgroundExec`, and neither answers for a live task
@@ -461,11 +462,14 @@ and shows the named refusal otherwise.
 None for the mechanism. One requirement goes to another capability's owner:
 
 - **Goal.** Read the mode in force, the value `session.tool_mode.get` reports in `effective`, never
-  the chosen mode. When a switch makes `shell` effective, settle before the update returns: pause
-  each branch's active goal (`mode`) and withdraw a continuation the InputQueue has not applied;
-  while `shell` is in force, pause new continuations and refuse `session.goal.set` and `resume`;
-  leave resumption to the operator after `shell` leaves. Its owner carries this into
+  the chosen mode. When a switch makes `shell` effective, write the pause before the live mode
+  changes: pause each branch's active goal (`mode`) and withdraw a continuation the InputQueue has
+  not applied; while `shell` is in force, pause new continuations and refuse `session.goal.set` and
+  `resume`; leave resumption to the operator after `shell` leaves. Its owner carries this into
   [Goal](plugins/Goal.md).
+- **PromptSources.** The environment block follows the surface: in `shell` mode it drops the
+  Windows file-encoding guidance about `read`/`edit`/`write`. Its owner carries this into
+  [PromptSources](plugins/PromptSources.md).
 
 Everything else stays within the owners that already exist: ToolRegistry projects its own set and
 holds the live mode, ToolBinding pins the mode with the callable set, ToolExecution refuses a call
