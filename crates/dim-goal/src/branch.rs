@@ -2244,48 +2244,35 @@ impl Owner {
                 if self.stopped() {
                     return Ok(());
                 }
-                let Some(end) = ({
+                let current = {
                     let state = self.state.lock().unwrap();
-                    if fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                        != Some(ConclusionAction::Continue)
-                    {
+                    fold::decide_conclusion(&state.fold, sequence, &conclusion)
+                        == Some(ConclusionAction::Continue)
+                        && state.fold.turn_end.as_ref().map(|end| end.sequence) == Some(evaluation)
+                };
+                if !current {
+                    return Ok(());
+                }
+                // C7 measures the branch's own continuations; the evaluator
+                // judged this turn, so this path reads no progress (Pursuit §5).
+                // C4, C5: the decision is bound to the judged turn end, so a
+                // Queue that opened a turn before or during the settings read
+                // cannot pass as the expected one. The recheck reads the fold at
+                // the latest committed cutoff and catches up to that Queue; a
+                // turn the Queue opened leaves its turn open, a newer turn end
+                // replaces the judged one, a turn interrupt after the judged end
+                // pauses the goal, and the append refuses a head that moved
+                // after the recheck. A pause is decided once, at the writer's
+                // cutoff, and does not claim a Queue that commits after it.
+                let write = self.write_guard().await?;
+                let decision = {
+                    let state = self.state.lock().unwrap();
+                    if state.written.contains(&sequence) {
                         return Ok(());
                     }
                     state
                         .fold
-                        .turn_end
-                        .clone()
-                        .filter(|end| end.sequence == evaluation)
-                }) else {
-                    return Ok(());
-                };
-                let turn_start = end.turn_start;
-                // C7 measures the branch's own continuations; the evaluator
-                // judged this turn, so this path reads no progress (Pursuit §5).
-                // C4, C5: the decision is bound to the judged turn end and to
-                // that turn's own start, so a Queue that opened a turn before or
-                // during the settings read cannot pass as the expected one. The
-                // recheck reads the fold at the latest committed cutoff and
-                // catches up to that Queue; a turn the Queue opened moves
-                // `turn_start`, a newer turn end replaces the judged one, a turn
-                // interrupt after the judged end pauses the goal, and the append
-                // refuses a head that moved after the recheck. A pause is decided
-                // once, at the writer's cutoff, and does not claim a Queue that
-                // commits after it.
-                let write = self.write_guard().await?;
-                let decision = {
-                    let state = self.state.lock().unwrap();
-                    if state.written.contains(&sequence)
-                        || fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                            != Some(ConclusionAction::Continue)
-                        || state.fold.turn_end.as_ref().map(|end| end.sequence)
-                            != Some(end.sequence)
-                        || state.fold.turn_start != turn_start
-                        || state.fold.interrupt_after(end.sequence).is_some()
-                    {
-                        return Ok(());
-                    }
-                    fold::decide_evaluated_continuation(&state.fold, limit)
+                        .evaluated_continuation(sequence, evaluation, limit)
                 };
                 match decision {
                     None => {}
@@ -2309,17 +2296,12 @@ impl Owner {
                                 if self.timeline.committed() != through {
                                     continue;
                                 }
-                                if state.written.contains(&sequence)
-                                    || fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                                        != Some(ConclusionAction::Continue)
-                                    || state.fold.turn_end.as_ref().map(|end| end.sequence)
-                                        != Some(end.sequence)
-                                    || state.fold.turn_start != turn_start
-                                    || state.fold.interrupt_after(end.sequence).is_some()
-                                {
+                                if state.written.contains(&sequence) {
                                     return Ok(());
                                 }
-                                fold::decide_evaluated_continuation(&state.fold, limit)
+                                state
+                                    .fold
+                                    .evaluated_continuation(sequence, evaluation, limit)
                             };
                             let Some(Decision::Continuation { count, idle }) = decision else {
                                 return Ok(());

@@ -971,19 +971,39 @@ impl Fold {
     pub(crate) fn conclusion_decides(&self, sequence: u64, evaluation: u64) -> bool {
         self.conclusion_stands(sequence, evaluation) && self.conclusion_ready()
     }
+    /// The decision a `continue` conclusion at `sequence` of `evaluation`
+    /// still takes at this fold: the conclusion is the evaluation's own, the
+    /// judged turn end is still the newest and its turn is not open, no turn
+    /// interrupt follows that end, and the goal is at a point the conclusion
+    /// still decides the continuation limit (Pursuit §4.1, §5). The decision
+    /// and the record writer that states it both read it here, so a pause is
+    /// stated at the boundary it was taken at.
+    pub(crate) fn evaluated_continuation(
+        &self,
+        sequence: u64,
+        evaluation: u64,
+        limit: Option<u64>,
+    ) -> Option<Decision> {
+        if !self.conclusion_stands(sequence, evaluation)
+            || !self.is_current(evaluation)
+            || self.turn_end.as_ref().map(|end| end.sequence) != Some(evaluation)
+            || self.interrupt_after(evaluation).is_some()
+        {
+            return None;
+        }
+        decide_evaluated_continuation(self, limit)
+    }
     /// The pause the `continue` conclusion at `sequence` of `evaluation` still
-    /// decides, and the reason the fold gives it now: [`conclusion_stands`] and
-    /// [`decide_evaluated_continuation`] at the writer's cutoff.
+    /// decides, and the reason the fold gives it now:
+    /// [`evaluated_continuation`](Self::evaluated_continuation) at the writer's
+    /// cutoff.
     pub(crate) fn pause_at_conclusion(
         &self,
         sequence: u64,
         evaluation: u64,
         limit: Option<u64>,
     ) -> Option<&'static str> {
-        if !self.conclusion_stands(sequence, evaluation) {
-            return None;
-        }
-        match decide_evaluated_continuation(self, limit) {
+        match self.evaluated_continuation(sequence, evaluation, limit) {
             Some(Decision::Pause { reason }) => Some(reason),
             _ => None,
         }

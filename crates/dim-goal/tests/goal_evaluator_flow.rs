@@ -923,6 +923,74 @@ async fn a_settled_evaluator_does_not_restate_the_pause_that_settled_it() {
     env.close().await;
 }
 
+/// An operator interrupt that folds before an evaluated pause reads its
+/// cutoff is stated by the interrupt's own pause: the writer re-decides the
+/// conclusion at the fold it writes from, where the interrupt already follows
+/// the evaluated turn end (#2119, Pursuit §4.1, §5, C4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evaluated_pause_does_not_answer_a_later_interrupt() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // The limit is reached, so the conclusion decides a pause. Its record
+    // writer is held after it settled the decisions, before it composes.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- one test fails: <output>",
+    );
+    assert_eq!(
+        held.arrived().await,
+        conclusion,
+        "the pause's record writer answers the conclusion at {conclusion}"
+    );
+
+    // An operator interrupt commits in that window and folds before the writer
+    // reads its cutoff again.
+    let interrupt = env.interrupt("main");
+    env.dispatched("main", interrupt.sequence).await;
+    held.release();
+
+    // The interrupt states the pause the cutoff now gives; the conclusion's
+    // record does not answer it.
+    let pause = env
+        .wait_for("main", &format!(r#"after="{}""#, interrupt.sequence))
+        .await;
+    assert!(
+        pause.marker.contains(r#"status="paused""#)
+            && pause.marker.contains(r#"reason="interrupted""#),
+        "the interrupt at {} states the pause: {pause:#?}",
+        interrupt.sequence
+    );
+    let stale: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="state""#)
+                && block.marker.contains(r#"status="paused""#)
+                && block.marker.contains(&format!(r#"after="{}""#, conclusion))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the conclusion at {conclusion} writes no pause once the interrupt at {} follows the evaluated turn end, yet it wrote {stale:?}",
+        interrupt.sequence
+    );
+    env.close().await;
+}
+
 #[tokio::test]
 async fn pursuit_13_e3_an_outside_end_before_the_conclusion_fails_the_evaluation() {
     let env = Env::start().await;
