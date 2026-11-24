@@ -1354,8 +1354,8 @@ async fn unregistered_removal_refuses_a_recorded_directory_before_the_callback()
 }
 
 /// A `.git` entry that appears after the content check refuses the removal:
-/// the store re-checks the unregistered facts under the ownership lock before
-/// it deletes anything.
+/// the removal re-checks the unregistered facts in its own task, after its
+/// path is registered as being deleted, before it deletes anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unregistered_remove_refuses_a_git_entry_added_after_the_content_check() {
     let work = Work::new();
@@ -1393,9 +1393,9 @@ async fn unregistered_remove_refuses_a_git_entry_added_after_the_content_check()
     server.join().await.unwrap();
 }
 
-/// A removal that holds the ownership lock first deletes the directory, so a
-/// creation queued behind it fails its own cwd check instead of leaving a
-/// Session that points at a deleted workspace.
+/// A removal registers its path under the ownership lock before it deletes
+/// the directory, so a creation on that path is refused without waiting;
+/// after the removal the deleted workspace fails the creation's own check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_creation_after_an_unregistered_removal_fails_its_workspace_check() {
     let work = Work::new();
@@ -1426,7 +1426,7 @@ async fn session_creation_after_an_unregistered_removal_fails_its_workspace_chec
     });
     tokio::time::timeout(Duration::from_secs(30), reached.notified())
         .await
-        .expect("the removal holds the ownership lock");
+        .expect("the removal reaches its deletion step");
     let config = SessionConfig {
         cwd: task.to_string_lossy().into_owned(),
         ..Default::default()
@@ -1447,13 +1447,33 @@ async fn session_creation_after_an_unregistered_removal_fails_its_workspace_chec
                 .await
         }
     });
-    release.notify_one();
-    let error = creation
+    let refused = tokio::time::timeout(Duration::from_secs(10), creation)
         .await
+        .expect("the path being removed is refused without waiting")
         .unwrap()
-        .expect_err("the removed workspace fails the creation check");
-    assert!(error.to_string().contains("no longer exists"), "{error}");
+        .expect_err("the path being removed is refused");
+    assert!(
+        matches!(&refused, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{refused:?}"
+    );
+    release.notify_one();
     removal.await.unwrap().unwrap();
+    let after = store
+        .create_owned_session(
+            "fixture-session-after",
+            &SessionConfig {
+                cwd: task.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            "fixture-agent",
+            4,
+            None,
+            SessionOrigin::Client,
+            None,
+        )
+        .await
+        .expect_err("the removed workspace fails the creation check");
+    assert!(after.to_string().contains("no longer exists"), "{after}");
     assert!(!task.exists());
     assert!(!store.has_records("fixture-session").await.unwrap());
     server.shutdown();
@@ -1534,10 +1554,10 @@ async fn unregistered_remove_reports_not_found_when_another_removal_won() {
     server.join().await.unwrap();
 }
 
-/// Dropping the caller of an unregistered removal must not release the
-/// ownership lock while the deletion is still running.
+/// Dropping the caller of an unregistered removal stops neither the deletion
+/// nor the path's registration, which ends only when the deletion returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes() {
+async fn dropping_the_caller_keeps_the_removal_until_the_deletion_finishes() {
     let work = Work::new();
     let server = host(&work).await;
     let store = server.service::<SessionStore>().unwrap();
@@ -1549,11 +1569,13 @@ async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes(
     let agent_id = listed["result"][0]["agentId"].as_str().unwrap().to_owned();
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
+    let finished = Arc::new(tokio::sync::Notify::new());
     let removal = tokio::spawn({
         let store = store.clone();
         let task = task.clone();
         let reached = reached.clone();
         let release = release.clone();
+        let finished = finished.clone();
         async move {
             store
                 .remove_unregistered_directory(task, move |path| {
@@ -1562,7 +1584,9 @@ async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes(
                         release.notified().await;
                         tokio::fs::remove_dir_all(&path)
                             .await
-                            .map_err(|error| AgentError::Storage(error.to_string()))
+                            .map_err(|error| AgentError::Storage(error.to_string()))?;
+                        finished.notify_one();
+                        Ok(())
                     })
                 })
                 .await
@@ -1570,7 +1594,7 @@ async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes(
     });
     tokio::time::timeout(Duration::from_secs(30), reached.notified())
         .await
-        .expect("the removal holds the ownership lock");
+        .expect("the removal reaches its deletion step");
     removal.abort();
     assert!(removal.await.unwrap_err().is_cancelled());
     let config = SessionConfig {
@@ -1593,12 +1617,19 @@ async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes(
                 .await
         }
     });
-    release.notify_one();
-    let error = creation
+    let refused = tokio::time::timeout(Duration::from_secs(10), creation)
         .await
+        .expect("the path being removed is refused after its caller is dropped")
         .unwrap()
-        .expect_err("the removed workspace fails the creation check");
-    assert!(error.to_string().contains("no longer exists"), "{error}");
+        .expect_err("the path being removed is refused");
+    assert!(
+        matches!(&refused, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{refused:?}"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), finished.notified())
+        .await
+        .expect("the deletion finishes after its caller is gone");
     assert!(!task.exists());
     server.shutdown();
     server.join().await.unwrap();
@@ -1799,4 +1830,791 @@ async fn committed_shell_completion_recovers_after_notice_failure_and_host_loss(
         server.shutdown();
         server.join().await.unwrap();
     }
+}
+
+/// An unregistered removal refuses its own path, its parent and its children
+/// for the whole deletion and does not hold the ownership lock while it
+/// deletes, so an unrelated creation completes while the deletion runs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unregistered_removal_refuses_its_path_without_holding_the_lock() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let task = task.clone();
+        let reached = reached.clone();
+        let release = release.clone();
+        async move {
+            store
+                .remove_unregistered_directory(task, move |path| {
+                    Box::pin(async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        tokio::fs::remove_dir_all(&path)
+                            .await
+                            .map_err(|error| AgentError::Storage(error.to_string()))
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), reached.notified())
+        .await
+        .expect("the removal reaches its deletion step");
+
+    let mut client = Client::new_version(&server, false, 3).await;
+    let unrelated = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.rpc("session.create", json!({"cwd": work.repo})),
+    )
+    .await
+    .expect("an unrelated creation does not wait for the removal");
+    assert_ok(&unrelated);
+    for path in [task.clone(), task.join("repo"), work.home.join("worktrees")] {
+        let refused = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.rpc("session.create", json!({"cwd": path})),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("a creation on {} waits for the removal", path.display()));
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("is being removed")),
+            "{refused}"
+        );
+    }
+    let repeated = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.rpc("worktree.remove", json!({"taskId": "aaaaaa"})),
+    )
+    .await
+    .expect("a repeated removal does not wait for the first");
+    assert_eq!(repeated["error"]["data"]["appError"], "worktree_in_use");
+
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd": work.repo.join("packages/a")}),
+        )
+        .await;
+    assert_ok(&created);
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let associated = tokio::time::timeout(
+        Duration::from_secs(10),
+        store.associate_worktree(
+            &session_id,
+            WorktreeDirectory {
+                repository: work.repo.clone(),
+                root: task.clone(),
+            },
+            task.clone(),
+        ),
+    )
+    .await
+    .expect("an association does not wait for the removal")
+    .expect_err("the path being removed cannot be associated");
+    assert!(
+        matches!(&associated, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{associated:?}"
+    );
+
+    release.notify_one();
+    assert!(removal.await.unwrap().unwrap());
+    assert!(!task.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A recorded removal runs its Git removal outside the ownership lock: the
+/// recorded root and its task directory stay refused while it runs, and an
+/// unrelated creation completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recorded_removal_refuses_its_path_without_holding_the_lock() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc("session.create", json!({"cwd": work.repo, "worktree": {}}))
+        .await;
+    assert_ok(&created);
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let task_id = created["result"]["worktree"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = PathBuf::from(created["result"]["worktree"]["root"].as_str().unwrap());
+    let repository = PathBuf::from(
+        created["result"]["worktree"]["repository"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_ok(
+        &client
+            .rpc("session.delete", json!({"sessionId": session_id}))
+            .await,
+    );
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let root = root.clone();
+        let reached = reached.clone();
+        let release = release.clone();
+        async move {
+            store
+                .remove_worktree(WorktreeDirectory { repository, root }, move |path| {
+                    Box::pin(async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        tokio::fs::remove_dir_all(&path)
+                            .await
+                            .map_err(|error| AgentError::Storage(error.to_string()))
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), reached.notified())
+        .await
+        .expect("the removal reaches its Git removal");
+
+    let unrelated = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.rpc(
+            "session.create",
+            json!({"cwd": work.repo.join("packages/a")}),
+        ),
+    )
+    .await
+    .expect("an unrelated creation does not wait for the removal");
+    assert_ok(&unrelated);
+    let parent = root.parent().unwrap().to_path_buf();
+    for path in [root.clone(), parent] {
+        let refused = tokio::time::timeout(
+            Duration::from_secs(10),
+            client.rpc("session.create", json!({"cwd": path})),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("a creation on {} waits for the removal", path.display()));
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("is being removed")),
+            "{refused}"
+        );
+    }
+    let repeated = client
+        .rpc("worktree.remove", json!({"taskId": task_id, "force": true}))
+        .await;
+    assert_eq!(repeated["error"]["data"]["appError"], "worktree_in_use");
+
+    release.notify_one();
+    assert!(removal.await.unwrap().unwrap());
+    assert!(!root.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A removal that fails reports the error to its caller and keeps no
+/// registration: the workspace is usable again as soon as the failure returns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_removal_reports_the_error_and_keeps_no_registration() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let task = task.clone();
+        let reached = reached.clone();
+        let release = release.clone();
+        async move {
+            store
+                .remove_unregistered_directory(task, move |_| {
+                    Box::pin(async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        Err(AgentError::Storage("the deletion failed".into()))
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), reached.notified())
+        .await
+        .expect("the removal reaches its deletion step");
+    let mut client = Client::new_version(&server, false, 3).await;
+    let refused = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.rpc("session.create", json!({"cwd": task})),
+    )
+    .await
+    .expect("the path being removed is refused without waiting");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("is being removed")),
+        "{refused}"
+    );
+    release.notify_one();
+    let error = removal
+        .await
+        .unwrap()
+        .expect_err("the failed deletion reports its error");
+    assert!(error.to_string().contains("the deletion failed"), "{error}");
+    let created = client.rpc("session.create", json!({"cwd": task})).await;
+    assert_ok(&created);
+    assert!(task.join("repo").is_dir());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A stored configuration that names no workspace has nothing to compare, so
+/// a removal elsewhere does not refuse its fork.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_without_a_workspace_is_not_refused_by_an_unrelated_removal() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = client.rpc("agent.list", json!({})).await;
+    assert_ok(&listed);
+    let agent_id = listed["result"][0]["agentId"].as_str().unwrap().to_owned();
+    let config = SessionConfig {
+        cwd: work.repo.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    store
+        .create_owned_session(
+            "fork-source",
+            &config,
+            &agent_id,
+            4,
+            None,
+            SessionOrigin::Client,
+            None,
+        )
+        .await
+        .unwrap();
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let task = task.clone();
+        let reached = reached.clone();
+        let release = release.clone();
+        async move {
+            store
+                .remove_unregistered_directory(task, move |path| {
+                    Box::pin(async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        tokio::fs::remove_dir_all(&path)
+                            .await
+                            .map_err(|error| AgentError::Storage(error.to_string()))
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), reached.notified())
+        .await
+        .expect("the removal reaches its deletion step");
+    store
+        .fork_session("fork-source", "fork-no-workspace", 0, r#"{"cwd":""}"#)
+        .await
+        .expect("a stored configuration without a workspace is not refused");
+    release.notify_one();
+    assert!(removal.await.unwrap().unwrap());
+    assert!(store.has_records("fork-no-workspace").await.unwrap());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A creation that would pick the task id of a directory a removal registered
+/// moves to another id instead: it never builds at, under or above the path
+/// being deleted, so the removed path keeps no directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_creation_does_not_build_at_a_path_a_removal_is_deleting() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc("session.create", json!({"cwd": work.repo, "worktree": {}}))
+        .await;
+    assert_ok(&created);
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let task_id = created["result"]["worktree"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = PathBuf::from(created["result"]["worktree"]["root"].as_str().unwrap());
+    let repository = PathBuf::from(
+        created["result"]["worktree"]["repository"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_ok(
+        &client
+            .rpc("session.delete", json!({"sessionId": session_id}))
+            .await,
+    );
+    let removed = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let root = root.clone();
+        let removed = removed.clone();
+        let release = release.clone();
+        let removal_repository = repository.clone();
+        async move {
+            store
+                .remove_worktree(WorktreeDirectory { repository, root }, move |path| {
+                    Box::pin(async move {
+                        tokio::task::spawn_blocking(move || {
+                            git(
+                                &removal_repository,
+                                &["worktree", "remove", path.to_str().unwrap()],
+                            );
+                        })
+                        .await
+                        .map_err(|error| AgentError::Storage(error.to_string()))?;
+                        removed.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), removed.notified())
+        .await
+        .expect("the removal deletes the directory");
+    assert!(
+        server.prefer_next_worktree_task_id(&task_id),
+        "the ManagedWorktrees part exists"
+    );
+
+    let created = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.rpc(
+            "session.create",
+            json!({"cwd": work.repo, "worktree": {"branch": "reused"}}),
+        ),
+    )
+    .await
+    .expect("a creation does not wait for the removal");
+    assert_ok(&created);
+    let replacement = PathBuf::from(created["result"]["worktree"]["root"].as_str().unwrap());
+    assert_ne!(
+        replacement, root,
+        "a creation must not build at the path a removal is deleting"
+    );
+    assert!(!root.exists(), "the removed path keeps no directory");
+
+    release.notify_one();
+    assert!(removal.await.unwrap().unwrap());
+    assert!(!root.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A removal of the task directory a creation is building in is refused: the
+/// creation registers the directory it chose under the ownership lock before it
+/// builds there and holds the registration until its Session row is written, so
+/// the removal cannot delete the worktree in between.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_removal_does_not_delete_a_path_a_creation_is_building() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let task = unregistered_task(&work, "aaaaaa");
+    let hold = server
+        .hold_next_worktree_creation()
+        .expect("the ManagedWorktrees part exists");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut creator = Client::new_version(&server, false, 3).await;
+    let repo = work.repo.clone();
+    let creation = tokio::spawn(async move {
+        creator
+            .rpc("session.create", json!({"cwd": repo, "worktree": {}}))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), hold.reached.notified())
+        .await
+        .expect("the creation checks its directory before it builds");
+    let mut remover = Client::new_version(&server, false, 3).await;
+    let refused = tokio::time::timeout(
+        Duration::from_secs(10),
+        remover.rpc("worktree.remove", json!({"taskId": "aaaaaa"})),
+    )
+    .await
+    .expect("a removal of a path being created does not wait");
+    assert_eq!(refused["error"]["data"]["appError"], "worktree_in_use");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("is being created")),
+        "{refused}"
+    );
+    hold.release.notify_one();
+    let created = creation.await.unwrap();
+    assert_ok(&created);
+    let root = PathBuf::from(created["result"]["worktree"]["root"].as_str().unwrap());
+    assert_eq!(
+        root,
+        task.join("repo"),
+        "the creation builds where it registered"
+    );
+    assert!(
+        root.is_dir(),
+        "the creation keeps the directory it registered"
+    );
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    assert_ok(
+        &remover
+            .rpc("session.delete", json!({"sessionId": session_id}))
+            .await,
+    );
+    let removed = tokio::time::timeout(
+        Duration::from_secs(10),
+        remover.rpc("worktree.remove", json!({"taskId": "aaaaaa"})),
+    )
+    .await
+    .expect("the path is removable after its creation finishes");
+    assert_ok(&removed);
+    assert_eq!(removed["result"], json!({"removed": true}));
+    assert!(!root.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A creation that fails after it built its worktree still removes it: the
+/// rollback ends the creation's own registration first, so the path it holds
+/// does not refuse the removal the rollback needs.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_creation_removes_the_worktree_it_registered() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let repo = work.repo.clone();
+    git(&repo, &["rm", "--cached", "-r", "-q", "packages/b"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "drop the subtree",
+        ],
+    );
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut client = Client::new_version(&server, false, 3).await;
+    let failed = tokio::time::timeout(
+        Duration::from_secs(30),
+        client.rpc(
+            "session.create",
+            json!({"cwd": repo.join("packages/b"), "worktree": {}}),
+        ),
+    )
+    .await
+    .expect("a creation that cannot map its subtree does not hang");
+    assert!(
+        failed["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("packages/b")),
+        "{failed}"
+    );
+    let task = work.home.join("worktrees/aaaaaa");
+    assert!(!task.exists(), "the failed creation keeps no directory");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let created = client
+        .rpc("session.create", json!({"cwd": repo, "worktree": {}}))
+        .await;
+    assert_ok(&created);
+    assert_eq!(
+        created["result"]["worktree"]["taskId"], "aaaaaa",
+        "the failed creation kept neither its directory nor its branch"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Dropping the caller of a recorded removal keeps the spawned deletion
+/// running, the path refused and its record undeletable until it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_the_caller_keeps_the_removal_and_its_path_refused() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let directory = WorktreeDirectory {
+        repository: work.repo.clone(),
+        root: task.clone(),
+    };
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let finished = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let directory = directory.clone();
+        let reached = reached.clone();
+        let release = release.clone();
+        let finished = finished.clone();
+        async move {
+            store
+                .remove_worktree(directory, move |path| {
+                    Box::pin(async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        tokio::fs::remove_dir_all(&path)
+                            .await
+                            .map_err(|error| AgentError::Storage(error.to_string()))?;
+                        finished.notify_one();
+                        Ok(())
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), reached.notified())
+        .await
+        .expect("the removal reaches its deletion step");
+    removal.abort();
+    assert!(removal.await.unwrap_err().is_cancelled());
+    let record = store
+        .remove_worktree_directory(directory)
+        .await
+        .expect_err("the record of a path being removed cannot be deleted");
+    assert!(
+        matches!(&record, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{record:?}"
+    );
+    let mut client = Client::new_version(&server, false, 3).await;
+    let refused = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.rpc("session.create", json!({"cwd": task})),
+    )
+    .await
+    .expect("the path being removed is refused after its caller is dropped");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("is being removed")),
+        "{refused}"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), finished.notified())
+        .await
+        .expect("the deletion finishes after its caller is gone");
+    assert!(!task.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Two creations that reach the same task id do not share it: the one that
+/// meets the other's registration of the path moves to another id, and the one
+/// that registered it still builds there.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_second_creation_moves_off_the_path_a_creation_registered() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let hold = server
+        .hold_next_worktree_creation()
+        .expect("the ManagedWorktrees part exists");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut first_client = Client::new_version(&server, false, 3).await;
+    let repo = work.repo.clone();
+    let first = tokio::spawn(async move {
+        first_client
+            .rpc("session.create", json!({"cwd": repo, "worktree": {}}))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), hold.reached.notified())
+        .await
+        .expect("the first creation registers its directory before it builds");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut second_client = Client::new_version(&server, false, 3).await;
+    let second_repo = work.repo.clone();
+    let second = tokio::spawn(async move {
+        second_client
+            .rpc(
+                "session.create",
+                json!({"cwd": second_repo, "worktree": {}}),
+            )
+            .await
+    });
+    let built = tokio::time::timeout(Duration::from_secs(30), second)
+        .await
+        .expect("the second creation does not wait for the first")
+        .unwrap();
+    assert_ok(&built);
+    assert_ne!(
+        built["result"]["worktree"]["taskId"], "aaaaaa",
+        "the second creation does not build at the path the first registered"
+    );
+    hold.release.notify_one();
+    let created = tokio::time::timeout(Duration::from_secs(30), first)
+        .await
+        .expect("the first creation builds where it registered")
+        .unwrap();
+    assert_ok(&created);
+    let root = work.home.join("worktrees/aaaaaa/repo");
+    assert_eq!(created["result"]["worktree"]["taskId"], "aaaaaa");
+    assert_eq!(
+        PathBuf::from(created["result"]["worktree"]["root"].as_str().unwrap()),
+        root
+    );
+    assert!(root.is_dir());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// A failed creation's rollback removes the worktree and the branch it built
+/// even though a creation that found the path free before the failure meets it:
+/// the rollback's registration of the path keeps the second creation off it
+/// until the removal ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_creation_cannot_take_the_path_a_failed_creation_rolls_back() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let repo = work.repo.clone();
+    git(&repo, &["rm", "--cached", "-r", "-q", "packages/b"]);
+    git(
+        &repo,
+        &[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "drop the subtree",
+        ],
+    );
+    let building = server
+        .hold_next_worktree_creation()
+        .expect("the ManagedWorktrees part exists");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut failing_client = Client::new_version(&server, false, 3).await;
+    let failing_cwd = repo.join("packages/b");
+    let failed = tokio::spawn(async move {
+        failing_client
+            .rpc(
+                "session.create",
+                json!({"cwd": failing_cwd, "worktree": {}}),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), building.reached.notified())
+        .await
+        .expect("the failed creation registers its directory before it builds");
+    let checking = server
+        .hold_next_worktree_creation_check()
+        .expect("the ManagedWorktrees part exists");
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut second_client = Client::new_version(&server, false, 3).await;
+    let second_repo = repo.clone();
+    let second = tokio::spawn(async move {
+        second_client
+            .rpc(
+                "session.create",
+                json!({"cwd": second_repo, "worktree": {}}),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(30), checking.reached.notified())
+        .await
+        .expect("the second creation finds the path free before it registers it");
+    let rollback = server
+        .hold_next_worktree_rollback()
+        .expect("the ManagedWorktrees part exists");
+    let registered = server
+        .hold_next_worktree_creation()
+        .expect("the ManagedWorktrees part exists");
+    building.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), rollback.reached.notified())
+        .await
+        .expect("the failed creation reaches its rollback");
+    checking.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(30), registered.reached.notified())
+        .await
+        .expect("the second creation registers a directory of its own");
+    rollback.release.notify_one();
+    let failed = tokio::time::timeout(Duration::from_secs(30), failed)
+        .await
+        .expect("the rollback finishes")
+        .unwrap();
+    assert!(
+        failed["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("packages/b")),
+        "{failed}"
+    );
+    let path = work.home.join("worktrees/aaaaaa/repo");
+    assert!(
+        !path.exists(),
+        "the failed creation removes the worktree the rollback holds"
+    );
+    registered.release.notify_one();
+    let built = tokio::time::timeout(Duration::from_secs(30), second)
+        .await
+        .expect("the second creation does not wait for the rollback")
+        .unwrap();
+    assert_ok(&built);
+    assert_ne!(
+        built["result"]["worktree"]["taskId"], "aaaaaa",
+        "the second creation does not build at the path the rollback holds"
+    );
+    assert!(
+        server.prefer_next_worktree_task_id("aaaaaa"),
+        "the ManagedWorktrees part exists"
+    );
+    let mut client = Client::new_version(&server, false, 3).await;
+    let reused = client
+        .rpc("session.create", json!({"cwd": repo, "worktree": {}}))
+        .await;
+    assert_ok(&reused);
+    assert_eq!(
+        reused["result"]["worktree"]["taskId"], "aaaaaa",
+        "the failed creation kept neither its directory nor its branch"
+    );
+    server.shutdown();
+    server.join().await.unwrap();
 }

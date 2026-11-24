@@ -2,11 +2,18 @@
 //!
 //! One Process part owns the root, the task id, the Git calls and the
 //! list/remove/prune selection. The records stay with SessionStore: creation
-//! writes them in the Session's own transaction, and a removal runs under the
-//! store's ownership lock so a late association cannot slip in between the
-//! re-check and the record deletion. Git is the fact; a record is a candidate.
+//! writes them in the Session's own transaction, and a removal re-checks its
+//! path and registers it as being deleted under the store's ownership lock
+//! before it runs its deletion outside that lock, so a late association or
+//! creation meets the registration instead of slipping in. A creation compares
+//! its directory with that registration and moves to another task id, and it
+//! registers its own directory under the same lock until its Session row is
+//! written or its failed creation hands that registration to the removal, so a
+//! removal meets the creation too. Git is the fact; a record is a candidate.
 use crate::methods::ManagementMethods;
-use crate::storage::{PreparedWorktree, Store, WorktreeDirectory, WorktreeDirectoryRecord};
+use crate::storage::{
+    PreparedWorktree, Store, WorktreeCreation, WorktreeDirectory, WorktreeDirectoryRecord,
+};
 use dim_agent_capabilities::methods::{
     Interruption, MethodCall, MethodDecl, RpcError, params, reply,
 };
@@ -34,16 +41,29 @@ pub struct ManagedWorktrees {
     sessions: Arc<Store>,
     #[cfg(feature = "testing")]
     removal_hold: std::sync::Mutex<Option<Arc<crate::UnregisteredRemovalHold>>>,
+    #[cfg(feature = "testing")]
+    creation_hold: std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
+    #[cfg(feature = "testing")]
+    creation_check_hold: std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
+    #[cfg(feature = "testing")]
+    rollback_hold: std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
+    #[cfg(feature = "testing")]
+    task_id_hold: std::sync::Mutex<Option<String>>,
 }
 
 /// A worktree this call created, with what it needs to be reported or
 /// discarded: the directory, the Session's subtree, the branch and the base.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct CreatedWorktree {
     pub task_id: String,
     pub prepared: PreparedWorktree,
     pub branch: String,
     pub base: String,
+    /// The creation's registration of `prepared.directory.root`: a removal of
+    /// that path is refused until this value drops, which is after the Session
+    /// row is written or after the failed creation's rollback took the
+    /// registration over as the path's deletion registration.
+    creating: std::sync::Mutex<Option<WorktreeCreation>>,
 }
 
 /// One row of `worktree.list`: a recorded directory under the managed root,
@@ -147,6 +167,14 @@ impl ManagedWorktrees {
             sessions,
             #[cfg(feature = "testing")]
             removal_hold: std::sync::Mutex::new(None),
+            #[cfg(feature = "testing")]
+            creation_hold: std::sync::Mutex::new(None),
+            #[cfg(feature = "testing")]
+            creation_check_hold: std::sync::Mutex::new(None),
+            #[cfg(feature = "testing")]
+            rollback_hold: std::sync::Mutex::new(None),
+            #[cfg(feature = "testing")]
+            task_id_hold: std::sync::Mutex::new(None),
         }
     }
 
@@ -166,6 +194,39 @@ impl ManagedWorktrees {
             hold.reached.notify_one();
             hold.release.notified().await;
         }
+    }
+
+    /// Names the task id the next allocation tries first, so a test can make a
+    /// creation meet a path a removal registered. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn prefer_next_task_id(&self, task_id: &str) {
+        *self.task_id_hold.lock().expect("task id hold") = Some(task_id.to_owned());
+    }
+
+    /// Holds the next creation after its directory check and before it builds
+    /// there. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_creation(&self) -> Arc<crate::WorktreeCreationHold> {
+        hold_creation(&self.creation_hold)
+    }
+
+    /// Holds the next creation after it found its directory free and before it
+    /// registers that path. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_creation_check(&self) -> Arc<crate::WorktreeCreationHold> {
+        hold_creation(&self.creation_check_hold)
+    }
+
+    /// Holds the next failed creation before its rollback removes the worktree
+    /// it built. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn hold_next_rollback(&self) -> Arc<crate::WorktreeCreationHold> {
+        hold_creation(&self.rollback_hold)
+    }
+
+    #[cfg(feature = "testing")]
+    fn preferred_task_id(&self) -> Option<String> {
+        self.task_id_hold.lock().expect("task id hold").take()
     }
 
     /// Creates one worktree for `source` at `$HOME/worktrees/<task-id>/<repo>`
@@ -232,6 +293,9 @@ impl ManagedWorktrees {
 
         let mut last = None;
         for _ in 0..ALLOCATION_ATTEMPTS {
+            #[cfg(feature = "testing")]
+            let task_id = self.preferred_task_id().unwrap_or_else(task_id);
+            #[cfg(not(feature = "testing"))]
             let task_id = task_id();
             let directory = root.join(&task_id).join(&repo_name);
             if tokio::fs::try_exists(&directory)
@@ -243,6 +307,22 @@ impl ManagedWorktrees {
                 ));
                 continue;
             }
+            // A removal registers a path under the ownership lock and clears
+            // it only when the deletion returns; a directory that registration
+            // still covers is not built in, even if its files are already gone.
+            // Registering this directory in the same call keeps a removal that
+            // starts while it is built away from it.
+            #[cfg(feature = "testing")]
+            wait_creation_hold(&self.creation_check_hold).await;
+            let creating = match self.sessions.begin_worktree_creation(&directory).await {
+                Ok(creating) => creating,
+                Err(error) => {
+                    last = Some(error.into());
+                    continue;
+                }
+            };
+            #[cfg(feature = "testing")]
+            wait_creation_hold(&self.creation_hold).await;
             let branch_name = match branch {
                 Some(branch) => branch.to_owned(),
                 None => format!("dim/{task_id}"),
@@ -292,7 +372,7 @@ impl ManagedWorktrees {
             let root_dir = match canonical(directory.clone()).await {
                 Ok(root_dir) => root_dir,
                 Err(error) => {
-                    self.rollback_add(&repository, &directory, &branch_name)
+                    self.rollback_add(&repository, &directory, &branch_name, Some(creating))
                         .await;
                     return Err(error);
                 }
@@ -300,7 +380,7 @@ impl ManagedWorktrees {
             let subtree = match checked_subtree(&root_dir, &relative).await {
                 Ok(subtree) => subtree,
                 Err(error) => {
-                    self.rollback_add(&repository, &root_dir, &branch_name)
+                    self.rollback_add(&repository, &root_dir, &branch_name, Some(creating))
                         .await;
                     return Err(error);
                 }
@@ -316,6 +396,7 @@ impl ManagedWorktrees {
                 },
                 branch: branch_name,
                 base,
+                creating: std::sync::Mutex::new(Some(creating)),
             });
         }
         Err(last.unwrap_or_else(|| WorktreeError::Invalid("no task id was free".into())))
@@ -324,44 +405,61 @@ impl ManagedWorktrees {
     /// Removes a worktree this call just added under the store's ownership
     /// exclusion, without `--force` and with a token that cannot be cancelled.
     /// The branch goes only after Git accepted the removal. A Session or
-    /// content that appeared since the checkout keeps both.
-    async fn rollback_add(&self, repository: &Path, root: &Path, branch: &str) {
+    /// content that appeared since the checkout keeps both. The creation's own
+    /// `registration`, if it has not ended yet, becomes the path's deletion
+    /// registration in the same lock hold that re-checks the removal, so no
+    /// creation registers the path in between and the rollback still deletes
+    /// what it built.
+    async fn rollback_add(
+        &self,
+        repository: &Path,
+        root: &Path,
+        branch: &str,
+        registration: Option<WorktreeCreation>,
+    ) {
+        #[cfg(feature = "testing")]
+        wait_creation_hold(&self.rollback_hold).await;
         let directory = WorktreeDirectory {
             repository: repository.to_owned(),
             root: root.to_owned(),
         };
         let repository = directory.repository.clone();
         let branch = branch.to_owned();
-        let _ = self
-            .sessions
-            .remove_worktree(directory, move |root| {
-                Box::pin(async move {
-                    let text = root.to_str().ok_or_else(|| {
-                        AgentError::InvalidInput("the worktree path is not UTF-8".into())
-                    })?;
-                    let cancel = CancellationToken::new();
-                    git(
-                        &repository,
-                        &["worktree", "remove", text],
-                        &cancel,
-                        GIT_WRITE_TIMEOUT,
-                    )
-                    .await
-                    .map_err(|error| AgentError::Storage(error.message().to_owned()))?;
-                    if let Some(parent) = root.parent() {
-                        let _ = tokio::fs::remove_dir(parent).await;
-                    }
-                    let _ = git(
-                        &repository,
-                        &["branch", "-D", &branch],
-                        &cancel,
-                        GIT_WRITE_TIMEOUT,
-                    )
-                    .await;
-                    Ok(())
-                })
+        let remove = move |root: PathBuf| -> BoxFuture<'static, Result<(), AgentError>> {
+            Box::pin(async move {
+                let text = root.to_str().ok_or_else(|| {
+                    AgentError::InvalidInput("the worktree path is not UTF-8".into())
+                })?;
+                let cancel = CancellationToken::new();
+                git(
+                    &repository,
+                    &["worktree", "remove", text],
+                    &cancel,
+                    GIT_WRITE_TIMEOUT,
+                )
+                .await
+                .map_err(|error| AgentError::Storage(error.message().to_owned()))?;
+                if let Some(parent) = root.parent() {
+                    let _ = tokio::fs::remove_dir(parent).await;
+                }
+                let _ = git(
+                    &repository,
+                    &["branch", "-D", &branch],
+                    &cancel,
+                    GIT_WRITE_TIMEOUT,
+                )
+                .await;
+                Ok(())
             })
-            .await;
+        };
+        let _ = match registration {
+            Some(registration) => {
+                self.sessions
+                    .remove_created_worktree(directory, registration, remove)
+                    .await
+            }
+            None => self.sessions.remove_worktree(directory, remove).await,
+        };
     }
 
     /// Removes what a failed creation made: the worktree and the branch this
@@ -373,6 +471,7 @@ impl ManagedWorktrees {
             &created.prepared.directory.repository,
             &created.prepared.directory.root,
             &created.branch,
+            created.take_creation(),
         )
         .await;
     }
@@ -911,6 +1010,27 @@ async fn git(
         .map_err(|_| WorktreeError::Git("Git returned non-UTF-8 output".into()))
 }
 
+/// Feature `testing`: arms one hold slot and answers the hold the next creation
+/// or rollback at that slot waits on.
+#[cfg(feature = "testing")]
+fn hold_creation(
+    slot: &std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>,
+) -> Arc<crate::WorktreeCreationHold> {
+    let hold = Arc::new(crate::WorktreeCreationHold::default());
+    *slot.lock().expect("creation hold") = Some(hold.clone());
+    hold
+}
+
+/// Feature `testing`: waits at the slot if it is armed. Feature `testing` only.
+#[cfg(feature = "testing")]
+async fn wait_creation_hold(slot: &std::sync::Mutex<Option<Arc<crate::WorktreeCreationHold>>>) {
+    let hold = slot.lock().expect("creation hold").take();
+    if let Some(hold) = hold {
+        hold.reached.notify_one();
+        hold.release.notified().await;
+    }
+}
+
 /// Whether Git definitively answers that `root` is not a worktree of its own.
 /// A timeout, spawn failure, cancellation or any other Git error is not an
 /// answer: the caller must not fall back to deleting the directory.
@@ -1078,7 +1198,8 @@ async fn checked_subtree(root: &Path, relative: &Path) -> Result<PathBuf, Worktr
 
 /// The entry-level facts that make a task directory an unregistered
 /// candidate: a plain directory under the managed root without a `.git`
-/// entry. The removal re-reads them under the store's ownership lock.
+/// entry. The removal re-reads them in its own task once its path is
+/// registered as being deleted.
 async fn check_unregistered_entry(entry: &Path) -> Result<(), WorktreeError> {
     match tokio::fs::symlink_metadata(entry).await {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -1104,7 +1225,7 @@ async fn check_unregistered_entry(entry: &Path) -> Result<(), WorktreeError> {
 /// managed root without a `.git` entry, and without `force` none has content.
 /// Returns the empty children a non-force removal deletes. The unregistered
 /// condition is the absence of `.git`, so these are filesystem checks only and
-/// no Git subprocess runs under the ownership lock.
+/// the removal runs them without the ownership lock.
 async fn check_unregistered_children(
     entry: &Path,
     root: &Path,
@@ -1200,9 +1321,12 @@ async fn check_unregistered_tree(entry: &Path) -> Result<(), WorktreeError> {
 }
 
 /// A task directory whose checks passed. `force` removes everything; otherwise
-/// only the plain empty subdirectories the check recorded are removed, each
-/// without recursion, so content that appears after the check fails the
-/// removal with `worktree_in_use` instead of being deleted.
+/// only the plain empty subdirectories the check recorded are removed, each by
+/// name from an open directory handle on Unix, so content that appears after
+/// the check fails the removal with `worktree_in_use` instead of being deleted
+/// and a task directory or child swapped for a symlink cannot redirect the
+/// removal. A platform without that handle-relative deletion refuses the
+/// non-force removal instead of deleting by path.
 async fn remove_checked_entry(
     entry: &Path,
     empty_children: &[PathBuf],
@@ -1213,24 +1337,93 @@ async fn remove_checked_entry(
             .await
             .map_err(|error| WorktreeError::Store(error.to_string()));
     }
-    for child in empty_children {
-        remove_empty_dir(child).await?;
-    }
-    remove_empty_dir(entry).await
+    let entry = entry.to_path_buf();
+    let children = empty_children.to_vec();
+    tokio::task::spawn_blocking(move || remove_empty_directories(&entry, &children))
+        .await
+        .map_err(|error| WorktreeError::Store(format!("the removal task failed: {error}")))?
 }
 
-/// Remove one directory only while it is still empty.
-async fn remove_empty_dir(path: &Path) -> Result<(), WorktreeError> {
-    match tokio::fs::remove_dir(path).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
-            Err(WorktreeError::InUse(format!(
-                "{} is not empty; --force removes it",
-                path.display()
-            )))
-        }
-        Err(error) => Err(WorktreeError::Store(error.to_string())),
+/// Removes the recorded empty children and then the task directory, each by
+/// name from an open directory handle. A name this removes is never resolved
+/// through a symlink, so replacing the task directory or one of its children
+/// with a symlink after the check refuses the removal instead of deleting a
+/// same-named directory outside the managed root.
+#[cfg(unix)]
+fn remove_empty_directories(entry: &Path, empty_children: &[PathBuf]) -> Result<(), WorktreeError> {
+    let directory = open_plain_directory(entry)?;
+    for child in empty_children {
+        let name = child.file_name().ok_or_else(|| {
+            WorktreeError::InUse(format!("{} is not a directory entry", child.display()))
+        })?;
+        remove_entry(&directory, name, child)?;
     }
+    let parent = entry
+        .parent()
+        .ok_or_else(|| WorktreeError::InUse(format!("{} has no parent", entry.display())))?;
+    let parent = open_plain_directory(parent)?;
+    let name = entry.file_name().ok_or_else(|| {
+        WorktreeError::InUse(format!("{} is not a directory entry", entry.display()))
+    })?;
+    remove_entry(&parent, name, entry)
+}
+
+/// Opens `path` as a directory without following a symlink at it.
+#[cfg(unix)]
+fn open_plain_directory(path: &Path) -> Result<std::fs::File, WorktreeError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP | libc::ENOTDIR) => {
+                WorktreeError::InUse(format!("{} is not a plain directory", path.display()))
+            }
+            _ => WorktreeError::Store(format!("{}: {error}", path.display())),
+        })
+}
+
+/// Removes the directory `name` in `directory`, only while it is empty.
+#[cfg(unix)]
+fn remove_entry(directory: &std::fs::File, name: &OsStr, path: &Path) -> Result<(), WorktreeError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    let name = std::ffi::CString::new(name.as_bytes())
+        .map_err(|_| WorktreeError::InUse(format!("{} is not a directory name", path.display())))?;
+    // SAFETY: `directory` is an open handle for the call and `name` is a live
+    // NUL-terminated string.
+    if unsafe { libc::unlinkat(directory.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    Err(match error.raw_os_error() {
+        Some(libc::ENOTEMPTY | libc::EEXIST) => WorktreeError::InUse(format!(
+            "{} is not empty; --force removes it",
+            path.display()
+        )),
+        Some(libc::ENOTDIR | libc::ELOOP) => {
+            WorktreeError::InUse(format!("{} is not a plain directory", path.display()))
+        }
+        _ => WorktreeError::Store(format!("{}: {error}", path.display())),
+    })
+}
+
+/// Refuses the non-force removal. A non-Unix target deletes a directory by
+/// path and offers no ready-made deletion of only an empty directory relative
+/// to an open directory handle, so a reparse point swapped into a path
+/// component after the check could redirect the deletion outside the managed
+/// root. `--force` removes the tree with `std::fs::remove_dir_all`, which walks
+/// it through directory handles and does not follow a reparse point inside it.
+#[cfg(not(unix))]
+fn remove_empty_directories(
+    entry: &Path,
+    _empty_children: &[PathBuf],
+) -> Result<(), WorktreeError> {
+    Err(WorktreeError::InUse(format!(
+        "{} is an unregistered directory; --force removes it on this platform",
+        entry.display()
+    )))
 }
 
 /// A recorded root that exists but Git no longer names: there is no working
@@ -1348,6 +1541,15 @@ impl CreatedWorktree {
             base: self.base.clone(),
             branch: self.branch.clone(),
         }
+    }
+
+    /// Takes this creation's registration, if the creation still holds it, so
+    /// its rollback can hand it over to the deletion of the path.
+    fn take_creation(&self) -> Option<WorktreeCreation> {
+        self.creating
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 }
 
@@ -1569,6 +1771,7 @@ mod tests {
 
     /// Content that appears in the task directory after the check must refuse
     /// the non-force removal instead of being deleted with the directory.
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_that_appears_after_the_check_is_not_deleted() {
         let entry = scratch("late-content");
@@ -1587,8 +1790,57 @@ mod tests {
         std::fs::remove_dir_all(&entry).unwrap();
     }
 
+    /// A task directory swapped for a symlink after the check must not
+    /// redirect the recorded empty child removal outside the managed root.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_swapped_task_directory_does_not_redirect_the_removal() {
+        let base = scratch("swapped-entry");
+        let entry = base.join("aaaaaa");
+        let victim = base.join("victim");
+        std::fs::create_dir_all(entry.join("repo")).unwrap();
+        std::fs::create_dir_all(victim.join("repo")).unwrap();
+        let children = vec![entry.join("repo")];
+        std::fs::rename(&entry, base.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&victim, &entry).unwrap();
+        let error = remove_checked_entry(&entry, &children, false)
+            .await
+            .expect_err("a redirected task directory must refuse the removal");
+        assert!(
+            matches!(&error, WorktreeError::InUse(message) if message.contains("not a plain directory")),
+            "{error:?}"
+        );
+        assert!(victim.join("repo").is_dir());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A child swapped for a symlink after the check is not followed: the
+    /// directory it names is left alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_swapped_child_does_not_redirect_the_removal() {
+        let base = scratch("swapped-child");
+        let entry = base.join("aaaaaa");
+        let victim = base.join("victim");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::create_dir_all(victim.join("repo")).unwrap();
+        let children = vec![entry.join("repo")];
+        std::os::unix::fs::symlink(victim.join("repo"), entry.join("repo")).unwrap();
+        let error = remove_checked_entry(&entry, &children, false)
+            .await
+            .expect_err("a redirected child must refuse the removal");
+        assert!(
+            matches!(&error, WorktreeError::InUse(message) if message.contains("not a plain directory")),
+            "{error:?}"
+        );
+        assert!(victim.join("repo").is_dir());
+        assert!(entry.is_dir());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
     /// Content that appears in a subdirectory the check recorded as empty must
     /// refuse the removal before that subdirectory is deleted.
+    #[cfg(unix)]
     #[tokio::test]
     async fn content_that_appears_in_a_checked_child_is_not_deleted() {
         let entry = scratch("late-child");
@@ -1605,5 +1857,27 @@ mod tests {
         );
         assert!(child.is_dir());
         std::fs::remove_dir_all(&entry).unwrap();
+    }
+
+    /// A non-Unix target deletes a directory by path, so a reparse point
+    /// swapped in after the check could redirect the non-force removal; this
+    /// path refuses and `--force` removes the tree instead.
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn a_path_based_removal_refuses_an_unregistered_directory() {
+        let entry = scratch("path-based-removal");
+        let child = entry.join("repo");
+        std::fs::create_dir_all(&child).unwrap();
+        let error = remove_checked_entry(&entry, std::slice::from_ref(&child), false)
+            .await
+            .expect_err("a path-based removal must refuse the non-force removal");
+        assert_eq!(error.code(), "worktree_in_use");
+        assert!(
+            matches!(&error, WorktreeError::InUse(message) if message.contains("--force")),
+            "{error:?}"
+        );
+        assert!(child.is_dir());
+        remove_checked_entry(&entry, &[], true).await.unwrap();
+        assert!(!entry.exists());
     }
 }

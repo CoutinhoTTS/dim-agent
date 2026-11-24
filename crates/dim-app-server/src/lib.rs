@@ -212,6 +212,18 @@ pub struct UnregisteredRemovalHold {
     pub release: tokio::sync::Notify,
 }
 
+/// Feature `testing`: a hold on one managed worktree creation at a point a test
+/// picked: after it registered the directory it chose and before it builds
+/// there, after it found the directory free and before it registers it, or in a
+/// failed creation before its rollback removes the worktree. It notifies
+/// `reached` once held and returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct WorktreeCreationHold {
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 /// Feature `testing`: a hold on one subscription's `follow` task. It notifies
 /// `waiting` once it is held, `cancelled` once retirement cancels it, and
 /// returns once `release` is notified.
@@ -363,6 +375,46 @@ impl RunningServer {
         self.root
             .get::<worktrees::ManagedWorktrees>()
             .map(|managed| managed.hold_next_unregistered_removal())
+    }
+    /// Names the task id the next managed worktree creation tries first, so a
+    /// test can make it meet a path a removal registered. Answers whether the
+    /// part is present. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn prefer_next_worktree_task_id(&self, task_id: &str) -> bool {
+        match self.root.get::<worktrees::ManagedWorktrees>() {
+            Some(managed) => {
+                managed.prefer_next_task_id(task_id);
+                true
+            }
+            None => false,
+        }
+    }
+    /// Holds the next managed worktree creation after it checked its directory
+    /// and before it builds there, so a test can remove that path in between.
+    /// Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_worktree_creation(&self) -> Option<Arc<WorktreeCreationHold>> {
+        self.root
+            .get::<worktrees::ManagedWorktrees>()
+            .map(|managed| managed.hold_next_creation())
+    }
+    /// Holds the next managed worktree creation after it found its directory
+    /// free and before it registers that path, so a test can let a rollback of
+    /// that path run in between. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_worktree_creation_check(&self) -> Option<Arc<WorktreeCreationHold>> {
+        self.root
+            .get::<worktrees::ManagedWorktrees>()
+            .map(|managed| managed.hold_next_creation_check())
+    }
+    /// Holds the next failed managed worktree creation before its rollback
+    /// removes the worktree it built, so a test can register that path first.
+    /// Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_worktree_rollback(&self) -> Option<Arc<WorktreeCreationHold>> {
+        self.root
+            .get::<worktrees::ManagedWorktrees>()
+            .map(|managed| managed.hold_next_rollback())
     }
     /// Holds the next subscription's `follow` task open until `release`, so a
     /// test can keep an attach or detach in flight at a known point. Feature

@@ -1,4 +1,4 @@
-use super::{PreparedWorktree, SessionStore, WorktreeDirectory};
+use super::{PreparedWorktree, SessionStore, WorktreeCreation, WorktreeDirectory};
 use crate::protocol::SessionOrigin;
 use dim_agent_runtime::{AgentError, ReplyLanguage, SessionConfig};
 use dim_agent_types::grant::{GrantKind, GrantMode};
@@ -150,9 +150,20 @@ impl Store {
     pub fn remove_worktree(
         &self,
         directory: WorktreeDirectory,
-        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>>,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
     ) -> impl Future<Output = Result<bool>> {
         self.0.remove_worktree(directory, remove)
+    }
+    /// Removes the worktree a failed creation built, taking the creation's own
+    /// registration over as the path's deletion registration. The rollback of
+    /// a managed creation is the only caller, so this stays off the face.
+    pub(crate) fn remove_created_worktree(
+        &self,
+        directory: WorktreeDirectory,
+        creation: WorktreeCreation,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
+    ) -> impl Future<Output = Result<bool>> {
+        self.0.remove_created_worktree(directory, creation, remove)
     }
     pub fn remove_unregistered_directory(
         &self,
@@ -160,6 +171,15 @@ impl Store {
         remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
     ) -> impl Future<Output = Result<bool>> {
         self.0.remove_unregistered_directory(path, remove)
+    }
+    /// Registers a worktree directory a creation selected until the returned
+    /// guard drops; the registration takes the ownership lock a removal
+    /// registers under.
+    pub(crate) fn begin_worktree_creation(
+        &self,
+        path: &std::path::Path,
+    ) -> impl Future<Output = Result<WorktreeCreation>> {
+        self.0.begin_worktree_creation(path)
     }
 }
 

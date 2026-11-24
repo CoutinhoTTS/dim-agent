@@ -765,31 +765,32 @@ is null or `{repository,root,subtree}`. Session creation retains the atomic
 owner/configuration/worktree publication. `lastUsedAtMs` is null for legacy directory
 records without an association timestamp.
 
-`removeWorktree` keeps the owner exclusion from its usage checks through the physical
-removal and directory-row deletion. Its callback receives the checked root path and
-is awaited; no SQL or Timeline commit lock is held while awaiting it. A callback failure
-leaves the directory row in place. As with the native callback, it must not await operations
-that acquire this same ownership mutex: `createOwnedSession`, `fork`, `delete`,
-`removeWorktreeDirectory`, `removeWorktree`, `removeUnregisteredDirectory`, or
-`store.associateWorktree`. Reads and
-other operations that do not acquire that mutex remain available. The callback may refuse with `invalid`, `cancelled`
-or `storage`; unexpected callback or transport failures are `storage`. There is no
-separate check/remove lease and no window for a concurrent Session creation to use
-a directory being removed. `removeWorktreeDirectory` is the existing database-only
-candidate cleanup, with its existing association checks.
+`removeWorktree` holds the owner exclusion for its usage checks and for registering the
+resolved root as being removed, then releases it and awaits the callback, which receives
+the checked root path; the exclusion is taken again only to delete the directory row after
+the callback returns. No SQL or Timeline commit lock is held while awaiting it. The
+registration ends in the removal's own task, so dropping the caller stops neither the
+deletion nor the registration. While it runs, `createOwnedSession`, `fork`,
+`store.associateWorktree`, `removeWorktreeDirectory`, `removeWorktree` and
+`removeUnregisteredDirectory` are refused with `invalid` for a path at, under or above the
+registered one, and proceed for unrelated paths. The callback may refuse with `invalid`,
+`cancelled` or `storage`; unexpected callback or transport failures are `storage`. A
+callback failure leaves the directory row in place and no registration. The registration
+is the only record of the removal: there is no separate check/remove lease, and a Session
+creation on a directory being removed is refused instead of waiting for it.
+`removeWorktreeDirectory` is the existing database-only candidate cleanup, with its
+existing association checks and the same refusal for a path being removed.
 
 `removeUnregisteredDirectory` takes `{root}` and the same asynchronous removal callback.
 It is the unregistered removal of
 [worktree management §5](worktree-management.md#5-列出删除与清理): the root is absolute
-without relative components, and the operation holds the owner exclusion from its
-directory-record and workspace checks through the callback, so a Session created or
-a directory recorded after the check fails the call and a creation after the removal
-re-checks its missing workspace. The callback receives the checked root and is awaited;
-it re-checks the unregistered filesystem facts before it deletes anything. A callback
-failure is `invalid`, `cancelled` or `storage` as above, and it must not await any
-operation in the list above. Dropping the caller does not release the lock while the callback runs. The lock has no time
-limit: it covers a recursive `--force` deletion of any size, and Session creation,
-fork, deletion and worktree association or removal wait for it.
+without relative components, and the operation holds the owner exclusion for its
+directory-record and workspace checks and for registering the resolved root, then awaits
+the callback, which re-checks the unregistered filesystem facts before it deletes
+anything. A callback failure is `invalid`, `cancelled` or `storage` as above. The
+registration keeps the root refused to the operations above until the same removal task
+clears it, and the deletion itself has no time limit: it covers a recursive `--force`
+deletion of any size. Dropping the caller stops neither the deletion nor the registration.
 
 `catalog` takes the existing Session catalog request and the calling Agent owner's
 loaded/closed snapshots. Its result is the stored catalog page: sequence comes from the
