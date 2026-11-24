@@ -544,6 +544,9 @@ impl Composer {
             KeyCode::Enter => {
                 let row = rows.get(self.palette.current(&rows))?;
                 if matches!(row.kind, crate::ui::rows::Kind::Skill) {
+                    if newline_key(&key) {
+                        return None;
+                    }
                     self.clear();
                     return Some(Outcome::Submit(row.label.clone()));
                 }
@@ -780,10 +783,8 @@ impl Composer {
                 // No row matches, so `palette_key`'s `?` leaves the draft to the
                 // editor, which submits it or opens a new line.
                 None => !newline_key(key),
-                Some(row) => {
-                    matches!(row.kind, crate::ui::rows::Kind::Skill)
-                        || Self::row_command(row, &query).is_some()
-                }
+                Some(row) if matches!(row.kind, crate::ui::rows::Kind::Skill) => !newline_key(key),
+                Some(row) => Self::row_command(row, &query).is_some(),
             };
         }
         if self.mention_open()
@@ -2428,7 +2429,12 @@ mod tests {
 
     #[test]
     fn a_skill_row_sends_on_enter_and_completes_on_tab() {
-        for code in [KeyCode::Enter, KeyCode::Tab] {
+        for event in [
+            key(KeyCode::Enter),
+            key(KeyCode::Tab),
+            KeyEvent::new(KeyCode::Enter, Modifiers::SHIFT),
+            KeyEvent::new(KeyCode::Enter, Modifiers::ALT),
+        ] {
             let mut c = Composer::new(Vec::new());
             c.set_skills(vec![palette::Skill {
                 name: "commit".into(),
@@ -2437,8 +2443,12 @@ mod tests {
                 display_description: None,
             }]);
             typed(&mut c, "/comm");
-            let result = c.handle_key(key(code));
-            if code == KeyCode::Tab {
+            assert_eq!(c.submits(&event), event == key(KeyCode::Enter));
+            let result = c.handle_key(event);
+            if event.mods != Modifiers::NONE {
+                assert_eq!(result, Outcome::Handled);
+                assert_eq!(c.text(), "/comm\n");
+            } else if event.code == KeyCode::Tab {
                 assert_eq!(result, Outcome::Handled);
                 assert_eq!(c.text(), "/skill:commit ");
             } else {

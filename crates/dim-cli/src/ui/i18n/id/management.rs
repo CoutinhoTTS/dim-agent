@@ -33,6 +33,8 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Dokumen pengguna mematikan semua hook (disableAllHooks)."
         }
         "Enter toggle" => "Enter alih",
+        "Tab toggle" => "Tab alih",
+        "Enter use" => "Enter gunakan",
         "Ctrl+E edit" => "Ctrl+E edit",
         "Ctrl+N add" => "Ctrl+N tambah",
         "Ctrl+R reload" => "Ctrl+R muat ulang",
