@@ -1329,9 +1329,20 @@ impl HostPlatform {
                     });
                     return Err(HostPlatformError::TaskRunning);
                 };
-                kill_job(pid)
-                    .await
-                    .map_err(|error| HostPlatformError::Io(error.to_string()))?;
+                if let Err(error) = kill_job(pid).await {
+                    task.finish(Terminal {
+                        status: TaskStatus::Failed,
+                        exit_code: None,
+                        signal: None,
+                        duration_ms: task.started.elapsed().as_millis() as u64,
+                        failure: Some(TaskFailure::TerminateFailed {
+                            message: error.to_string(),
+                        }),
+                        output: job.output_record().0,
+                        note: None,
+                    });
+                    return Err(HostPlatformError::Io(error.to_string()));
+                }
                 task.finish(Terminal {
                     status: TaskStatus::Cancelled,
                     exit_code: None,
@@ -4253,47 +4264,22 @@ pub(crate) mod shell {
     #[derive(Default)]
     struct OutputFilter {
         decoder: Decoder,
-        pending: String,
     }
 
     impl OutputFilter {
         fn new() -> Self {
             Self {
                 decoder: Decoder::default(),
-                pending: String::new(),
             }
         }
 
         fn push(&mut self, bytes: &[u8]) -> String {
-            let text = self.decoder.write(bytes);
-            self.pending.push_str(&text);
-            let hold = incomplete_tail(&self.pending);
-            let emit = self.pending[..hold].to_owned();
-            self.pending = self.pending[hold..].to_owned();
-            crate::shell_session::regularize_output(emit.as_bytes())
+            crate::shell_session::regularize_output(self.decoder.write(bytes).as_bytes())
         }
 
         fn finish(&mut self) -> String {
-            let tail = self.decoder.end();
-            self.pending.push_str(&tail);
-            let text = std::mem::take(&mut self.pending);
-            crate::shell_session::regularize_output(text.as_bytes())
+            crate::shell_session::regularize_output(self.decoder.end().as_bytes())
         }
-    }
-
-    fn incomplete_tail(text: &str) -> usize {
-        let mut hold = text.len();
-        if text.ends_with('\r') {
-            hold = hold.min(text.len() - 1);
-        }
-        if let Some(escape) = text.rfind('\x1b')
-            && !text[escape + 1..]
-                .chars()
-                .any(|ch| ch.is_ascii_alphabetic())
-        {
-            hold = hold.min(escape);
-        }
-        hold
     }
 
     #[derive(Default)]

@@ -51,19 +51,6 @@ const DESCRIPTION_CHARS: usize = 200;
 const INIT_TIMEOUT: Duration = Duration::from_secs(10);
 const STOP_WAIT: Duration = Duration::from_secs(2);
 
-/// Hex digits in each half of a marker; `marker_pair` splits a uuid into
-/// four of these runs.
-const MARKER_HEX: usize = 8;
-/// The longest exit token `marker_code` accepts.
-const MARKER_TOKEN_LIMIT: usize = 12;
-/// The marker a wrapper writes: `__DIM_START_` or `__DIM_END_`, two
-/// `MARKER_HEX` runs, a separator and the closing `__`.
-const MARKER_LIMIT: usize = "__DIM_START_".len() + 2 * MARKER_HEX + 1 + 2;
-/// The longest line a marker can occupy: the marker, the exit token
-/// `posix_command`, `posix_background` and `pwsh_command` append to it, and
-/// the trailing newline.
-const MARKER_LINE_LIMIT: usize = MARKER_LIMIT + MARKER_TOKEN_LIMIT + 1;
-
 /// Configuration for the shell session.
 #[derive(Clone)]
 pub struct ShellSessionConfig {
@@ -713,48 +700,18 @@ impl ShellSession {
     }
 
     async fn handle_output(self: &Arc<Self>, text: &str) {
-        let mut settled: Vec<Settlement> = Vec::new();
-        {
-            let mut inner = self.inner.lock().await;
-            inner.retained.push_str(text);
-            let tail = tail_bytes(&inner.retained, text.len() + MARKER_LINE_LIMIT);
-            let matched: Vec<(String, String, String)> = inner
-                .background
-                .values()
-                .filter(|task| self.host.job_completion(&task.task_id).is_none())
-                .filter_map(|task| {
-                    let marker = self.host.job_marker(&task.task_id)?;
-                    marker_code(tail, &marker).map(|code| (task.task_id.clone(), code, marker))
-                })
-                .collect();
-            for (task_id, code, marker) in matched {
-                let Some(task) = inner.background.remove(&task_id) else {
-                    continue;
-                };
-                strip_marker(&mut inner.retained, &marker);
-                let preview = file_tail(&task.output_path, OUTPUT_LIMIT);
-                let data = ExecEndedData {
-                    task_id: task.task_id.clone(),
-                    status: exit_status(&code),
-                    result: ended_result(&task.task_id, &task.output_path, &preview, &code),
-                };
-                settled.push(Settlement { data, ended: None });
-            }
-            if inner.retained.len() > RETAINED_BUFFER_TRIM {
-                inner.retained = tail_bytes(&inner.retained, RETAINED_BUFFER_LIMIT).to_owned();
-            }
+        let mut inner = self.inner.lock().await;
+        inner.retained.push_str(text);
+        let markers: Vec<String> = inner
+            .background
+            .values()
+            .filter_map(|task| self.host.job_marker(&task.task_id))
+            .collect();
+        for marker in markers {
+            strip_marker(&mut inner.retained, &marker);
         }
-        for settlement in settled {
-            let _ = self
-                .host
-                .settle(TaskRequest {
-                    task_id: settlement.data.task_id.clone(),
-                })
-                .await;
-            self.settle(settlement.data);
-            if let Some(notify) = settlement.ended {
-                notify.notify_waiters();
-            }
+        if inner.retained.len() > RETAINED_BUFFER_TRIM {
+            inner.retained = tail_bytes(&inner.retained, RETAINED_BUFFER_LIMIT).to_owned();
         }
     }
 
@@ -1906,18 +1863,6 @@ fn file_tail(path: &Path, limit: usize) -> String {
     std::fs::read(path)
         .map(|bytes| tail_bytes(&String::from_utf8_lossy(&bytes), limit).to_owned())
         .unwrap_or_default()
-}
-
-/// The token on the line of the last `marker` once that line is complete:
-/// exit digits, pwsh `failed`, or a job pid. A malformed token reads as
-/// `unknown`.
-fn marker_code(text: &str, marker: &str) -> Option<String> {
-    let rest = &text[text.rfind(marker)? + marker.len()..];
-    let token = rest[..rest.find('\n')?].trim();
-    let valid = !token.is_empty()
-        && token.len() <= 12
-        && token.chars().all(|ch| ch.is_ascii_alphanumeric());
-    Some(if valid { token } else { "unknown" }.to_owned())
 }
 
 fn exit_status(code: &str) -> ExecStatus {
