@@ -97,7 +97,8 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
   同一次存储操作里完成，分支保留，已提交内容不随目录消失。根已核验缺失，或存在但 Git 已不再登记时，只删
   记录并 `git worktree prune`；后者在目录非空时需要 `--force`。未登记目录按 task-id 显式删除，要求内容干净、
   目录记录中没有根在其下的条目、没有 Session 的 cwd 在根下且要删除的整棵树不含 `.git` 条目（目录、gitdir 文件或
-  符号链接，含悬空链接）；带 `.git` 的残留由用户用 `git worktree remove` 处理，错误信息给出路径。
+  符号链接，含悬空链接）；非 Unix 平台上不带 `--force` 的未登记删除以 `worktree_in_use` 拒绝并要求 `--force`；
+  带 `.git` 的残留由用户用 `git worktree remove` 处理，错误信息给出路径。
   记录只有 repository 与 root，同一路径被手工重建的 worktree 视为同一条记录，这是已知限制。
 - **prune**：候选只包括根在 `$DIMCODE_HOME/worktrees` 下、没有剩余使用关联的目录记录，再按最后使用时间
   应用 `--older-than` 或 `--keep`；未知时间按 §4 处理，仍有关联、Session 的 cwd 在根下、无法检查、Git 已不再登记（除显式
@@ -129,8 +130,9 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
   它的直接子目录仍是管理根内的普通目录，以及删除范围内每个目录都没有 `.git` 条目（目录、gitdir 文件或符号链接，含悬空链接；
   遍历不跟随符号链接，不起 Git 子进程），不满足就拒绝。
 - **非 force 的删除**：只删检查记录下来的空直接子目录和任务目录本身，逐个按名字从已打开的目录句柄删除（Unix 的 `unlinkat`）；
-  任务目录或子目录在检查后被换成符号链接时删除以 `worktree_in_use` 失败，不会删到管理根外。Windows 没有句柄相对的目录删除，
-  仍按路径删除并逐个复核是普通目录，任务目录在复核与删除之间被换成 reparse point 的窗口是已知限制。
+  任务目录或子目录在检查后被换成符号链接时删除以 `worktree_in_use` 失败，不会删到管理根外。Windows 没有既能只删空目录、
+  又能守住管理根边界的现成原语，所以非 Unix 平台上未登记目录的非 force 删除直接以 `worktree_in_use` 拒绝并提示 `--force`；
+  `--force` 用标准库的 `remove_dir_all`，它按目录句柄遍历、不跟随树内的 reparse point。
 - **时间上限**：锁只跨越复核与登记，没有慢步骤。删除本身没有时间上限：`git worktree remove` 有 30 秒超时，
   递归删除按目录内容多少决定，这是已知限制。
   可证明的使用只有记录与存储中的 cwd；其余使用不可证明，由预览、确认和 worktree-access §4 的删除授权承担。
