@@ -23,7 +23,11 @@ aimux 桥接层是唯一持有提供方结构化错误、并看得到完整响�
 
 HTTP 连接或流的超时以传输 `ApiCall` 到达桥接层，是 `network`。`AiMuxError::Timeout` 在聊天调用中没有产生者；若它到达桥接层，是 `unknown`，且不重试。
 
-桥接层自己也给两次流事件之间的等待设上限：连续五分钟没有任何事件是 `network`，reason 为 `the stream delivered nothing for 300 seconds`。这个上限按每次等待计，不按整个请求计，所以持续有事件的回复不会被截断；上限到点时它优先于同时就绪的事件，取消请求又优先于两者。等响应头的等待用同一个上限，从发出请求开始计，发送请求体和跟随重定向都算在内，reason 为 `no response headers arrived within 300 seconds of sending the request`。连接原来可选的整请求超时不变，与这个空闲上限是两件事。
+桥接层自己也给几段等待设上限：连续五分钟没有任何事件是 `network`，reason 为 `the stream delivered nothing for 300 seconds`。这个上限按每次等待计，不按整个请求计，所以持续有事件的回复不会被截断；上限到点时它优先于同时就绪的事件，取消请求又优先于两者。
+
+带上限的等待有三段。等响应头从发出请求开始计，发送请求体和跟随重定向都算在内，reason 为 `no response headers arrived within 300 seconds of sending the request`。等第一个流事件从收到响应头开始计，reason 为 `the response headers arrived, but no stream event followed within 300 seconds`。两次流事件之间的等待，reason 为 `the stream delivered nothing for 300 seconds`。非 2xx 响应另算：它的响应体是短的诊断信息，读取单独有总计五分钟的上限，卡住的错误体不能拖住请求，请求仍然按 HTTP 状态和该状态对应的类别失败，而不是变成空闲的网络失败。连接原来可选的整请求超时不变，和这几段上限是两件事。
+
+只有解码出的流事件才续上两次事件之间的等待。提供方的解析器在事件到达桥接层之前就丢掉了 SSE 注释和 Anthropic 的 `ping` 事件，所以只靠 keep-alive 保活的连接仍然会在没有事件五分钟后失败。
 
 code 比较前先 trim 并转 ASCII 小写。
 

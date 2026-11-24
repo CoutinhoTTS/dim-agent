@@ -30,16 +30,30 @@ A timeout of the HTTP connection or of the stream reaches the bridge as a
 transport `ApiCall` and is `network`. `AiMuxError::Timeout` has no producer in a
 chat call; if it ever reaches the bridge it is `unknown` and is not retried.
 
-The bridge also bounds its own wait between stream parts: a stream that delivers
-nothing for five minutes is `network`, with the reason `the stream delivered
-nothing for 300 seconds`. The bound is per wait, not per request, so a reply
-that keeps streaming is never cut; an expired bound outranks a part that is
-ready at the same moment, and cancelling the request outranks both. The wait for
-the response headers carries the same bound and the reason `no response headers
-arrived within 300 seconds of sending the request`; it starts when the request
-is sent, so sending the body and following redirects count against it. The
-connection's optional total timeout is unchanged and is still separate from
-this idle bound.
+The bridge also bounds its own waits: a stream that delivers nothing for five
+minutes is `network`, with the reason `the stream delivered nothing for 300
+seconds`. The bound is per wait, not per request, so a reply that keeps
+streaming is never cut; an expired bound outranks a part that is ready at the
+same moment, and cancelling the request outranks both.
+
+Three waits carry the bound. The wait for the response headers starts when the
+request is sent, so sending the body and following redirects count against it,
+and expires with the reason `no response headers arrived within 300 seconds of
+sending the request`. The wait for the first stream event starts when the
+response headers arrive and expires with the reason `the response headers
+arrived, but no stream event followed within 300 seconds`. The wait between
+stream parts expires with the reason `the stream delivered nothing for 300
+seconds`. A non-2xx response is handled differently: its body is a short
+diagnostic, and its read has its own total five-minute allowance, so a stalled
+error body cannot hold the request open, and the request still fails with the
+HTTP status and the kind that status names instead of an idle network failure.
+The connection's optional total timeout is unchanged and is still separate
+from these bounds.
+
+Only decoded stream parts renew the wait between parts. The provider parser
+drops SSE comments and Anthropic `ping` events before they reach the bridge, so
+a connection kept alive only by keep-alives still fails after five minutes
+without parts.
 
 Codes are compared trimmed and ASCII-lowercased.
 
