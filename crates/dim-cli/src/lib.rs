@@ -152,7 +152,7 @@ async fn open_tui(
             .fullscreen
             .unwrap_or_else(|| ui::config::saved_fullscreen(&options.home)),
         initial,
-        resume: options.resume.is_some(),
+        resume: options.resume.clone(),
     };
     let (leave, mut left) = tokio::sync::oneshot::channel();
     let (leaf_end, mut leaf_ended) = tokio::sync::oneshot::channel();

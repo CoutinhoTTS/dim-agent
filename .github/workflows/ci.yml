@@ -189,6 +189,7 @@ jobs:
       - name: Verify native Windows boundary flows
         # Scheduled sweeps select every check group, so they run these flows too.
         if: needs.changes.outputs.windows_native == 'true'
+        shell: powershell
         run: node scripts/test-windows-native.mjs
   web:
     needs: changes

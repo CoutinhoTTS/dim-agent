@@ -39,8 +39,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Running" => "Em execução",
         "Lines" => "Linhas",
-        "Enter show the line · x end it · Esc close" => {
-            "Enter ver a linha · x terminá-la · Esc fechar"
+        "Enter show · p continue from here · x end it · Esc close" => {
+            "Enter ver · p continuar daqui · x terminar · Esc fechar"
+        }
+        "Main line" => "linha principal",
+        "Start" => "início",
+        "the default branch and the lines it continues from stay open; continue on another line first" => {
+            "O ramo predefinido e as linhas de onde continua permanecem abertos; continue primeiro noutra linha"
+        }
+        "The old default branch stays open and keeps the lines it opened. The root keeps its own right to open a line in either direction." => {
+            "O ramo predefinido anterior permanece aberto e mantém as linhas que abriu. A raiz mantém o seu próprio direito de abrir uma linha em qualquer direção."
+        }
+        "The old default branch stays open and keeps the lines it opened. The two lines swap the right to open a line." => {
+            "O ramo predefinido anterior permanece aberto e mantém as linhas que abriu. As duas linhas trocam o direito de abrir uma."
         }
         "This session has no lines." => "Esta sessão não tem linhas.",
         "No matching lines." => "Nenhuma linha correspondente.",
@@ -615,6 +626,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "Enviar já falhou: {error}; o rascunho foi mantido"
         }
+        "Send now failed: {error}" => "Enviar já falhou: {error}",
         "Send now cancelled; the draft was kept" => "Enviar já cancelado; o rascunho foi mantido",
         "Send now is still stopping the run; the draft was kept" => {
             "O envio imediato ainda está a parar a execução; o rascunho foi mantido"
@@ -635,6 +647,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Com seleção, Shift+Tab para o alvo mais recente · Esc voltar à entrada"
         }
         "(shift+tab to cycle)" => "(Shift+Tab para alternar)",
+        "Permission unavailable" => "Permissão indisponível",
         "Fullscreen" => "Ecrã inteiro",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown deslocar · Home/End topo ou fundo (com rascunho vazio) · Tab escolher mensagem, e editar, q citar"

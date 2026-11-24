@@ -37,8 +37,19 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         }
         "Running" => "Berjalan",
         "Lines" => "Jalur",
-        "Enter show the line · x end it · Esc close" => {
-            "Enter lihat jalur · x hentikan · Esc tutup"
+        "Enter show · p continue from here · x end it · Esc close" => {
+            "Enter lihat · p lanjutkan dari sini · x akhiri · Esc tutup"
+        }
+        "Main line" => "jalur utama",
+        "Start" => "titik awal",
+        "the default branch and the lines it continues from stay open; continue on another line first" => {
+            "Jalur default dan jalur yang dilanjutkannya tetap terbuka; lanjutkan dulu di jalur lain"
+        }
+        "The old default branch stays open and keeps the lines it opened. The root keeps its own right to open a line in either direction." => {
+            "Jalur default lama tetap terbuka dan menyimpan jalur yang telah dibukanya. Akar mempertahankan haknya sendiri untuk membuka jalur ke dua arah."
+        }
+        "The old default branch stays open and keeps the lines it opened. The two lines swap the right to open a line." => {
+            "Jalur default lama tetap terbuka dan menyimpan jalur yang telah dibukanya. Kedua jalur bertukar hak untuk membuka jalur."
         }
         "This session has no lines." => "Sesi ini belum punya jalur.",
         "No matching lines." => "Tidak ada jalur yang cocok.",
@@ -599,6 +610,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Send now failed: {error}; the draft was kept" => {
             "Kirim sekarang gagal: {error}; draf dipertahankan"
         }
+        "Send now failed: {error}" => "Kirim sekarang gagal: {error}",
         "Send now cancelled; the draft was kept" => "Kirim sekarang dibatalkan; draf dipertahankan",
         "Send now is still stopping the run; the draft was kept" => {
             "Kirim sekarang masih menghentikan proses; draf dipertahankan"
@@ -619,6 +631,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Saat dipilih, Shift+Tab ke target lebih baru · Esc kembali ke masukan"
         }
         "(shift+tab to cycle)" => "(Shift+Tab untuk beralih)",
+        "Permission unavailable" => "Izin tidak tersedia",
         "Fullscreen" => "Layar penuh",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown gulir · Home/End atas/bawah (saat draf kosong) · Tab pilih pesan, e edit, q kutip"

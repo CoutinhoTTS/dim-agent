@@ -667,6 +667,18 @@ Session never changes it, while `running` and `updatedAt` follow the default bra
 `updatedAt` in its own transaction from the new default's latest activity, and the switch itself counts as none, so an
 idle move never leaves the row recent by the line the Session left.
 
+The reply's `model`, `modelPreferences` and `capabilitySnapshot` stay the root's adopted configuration, the watermark a
+Session on its root has always read. A client that follows the move pairs the configuration with the cursor instead of
+mixing the two: it takes the configuration of the line the cursor names through
+`session.model.get {sessionId, branchId, through}`, so a Session whose conversation is on a line shows the model that
+line adopted at or below its cursor, and the reply's record seeds the root alone. The read answers the line's own
+configuration with its own committed cutoff, so it works when a display transcript omits `context/configured` and a
+bounded window begins after the adoption; that cutoff is the watermark a later configuration must pass. A server that
+cannot answer the read does not name that line's configuration, and its attach reply is the root's, so no client shows
+the root's model for a line. A reply that
+carries no `defaultBranch` names the root, because a server without the field cannot move the default branch, so
+its record is the Session's one model and every client keeps using it.
+
 The directory read performs no history I/O. Its display fields are null or absent.
 `session.branch.get {sessionId, branchId}` (v3, separately listed in
 `hello.features`) reads one line's directory record and display fields:
@@ -682,7 +694,7 @@ have no own history; its fixed directory end identity remains even when the
 `session.model.get {sessionId, branchId, through?}` (v3, listed in `hello.features` with the
 other Session methods under `session.attach`'s admission) reads one line's adopted configuration at
 that line's own cutoff: `{branchId, through, configuration: {model: {providerId, modelId},
-capabilitySnapshot?, modelPreferences?} | null}`. The returned `through` is always the requested
+catalogProviderId?, capabilitySnapshot?, modelPreferences?} | null}`. The returned `through` is always the requested
 line's committed cutoff, never the sequence of an ancestor's adoption, so a client applies only
 that line's `Configuration` events whose `sequence > through` and refreshes by calling again without
 `through`. An open line waits for the Dispatcher to reach the committed head, so an adoption

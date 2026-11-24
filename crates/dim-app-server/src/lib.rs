@@ -202,6 +202,16 @@ pub enum ShutdownReason {
     Forced,
 }
 
+/// Feature `testing`: a hold on one unregistered worktree removal after its
+/// content check and before the store's final Session check. It notifies
+/// `reached` once held and returns once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct UnregisteredRemovalHold {
+    pub reached: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
 /// Feature `testing`: a hold on one subscription's `follow` task. It notifies
 /// `waiting` once it is held, `cancelled` once retirement cancels it, and
 /// returns once `release` is notified.
@@ -219,6 +229,16 @@ pub struct FollowHold {
 #[cfg(feature = "testing")]
 #[derive(Default)]
 pub struct BranchesHold {
+    pub entered: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+/// Feature `testing`: a hold on one attach's `expectedConfig` check after the
+/// reply's record is captured. It notifies `entered` once the check is held and
+/// answers once `release` is notified.
+#[cfg(feature = "testing")]
+#[derive(Default)]
+pub struct AttachCheckHold {
     pub entered: tokio::sync::Notify,
     pub release: tokio::sync::Notify,
 }
@@ -335,6 +355,15 @@ impl RunningServer {
             .get::<AgentIndex>()
             .map(|index| index.idle_admitted())
     }
+    /// Holds the next unregistered worktree removal after its content check,
+    /// so a test can create a Session before the store's final check. Feature
+    /// `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_unregistered_removal(&self) -> Option<Arc<UnregisteredRemovalHold>> {
+        self.root
+            .get::<worktrees::ManagedWorktrees>()
+            .map(|managed| managed.hold_next_unregistered_removal())
+    }
     /// Holds the next subscription's `follow` task open until `release`, so a
     /// test can keep an attach or detach in flight at a known point. Feature
     /// `testing` only.
@@ -352,6 +381,15 @@ impl RunningServer {
         self.root
             .get::<ConnectionHub>()
             .map(|hub| hub.hold_next_branches())
+    }
+    /// Holds the next attach's `expectedConfig` check after its record is
+    /// captured until `release`, so a test can move the default away and end
+    /// the former default at a known point. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn hold_next_attach_check(&self) -> Option<Arc<AttachCheckHold>> {
+        self.root
+            .get::<ConnectionHub>()
+            .map(|hub| hub.hold_next_attach_check())
     }
     /// Makes the next attach fail before it registers its listener. Feature
     /// `testing` only.

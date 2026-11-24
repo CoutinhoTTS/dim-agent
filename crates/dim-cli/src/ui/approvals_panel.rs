@@ -12,24 +12,26 @@ use crate::ui::theme::Palette;
 
 pub struct ApprovalsPanel {
     list: ListPanel,
-    preset: PermissionPreset,
+    /// The preset the shown line is on; `None` when this client does not know
+    /// it, so no row claims to be the current mode.
+    preset: Option<PermissionPreset>,
 }
 
 impl ApprovalsPanel {
-    pub fn new(policy: &PermissionPolicy) -> Self {
+    pub fn new(policy: Option<&PermissionPolicy>) -> Self {
         let mut panel = Self {
             list: ListPanel::new("Permissions", "", "", "", "", false)
                 .without_filter()
                 .with_inline_rows()
                 .with_section_headings(),
-            preset: policy.preset,
+            preset: policy.map(|policy| policy.preset),
         };
         panel.refresh();
         panel
     }
 
-    pub fn set_policy(&mut self, policy: &PermissionPolicy) {
-        self.preset = policy.preset;
+    pub fn set_policy(&mut self, policy: Option<&PermissionPolicy>) {
+        self.preset = policy.map(|policy| policy.preset);
         self.refresh();
     }
 
@@ -38,7 +40,11 @@ impl ApprovalsPanel {
         let selected = self.list.selected_id();
         let items = std::iter::once(Item::heading(t("Permission mode")))
             .chain(PRESETS.into_iter().map(|preset| {
-                let marker = if preset == current { "(*)" } else { "( )" };
+                let marker = if Some(preset) == current {
+                    "(*)"
+                } else {
+                    "( )"
+                };
                 Item::new(
                     preset_name(preset),
                     format!("{marker} {}", preset_label(preset)),
@@ -51,10 +57,11 @@ impl ApprovalsPanel {
                 Item::new("isolation", t("Process isolation"), "›"),
             ])
             .collect::<Vec<_>>();
-        self.list.set_items(
-            Ok(items),
-            Some(selected.as_deref().unwrap_or(preset_name(current))),
-        );
+        let focus = selected
+            .as_deref()
+            .or(current.map(preset_name))
+            .unwrap_or_else(|| preset_name(PRESETS[0]));
+        self.list.set_items(Ok(items), Some(focus));
         self.focus_hint();
     }
 
@@ -76,7 +83,7 @@ impl ApprovalsPanel {
                     .find(|preset| Some(preset_name(*preset)) == name)
                     .expect("permission rows name a preset");
                 (
-                    if preset == self.preset {
+                    if Some(preset) == self.preset {
                         t("keep mode")
                     } else {
                         t("use mode")
@@ -161,7 +168,7 @@ mod tests {
     fn the_panel_draws_its_title_and_rows_in_the_interface_language() {
         let previous = crate::ui::i18n::active();
         crate::ui::i18n::set(crate::ui::i18n::Locale::ZhCn);
-        let panel = ApprovalsPanel::new(&PermissionPolicy::default());
+        let panel = ApprovalsPanel::new(Some(&PermissionPolicy::default()));
         let palette = terminal_palette(ColorMode::TrueColor, Appearance::Dark);
         let drawn = panel
             .render(80, 24, &palette)

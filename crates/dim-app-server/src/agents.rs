@@ -1986,7 +1986,11 @@ impl AgentIndex {
         let mut config = serde_json::from_str::<SessionConfig>(&stored)
             .map_err(|error| AgentError::Storage(format!("the source configuration: {error}")))?;
         if let Some(expected) = expected {
-            check_configuration(session, &config, at, expected).await?;
+            let line = crate::protocol::BranchCursor {
+                branch_id: ROOT_BRANCH_ID.into(),
+                sequence: at,
+            };
+            check_configuration(session, &config, &line, expected).await?;
         }
         if let Some((provider, scope)) = scope {
             let (adopted, _) = session

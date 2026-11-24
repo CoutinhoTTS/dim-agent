@@ -30,7 +30,20 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         "Branch history is incomplete; stop-all unavailable" => "分支历史尚未读完，暂不能停止全部",
         "Running" => "运行中",
         "Lines" => "线",
-        "Enter show the line · x end it · Esc close" => "Enter 查看该线 · x 结束 · Esc 关闭",
+        "Enter show · p continue from here · x end it · Esc close" => {
+            "Enter 查看 · p 从此继续 · x 结束 · Esc 关闭"
+        }
+        "Main line" => "主线",
+        "Start" => "起点",
+        "the default branch and the lines it continues from stay open; continue on another line first" => {
+            "默认分支和它延续的线都不能结束；请先切换到另一条线继续"
+        }
+        "The old default branch stays open and keeps the lines it opened. The root keeps its own right to open a line in either direction." => {
+            "原默认分支保持开启，并保留它已打开的线。根分支在任一方向都保有自己的开线权。"
+        }
+        "The old default branch stays open and keeps the lines it opened. The two lines swap the right to open a line." => {
+            "原默认分支保持开启，并保留它已打开的线。两条线互换开线的权利。"
+        }
         "This session has no lines." => "这个会话还没有线。",
         "No matching lines." => "没有匹配的线。",
         "the session itself" => "会话本身",
@@ -623,6 +636,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "Ctrl+Enter 中断并立即发送：草稿与所有暂存消息合成一条发出"
         }
         "Send now failed: {error}; the draft was kept" => "立即发送失败：{error}；草稿已保留",
+        "Send now failed: {error}" => "立即发送失败：{error}",
         "Send now cancelled; the draft was kept" => "已取消立即发送；草稿保留",
         "Send now is still stopping the run; the draft was kept" => {
             "立即发送仍在停止运行；草稿已保留"
@@ -643,6 +657,7 @@ pub fn lookup(english: &str) -> Option<&'static str> {
             "选中历史项时 Shift+Tab 选择较新项 · Esc 返回输入框"
         }
         "(shift+tab to cycle)" => "(Shift+Tab 切换)",
+        "Permission unavailable" => "权限不可用",
         "Fullscreen" => "全屏",
         "PageUp/PageDown scroll · Home/End top or bottom (empty draft) · Tab pick a message, e edit it, q quote it" => {
             "PageUp/PageDown 滚动 · Home/End 到顶部或底部 (草稿为空时) · Tab 选择消息，e 编辑，q 引用"

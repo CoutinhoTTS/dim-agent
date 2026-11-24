@@ -540,7 +540,7 @@ queue strip when nothing is held:
 
 ## Usage report
 
-In both TUI modes, `/usage` prints the main branch's context usage. When the
+In both TUI modes, `/usage` prints the default branch's context usage. When the
 active model uses Dim OAuth, it also queries and prints the account's plan,
 credits, rolling windows and feature meters through the existing
 [account usage contract](../../crates/dim-oauth/docs/runtime-contract.md).
@@ -2945,6 +2945,28 @@ is one of the seven [guaranteed pre-commit rejections](../../crates/dim-app-serv
 Every other error, including `submission_unknown` and opaque publication/storage failures,
 can follow commit and must not trigger another send.
 
+In its default text mode, `exec` writes only the turn's final reply to stdout.
+That turn is the one consuming the input this invocation submitted; text from
+any other turn on the branch, whether it completes before or after, goes to
+stderr. Text a model writes before or between tool calls goes to stderr,
+together with the `[tool]`, `[done]` and `[failed]` lines. Whether a request's
+text is the turn's final reply is known only when the turn ends, so each
+request's text is held until then: a request that ends in a tool call, fails
+(including at its output limit) or is cancelled writes its text to stderr; a
+request that ends normally stays the candidate reply, and a turn that
+completes successfully writes its last request's text to stdout while an
+earlier request in the same turn, or a turn that fails or is cancelled, writes
+it to stderr. Requests are routed by their own id, so an earlier request that
+ends late does not cut a reply that already started. `exec resume` first
+settles a turn an earlier invocation left running, and that turn's text goes
+to stderr. The reply stream closes for good when the submitted turn ends, when
+the run is interrupted, when a line run stops at a question or approval (exit
+3), when the submission fails or the Session closes (exit 1), and when the
+submitted input is deleted (exit 1); text that arrives afterwards is
+diagnostics. A diagnostic line does not by itself decide where held text goes.
+A turn whose final reply is empty writes nothing to stdout. `exec --json` and a
+one-shot `dimcode --prompt` run keep their existing routing.
+
 In JSON mode, stdout contains one compact JSON-RPC notification per line using
 the daemon's existing `method` and `params`. Only notifications for the selected
 Session are emitted. Protocol handshake, RPC replies and other Sessions never
@@ -3130,7 +3152,7 @@ permission: read-only
 
 > Fix the build
 Assistant: ...
-[permission] main branch preset: workspace-write  <- changed by another client
+[permission] preset: workspace-write  <- changed by another client
 ```
 
 Both TUI modes draw a live permission footer under the composer, without an `AGENT` prefix;
@@ -3289,8 +3311,8 @@ approves nor cancels work by that fact alone.
 ### `/permissions`
 
 `/permissions` is the visible menu entry in both TUI modes; `/approvals` and `/approval` open the
-same preset picker as compatibility aliases. The control applies to `main`; selecting a preset
-uses the current policy and version, preserving the tool lists. A failed save neither changes remembered choices nor falls back to another preset.
+same preset picker as compatibility aliases. The control applies to the Session's default
+branch; selecting a preset uses the current policy and version, preserving the tool lists. A failed save neither changes remembered choices nor falls back to another preset.
 
 The Process isolation row links to the Settings control; Esc returns to this panel with that row focused.
 The Command rules row opens the management panel
