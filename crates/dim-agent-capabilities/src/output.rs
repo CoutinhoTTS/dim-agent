@@ -130,6 +130,8 @@ pub(crate) struct Output {
     thinking_show_at: Option<Instant>,
     /// Whether this attempt committed an event to the Timeline.
     committed: bool,
+    /// Whether a retry replaced an earlier attempt of this request.
+    retried: bool,
     pub started: Vec<StartedCall>,
     committed_text: String,
     committed_thinking: String,
@@ -164,6 +166,7 @@ impl Output {
             thinking_pending: String::new(),
             thinking_show_at: None,
             committed: false,
+            retried: false,
             started: Vec::new(),
             committed_text: String::new(),
             committed_thinking: String::new(),
@@ -270,6 +273,7 @@ impl Output {
     fn forget_attempt(&mut self) {
         self.gate.restart();
         self.committed = false;
+        self.retried = true;
         self.text.clear();
         self.text_part_id = None;
         self.text_part_committed = false;
@@ -289,6 +293,18 @@ impl Output {
                 };
             }
         });
+    }
+    /// Whether a retry replaced an earlier attempt of this request.
+    pub(crate) fn retried(&self) -> bool {
+        self.retried
+    }
+    /// The thinking block the final attempt left open before this terminal,
+    /// when the attempt had not committed it: the row a client shows from
+    /// progress may be this block, or a replaced attempt's.
+    pub(crate) fn shown_thinking_part_id(&self) -> Option<String> {
+        (!self.thinking_part_committed)
+            .then(|| self.thinking_part_id.clone())
+            .flatten()
     }
     /// Shows the thinking received since the last time it was shown; this is
     /// where the thought becomes visible output.

@@ -51,8 +51,12 @@ struct ModelState {
 }
 
 /// The terminal fact's durable failure: the host facts, including the attempt
-/// count the recovery loop recorded.
-fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
+/// count the recovery loop recorded, and this attempt's retry boundary.
+fn model_failure(
+    facts: ModelFailureFacts,
+    retried: bool,
+    shown_thinking_part_id: Option<String>,
+) -> ModelFailure {
     ModelFailure {
         kind: facts.kind,
         status: facts.status,
@@ -66,6 +70,8 @@ fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
             .retry_after_stop
             .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
         retry_forbidden: facts.retry_forbidden,
+        retried,
+        thinking_part_id: retried.then_some(shown_thinking_part_id).flatten(),
     }
 }
 
@@ -92,6 +98,8 @@ impl ModelProvider {
         failure_chain: Option<&FailureChain>,
         result: std::result::Result<FinishReason, HostError>,
         started: &[StartedCall],
+        retried: bool,
+        shown_thinking_part_id: Option<String>,
     ) -> dim_agent_runtime::Result<()> {
         let (provider_id, model_id) = model;
         let outcome = match result {
@@ -131,7 +139,7 @@ impl ModelProvider {
                     error: message,
                     budget,
                     presentation: presentation.map(|value| *value),
-                    failure: Some(Box::new(model_failure(*facts))),
+                    failure: Some(Box::new(model_failure(*facts, retried, shown_thinking_part_id))),
                 }
             }
         };
@@ -436,6 +444,8 @@ impl ModelProvider {
                     failure_chain.as_ref(),
                     Err(HostError::failed(CAPABILITY_RELOADING)),
                     &started,
+                    false,
+                    None,
                 )?;
             }
             let Some(next) = reply.next else {
@@ -549,6 +559,8 @@ impl ModelProvider {
                 call.failure_chain.as_ref(),
                 result,
                 &output.started,
+                output.retried(),
+                output.shown_thinking_part_id(),
             );
             state.current = None;
             (outcome, submitted)
@@ -746,6 +758,8 @@ impl DynPlugin for ModelProviderPlugin {
                                     call.failure_chain.as_ref(),
                                     Err(HostError::Cancelled(reason)),
                                     &[],
+                                    false,
+                                    None,
                                 );
                             }
                             state.stop_reason = None;
