@@ -654,6 +654,10 @@ impl Connection {
                         provider_id: settings.provider_id,
                         model_id: settings.model_id,
                     },
+                    catalog_provider_id: crate::provider::scoped_routes::logical_provider(
+                        settings.metadata.as_ref(),
+                    )
+                    .map(str::to_owned),
                     capability_snapshot: settings.capability_snapshot.map(Box::new),
                     model_preferences,
                 }

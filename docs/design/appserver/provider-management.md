@@ -340,11 +340,12 @@ and `disabled`. Disabled and unavailable models remain visible for diagnostics.
 `{kind:"no_models", listable}` or `{kind:"unreadable"}`. Each page admits at most
 `limit` model or empty-provider candidates, so a page containing errors can have
 fewer models. `next:null` ends traversal. A candidate deleted before its target read
-is skipped; a later unreadable row is reported in `empty`. A stored empty managed provider
-without an account descriptor is reported as unreadable. Invalid limits fail with
-`provider_invalid_config`; cancellation and storage errors follow the Provider
-operation contract. Reads perform no remote catalog refresh. Refresh is an
-explicit management operation.
+is skipped; a later unreadable row is reported in `empty`. A stored managed catalog
+without a matching signed-in account does not contribute model candidates. If its
+account descriptor is absent, it contributes one unreadable provider entry instead.
+Invalid limits fail with `provider_invalid_config`; cancellation and storage
+errors follow the Provider operation contract. Reads perform no remote catalog
+refresh. Refresh is an explicit management operation.
 
 `provider.catalog` accepts an optional `modelId` for the adopted model's capability
 read. It returns the same catalog envelope with only that model and preserves the

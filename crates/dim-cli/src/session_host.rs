@@ -1989,19 +1989,11 @@ impl Worker {
                 }
             }
             Command::ListModels => {
-                let models = self
-                    .models(String::new(), None)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.send(Update::Models(models));
+                self.send_models(String::new(), None, 1).await;
                 self.read_model_policy(false).await;
             }
             Command::QueryModels { query, after } => {
-                let models = self
-                    .models(query, after)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.send(Update::Models(models));
+                self.send_models(query, after, 1).await;
             }
             Command::ReadIsolation => {
                 if !self.client.supports(&["settings.read", "settings.update"]) {
@@ -2221,7 +2213,7 @@ impl Worker {
             }
             Command::ClearModelPreferences {
                 query,
-                after,
+                batches,
                 provider_id,
                 model_id,
                 expected_version,
@@ -2233,14 +2225,7 @@ impl Worker {
                     expected_version,
                 )
                 .await;
-                // The reread lands before the notice: a conflict tells the
-                // user to reread and retry, so the row a retry presses must
-                // already carry the record's current version.
-                let models = self
-                    .models(query, after)
-                    .await
-                    .map_err(|error| error.to_string());
-                self.send(Update::Models(models));
+                self.send_models(query, None, batches).await;
                 self.send(Update::Notice(match result {
                     Ok(()) => {
                         "Saved model preferences cleared; select the model to adopt its defaults"
@@ -3957,6 +3942,34 @@ impl Worker {
         result.map_err(|error| error.to_string())
     }
 
+    async fn send_models(
+        &mut self,
+        query: String,
+        after: Option<dim_agent_types::ModelId>,
+        batches: usize,
+    ) {
+        let result = async {
+            let mut pages = Vec::new();
+            let mut cursor = after.clone();
+            for _ in 0..batches {
+                let page = self.models(query.clone(), cursor).await?;
+                cursor = page.next.clone();
+                pages.push(page);
+                if cursor.is_none() {
+                    break;
+                }
+            }
+            Ok::<_, crate::Error>(pages)
+        }
+        .await
+        .map_err(|error| error.to_string());
+        self.send(Update::Models {
+            query,
+            after,
+            result,
+        });
+    }
+
     async fn models(
         &mut self,
         query: String,
@@ -5413,6 +5426,10 @@ impl Worker {
             self.send(Update::Notice(format!("No line {line} in this session")));
             return;
         }
+        if line != ROOT_BRANCH_ID && self.projection.creation_failed(&line) {
+            self.send(Update::Notice(format!("Line creation failed: {line}")));
+            return;
+        }
         if line != ROOT_BRANCH_ID {
             self.line_projection(&line);
         }
@@ -5507,10 +5524,9 @@ impl Worker {
         }
         snapshot.session_id = self.session_id.clone();
         snapshot.projection_id = self.projection_id;
-        snapshot.history_complete = self
-            .task_history
-            .get(&self.focus)
-            .is_some_and(|branch| branch.window_complete);
+        let shown = self.task_history.get(&self.focus);
+        snapshot.history_complete = shown.is_some_and(|branch| branch.window_complete);
+        snapshot.window_error = shown.and_then(|branch| branch.window_error.clone());
         snapshot.earlier = self.earlier_view();
         snapshot.task_history_loading = self
             .task_history

@@ -116,10 +116,16 @@ impl ProviderService {
         if request.connection.api_format != row.protocol {
             return Err(RpcError::invalid("Unsupported Provider protocol"));
         }
-        let (source, connection) = request
+        let (source, mut connection) = request
             .connection
             .admit()
             .map_err(|error| RpcError::invalid(error.to_string()))?;
+        // A temporary route on the built-in xai provider is still xAI: the
+        // route replaces the endpoint, not the vendor the protocol does not
+        // name.
+        if request.provider_id == "xai" {
+            connection.preset = Some("xai".into());
+        }
         self.put_scoped_route(
             caller,
             request.provider_id,

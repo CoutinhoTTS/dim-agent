@@ -481,8 +481,6 @@ pub fn lookup(english: &str) -> Option<&'static str> {
         // models_panel.rs
         "Select a model" => "Selecione um modelo",
         "Loading models..." => "Carregando modelos…",
-        "Previous page" => "Página anterior",
-        "Next page" => "Próxima página",
         "No models available. Connect a provider first." => {
             "Nenhum modelo disponível. Conecte um provedor."
         }

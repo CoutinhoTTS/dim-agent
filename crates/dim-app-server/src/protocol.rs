@@ -449,6 +449,11 @@ pub struct ModelGetResult {
 #[serde(rename_all = "camelCase")]
 pub struct ModelConfigurationView {
     pub model: ModelId,
+    /// The catalog Provider the adopted model was selected from, when a
+    /// temporary route is its execution identity: clients match the adopted
+    /// model against their catalog by this id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capability_snapshot: Option<Box<dim_agent_types::ModelCapabilitySnapshot>>,
     #[serde(skip_serializing_if = "Option::is_none")]

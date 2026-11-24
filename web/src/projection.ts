@@ -46,15 +46,19 @@ type InputProgress = { kind: "held" } | { kind: "applied" } | { kind: "consumed"
 /** A request's reasoning or answer while it is still arriving. */
 type Stream = {
   index: number
-  /** The request's committed deltas so far. */
+  /** The request's committed deltas this stream drew. */
   written: string
-  /** Unicode scalar values in `written`, the unit of progress offsets. */
-  writtenChars: number
   /** The open thinking block's identity, as the progress notice named it. */
   partId?: string
   /** The latest unwritten tail and the offset it follows. */
   progress?: { text: string; offset: number }
 }
+
+/**
+ * The Unicode scalar values a request committed in its answer and its thought,
+ * the unit of progress offsets, and its newest thought block's identity.
+ */
+type Committed = { text: number; thinking: number; partId?: string }
 
 /** The reason a steer writes on the request it replaces before any output. */
 const REPLACED_BY_STEER = "replaced by steer"
@@ -81,7 +85,10 @@ export class Projection {
   private held = new Map<string, QueuedInput>()
   goal: Goal | undefined
   private controlCursor = 0
+  /** The output `session.turn.get` reported running, the request the page must not treat as ended. */
   private output: { requestId: string; textCharacters: number; thinkingCharacters: number } | undefined
+  /** What each request committed, which both its rows and its progress frames count in. */
+  private committed = new Map<string, Committed>()
   /** Requests whose text, thinking or tool row already showed. */
   private showedOutput = new Set<string>()
   /** Requests whose only visible output so far is progress thinking. */
@@ -90,10 +97,6 @@ export class Projection {
   private discardedThoughts = new Map<string, Set<string>>()
   /** Requests whose terminal fact arrived: no later snapshot describes them. */
   private endedRequests = new Set<string>()
-  /** Committed text characters per request, the offset a notice must not trail. */
-  private writtenText = new Map<string, number>()
-  /** Committed thinking characters per request and the newest block's identity. */
-  private writtenThinking = new Map<string, { chars: number; partId?: string }>()
   /** Names each thought row; a rebuilt row gets a new one. */
   private rowSeq = 0
   /** The error of the model failure the latest turn end may repeat. */
@@ -137,13 +140,9 @@ export class Projection {
 
   activeOutput(output: { requestId: string; textCharacters: number; thinkingCharacters: number }): void {
     this.output = output
-    const answer = this.answers.get(output.requestId)
-    const thought = this.thoughts.get(output.requestId)
-    if (answer !== undefined) answer.writtenChars = output.textCharacters
-    if (thought !== undefined) thought.writtenChars = output.thinkingCharacters
-    this.writtenText.set(output.requestId, output.textCharacters)
-    const written = this.writtenThinking.get(output.requestId)
-    this.writtenThinking.set(output.requestId, { chars: output.thinkingCharacters, ...(written?.partId === undefined ? {} : { partId: written.partId }) })
+    const committed = this.requestChars(output.requestId)
+    committed.text = output.textCharacters
+    committed.thinking = output.thinkingCharacters
   }
 
   /** The request whose output `session.turn.get` reported as running. */
@@ -230,22 +229,23 @@ export class Projection {
         const thought = this.openThinking(content.requestId)
         const first = thought.written === "" && event.id !== ""
         if (first) thought.partId = event.id
-        const written = this.writtenThinking.get(content.requestId)
-        const partId = first ? event.id : written?.partId
-        this.writtenThinking.set(content.requestId, { chars: (written?.chars ?? 0) + [...content.delta].length, ...(partId === undefined ? {} : { partId }) })
+        const committed = this.requestChars(content.requestId)
+        committed.thinking += [...content.delta].length
+        if (first) committed.partId = event.id
         commit(thought, content.delta)
-        this.update(thought.index, { text: shown(thought) })
+        this.update(thought.index, { text: shown(thought, committed.thinking) })
         break
       }
       case "text": {
         this.showedOutput.add(content.requestId)
         this.showedThinking.delete(content.requestId)
-        this.writtenText.set(content.requestId, (this.writtenText.get(content.requestId) ?? 0) + [...content.delta].length)
+        const committed = this.requestChars(content.requestId)
+        committed.text += [...content.delta].length
         if (this.emptyThought(content.requestId)) this.discardThinking(content.requestId)
         else this.closeThinking(content.requestId, event.createAt)
         const answer = this.openAnswer(content.requestId)
         commit(answer, content.delta)
-        this.update(answer.index, { text: shown(answer) })
+        this.update(answer.index, { text: shown(answer, committed.text) })
         break
       }
       case "tool-use":
@@ -304,10 +304,9 @@ export class Projection {
         for (const requestId of [...this.thoughts.keys()]) this.closeThinking(requestId, event.createAt)
         for (const requestId of [...this.answers.keys()]) this.closeAnswer(requestId)
         // A request whose end this line applied never writes again, so what
-        // ended stays ended; the watermarks only matter while it may still write.
+        // ended stays ended; the counts only matter while it may still write.
         this.discardedThoughts.clear()
-        this.writtenText.clear()
-        this.writtenThinking.clear()
+        this.committed.clear()
         // The marker belongs to this turn only, whatever the outcome.
         const shown = this.shownFailure
         this.shownFailure = undefined
@@ -331,22 +330,24 @@ export class Projection {
   progress(progress: ModelProgress): void {
     const requestId = progress.requestId
     if (requestId === undefined || this.endedRequests.has(requestId)) return
+    // A notice with no output at offset zero is the producer restarting the
+    // request: a retry starts from nothing, whatever the attempt before showed.
+    if (progress.text === "" && progress.textOffset === 0 && progress.thinking === "" && progress.thinkingOffset === 0) this.committed.delete(requestId)
+    const committed = this.requestChars(requestId)
     const text = [...progress.text].length
     const thinking = [...progress.thinking].length
-    const writtenText = this.writtenText.get(requestId) ?? 0
-    const writtenThinking = this.writtenThinking.get(requestId)
     // A notice whose text trails what the Timeline holds describes a replaced
     // attempt: none of it is current.
-    if (progress.thinking !== "" && progress.textOffset + text < writtenText) return
+    if (progress.thinking !== "" && progress.textOffset + text < committed.text) return
     // Each half answers to its own watermark, so a thought the Timeline already
     // holds does not hold back the text beside it, nor the text the thought.
-    const showThinking = progress.thinking !== "" && (writtenThinking === undefined
-      || (progress.thinkingOffset + thinking > writtenThinking.chars
-        && !(progress.thinkingOffset < writtenThinking.chars
+    const showThinking = progress.thinking !== "" && (committed.thinking === 0
+      || (progress.thinkingOffset + thinking > committed.thinking
+        && !(progress.thinkingOffset < committed.thinking
           && progress.thinkingPartId !== undefined && progress.thinkingPartId !== ""
-          && writtenThinking.partId !== undefined && writtenThinking.partId !== ""
-          && progress.thinkingPartId !== writtenThinking.partId)))
-    const showText = progress.text !== "" && progress.textOffset + text > writtenText
+          && committed.partId !== undefined && committed.partId !== ""
+          && progress.thinkingPartId !== committed.partId)))
+    const showText = progress.text !== "" && progress.textOffset + text > committed.text
     const reclaimed = progress.thinkingPartId !== undefined && this.discardedThoughts.get(requestId)?.has(progress.thinkingPartId) === true
     const thought = this.thoughts.get(requestId)
     if (!reclaimed && thought !== undefined && thought.written === "" && this.replacedAttempt(progress, thought)) {
@@ -362,14 +363,14 @@ export class Projection {
       if (progress.thinkingPartId !== undefined) thought.partId = progress.thinkingPartId
       if (progress.thinkingStartedAt !== undefined && !this.thoughtStarts.has(requestId)) this.thoughtStarts.set(requestId, progress.thinkingStartedAt)
       thought.progress = { text: progress.thinking, offset: progress.thinkingOffset }
-      this.update(thought.index, { text: shown(thought) })
+      this.update(thought.index, { text: shown(thought, committed.thinking) })
     }
     if (showText) {
       this.showedOutput.add(requestId)
       this.showedThinking.delete(requestId)
       const answer = this.openAnswer(requestId)
       answer.progress = { text: progress.text, offset: progress.textOffset }
-      this.update(answer.index, { text: shown(answer) })
+      this.update(answer.index, { text: shown(answer, committed.text) })
     }
   }
 
@@ -459,7 +460,7 @@ export class Projection {
   private openThinking(requestId: string): Stream {
     let thought = this.thoughts.get(requestId)
     if (thought === undefined) {
-      thought = { index: this.push({ kind: "thinking", key: `thinking-${requestId}-${this.rowSeq++}`, text: "", streaming: true }), written: "", writtenChars: this.output?.requestId === requestId ? this.output.thinkingCharacters : 0 }
+      thought = { index: this.push({ kind: "thinking", key: `thinking-${requestId}-${this.rowSeq++}`, text: "", streaming: true }), written: "" }
       this.thoughts.set(requestId, thought)
     }
     return thought
@@ -468,10 +469,20 @@ export class Projection {
   private openAnswer(requestId: string): Stream {
     let answer = this.answers.get(requestId)
     if (answer === undefined) {
-      answer = { index: this.push({ kind: "assistant", key: `assistant-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "", writtenChars: this.output?.requestId === requestId ? this.output.textCharacters : 0 }
+      answer = { index: this.push({ kind: "assistant", key: `assistant-${requestId}-${this.rows.length}`, text: "", streaming: true }), written: "" }
       this.answers.set(requestId, answer)
     }
     return answer
+  }
+
+  /** What a request committed, which both its rows and its progress frames count in. */
+  private requestChars(requestId: string): Committed {
+    let committed = this.committed.get(requestId)
+    if (committed === undefined) {
+      committed = { text: 0, thinking: 0 }
+      this.committed.set(requestId, committed)
+    }
+    return committed
   }
 
   /** A thought settles when the request moves on: progress never written (an interrupted thought) goes, and its duration spans its first event to `closedAt`. */
@@ -592,17 +603,16 @@ function elementBody(text: string, close: string): string {
 
 function commit(stream: Stream, delta: string): void {
   stream.written += delta
-  stream.writtenChars += [...delta].length
 }
 
 /**
  * Committed text plus the part of the latest progress it has not overtaken.
  * Progress that runs ahead of the committed deltas waits for the next notice.
  */
-function shown(stream: Stream): string {
+function shown(stream: Stream, committed: number): string {
   const progress = stream.progress
   if (progress === undefined) return stream.written
-  const overlap = stream.writtenChars - progress.offset
+  const overlap = committed - progress.offset
   if (overlap < 0) return stream.written
   const tail = [...progress.text]
   if (overlap >= tail.length) {

@@ -506,6 +506,7 @@ fn build_model(
                 base_url: Some(base_url.clone()),
                 headers: Some(identity_headers(None)),
                 fetch: Some(fetch),
+                transform_request_body: request::tool_result_status_rewrite(protocol, model_id),
                 ..AmazonBedrockProviderSettings::default()
             })?;
             Ok(Arc::new(provider.chat(model_id)))

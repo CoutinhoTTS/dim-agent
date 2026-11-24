@@ -365,7 +365,7 @@ fn real_daemon_profile_conflicts_preserve_the_running_daemon_and_endpoint() {
 #[test]
 #[ignore = "requires DIM_TEST_APP_SERVER pointing to the built production App Server"]
 fn configured_api_key_model_uses_production_tools_and_restores_the_same_session() {
-    use sha2::{Digest, Sha256};
+    use base64::Engine as _;
     let binary = std::env::var("DIM_TEST_APP_SERVER")
         .expect("Set DIM_TEST_APP_SERVER to the dim-app-server binary");
     let home = Home::new();
@@ -373,8 +373,7 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
     let image = home.0.join("screenshot.dat");
     let bytes = image_fixture(image::ImageFormat::Png, 1, 1);
     fs::write(&image, &bytes).unwrap();
-    let digest = format!("{:x}", Sha256::digest(&bytes));
-    let model_image = format!("img:{}", &digest[..16]);
+    let model_image = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let outside = Home::new();
     let reference = outside.0.join("outside reference.txt");
     fs::write(&reference, "outside-attachment-marker\n").unwrap();
@@ -447,10 +446,9 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                     user["content"],
                     json!([
                         {"type":"text","text":"continue"},
-                        {"type":"text","text":model_image}
+                        {"type":"image_url","image_url":{"url":format!("data:image/png;base64,{model_image}")}}
                     ])
                 );
-                assert!(!request.to_string().contains("image_url"), "{request}");
             }
             assert!(
                 request["tools"]
@@ -497,8 +495,10 @@ fn configured_api_key_model_uses_production_tools_and_restores_the_same_session(
                 let user = last_user();
                 let parts = user["content"].as_array().unwrap();
                 assert_eq!(parts[0], json!({"type":"text","text":"selected "}));
-                assert_eq!(parts[1], json!({"type":"text","text":model_image}));
-                assert!(!request.to_string().contains("image_url"), "{request}");
+                assert_eq!(
+                    parts[1],
+                    json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{model_image}")}})
+                );
                 assert!(
                     user["content"]
                         .to_string()
