@@ -1806,7 +1806,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         cwd: held.to_string_lossy().into_owned(),
         ..Default::default()
     };
-    let mut concurrent_creation = {
+    let concurrent_creation = {
         let store = store.clone();
         let agent_id = agent_id.clone();
         tokio::spawn(async move {
@@ -1823,20 +1823,19 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
                 .await
         })
     };
+    let refused = tokio::time::timeout(Duration::from_secs(10), concurrent_creation)
+        .await
+        .expect("the path being removed is refused without waiting")
+        .unwrap()
+        .expect_err("the path being removed is refused");
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut concurrent_creation)
-            .await
-            .is_err(),
-        "creation must remain excluded until the unregistered removal settles"
+        matches!(&refused, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{refused:?}"
     );
     assert_ok(&client.rpc("storefixture.release", json!({})).await);
     let removed = client.response(removal).await;
     assert_ok(&removed);
     assert_eq!(removed["result"], json!({"removed":true}));
-    assert!(matches!(
-        concurrent_creation.await.unwrap(),
-        Err(AgentError::InvalidInput(_))
-    ));
     assert!(!held.exists());
     let refused = client
         .rpc(
@@ -1862,7 +1861,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         std::fs::read_to_string(&ready).unwrap(),
         workspace.to_string_lossy()
     );
-    let mut concurrent_creation = {
+    let concurrent_creation = {
         let store = store.clone();
         tokio::spawn(async move {
             store
@@ -1878,20 +1877,19 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
                 .await
         })
     };
+    let refused = tokio::time::timeout(Duration::from_secs(10), concurrent_creation)
+        .await
+        .expect("the path being removed is refused without waiting")
+        .unwrap()
+        .expect_err("the path being removed is refused");
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut concurrent_creation)
-            .await
-            .is_err(),
-        "creation must remain excluded until the foreign removal settles"
+        matches!(&refused, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{refused:?}"
     );
     assert_ok(&client.rpc("storefixture.release", json!({})).await);
     let removed = client.response(removal).await;
     assert_ok(&removed);
     assert_eq!(removed["result"], json!({"removed":true}));
-    assert!(matches!(
-        concurrent_creation.await.unwrap(),
-        Err(AgentError::InvalidInput(_))
-    ));
     assert!(!workspace.exists());
     assert!(store.worktree_directories().await.unwrap().is_empty());
     assert!(!store.has_records("late").await.unwrap());

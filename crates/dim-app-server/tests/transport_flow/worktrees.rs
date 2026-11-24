@@ -1393,9 +1393,9 @@ async fn unregistered_remove_refuses_a_git_entry_added_after_the_content_check()
     server.join().await.unwrap();
 }
 
-/// A removal that holds the ownership lock first deletes the directory, so a
-/// creation queued behind it fails its own cwd check instead of leaving a
-/// Session that points at a deleted workspace.
+/// A removal registers its path under the ownership lock before it deletes
+/// the directory, so a creation on that path is refused without waiting;
+/// after the removal the deleted workspace fails the creation's own check.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn session_creation_after_an_unregistered_removal_fails_its_workspace_check() {
     let work = Work::new();
@@ -1447,13 +1447,33 @@ async fn session_creation_after_an_unregistered_removal_fails_its_workspace_chec
                 .await
         }
     });
-    release.notify_one();
-    let error = creation
+    let refused = tokio::time::timeout(Duration::from_secs(10), creation)
         .await
+        .expect("the path being removed is refused without waiting")
         .unwrap()
-        .expect_err("the removed workspace fails the creation check");
-    assert!(error.to_string().contains("no longer exists"), "{error}");
+        .expect_err("the path being removed is refused");
+    assert!(
+        matches!(&refused, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{refused:?}"
+    );
+    release.notify_one();
     removal.await.unwrap().unwrap();
+    let after = store
+        .create_owned_session(
+            "fixture-session-after",
+            &SessionConfig {
+                cwd: task.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            "fixture-agent",
+            4,
+            None,
+            SessionOrigin::Client,
+            None,
+        )
+        .await
+        .expect_err("the removed workspace fails the creation check");
+    assert!(after.to_string().contains("no longer exists"), "{after}");
     assert!(!task.exists());
     assert!(!store.has_records("fixture-session").await.unwrap());
     server.shutdown();
@@ -1534,10 +1554,10 @@ async fn unregistered_remove_reports_not_found_when_another_removal_won() {
     server.join().await.unwrap();
 }
 
-/// Dropping the caller of an unregistered removal must not release the
-/// ownership lock while the deletion is still running.
+/// Dropping the caller of an unregistered removal stops neither the deletion
+/// nor the path's registration, which ends only when the deletion returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes() {
+async fn dropping_the_caller_keeps_the_removal_until_the_deletion_finishes() {
     let work = Work::new();
     let server = host(&work).await;
     let store = server.service::<SessionStore>().unwrap();
@@ -1549,11 +1569,13 @@ async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes(
     let agent_id = listed["result"][0]["agentId"].as_str().unwrap().to_owned();
     let reached = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
+    let finished = Arc::new(tokio::sync::Notify::new());
     let removal = tokio::spawn({
         let store = store.clone();
         let task = task.clone();
         let reached = reached.clone();
         let release = release.clone();
+        let finished = finished.clone();
         async move {
             store
                 .remove_unregistered_directory(task, move |path| {
@@ -1562,7 +1584,9 @@ async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes(
                         release.notified().await;
                         tokio::fs::remove_dir_all(&path)
                             .await
-                            .map_err(|error| AgentError::Storage(error.to_string()))
+                            .map_err(|error| AgentError::Storage(error.to_string()))?;
+                        finished.notify_one();
+                        Ok(())
                     })
                 })
                 .await
@@ -1593,12 +1617,19 @@ async fn dropping_the_caller_keeps_the_removal_lock_until_the_deletion_finishes(
                 .await
         }
     });
-    release.notify_one();
-    let error = creation
+    let refused = tokio::time::timeout(Duration::from_secs(10), creation)
         .await
+        .expect("the path being removed is refused after its caller is dropped")
         .unwrap()
-        .expect_err("the removed workspace fails the creation check");
-    assert!(error.to_string().contains("no longer exists"), "{error}");
+        .expect_err("the path being removed is refused");
+    assert!(
+        matches!(&refused, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{refused:?}"
+    );
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), finished.notified())
+        .await
+        .expect("the deletion finishes after its caller is gone");
     assert!(!task.exists());
     server.shutdown();
     server.join().await.unwrap();
@@ -2048,13 +2079,33 @@ async fn a_failed_removal_reports_the_error_and_keeps_no_registration() {
     server.join().await.unwrap();
 }
 
-/// Dropping the caller of a removal keeps the deletion running and the path
-/// refused until it ends.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn dropping_the_caller_keeps_the_removal_and_its_path_refused() {
+/// A stored configuration that names no workspace has nothing to compare, so
+/// a removal elsewhere does not refuse its fork.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fork_without_a_workspace_is_not_refused_by_an_unrelated_removal() {
     let work = Work::new();
     let server = host(&work).await;
     let store = server.service::<SessionStore>().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let listed = client.rpc("agent.list", json!({})).await;
+    assert_ok(&listed);
+    let agent_id = listed["result"][0]["agentId"].as_str().unwrap().to_owned();
+    let config = SessionConfig {
+        cwd: work.repo.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    store
+        .create_owned_session(
+            "fork-source",
+            &config,
+            &agent_id,
+            4,
+            None,
+            SessionOrigin::Client,
+            None,
+        )
+        .await
+        .unwrap();
     let task = unregistered_task(&work, "aaaaaa");
     std::fs::create_dir_all(task.join("repo")).unwrap();
     let reached = Arc::new(tokio::sync::Notify::new());
@@ -2081,8 +2132,68 @@ async fn dropping_the_caller_keeps_the_removal_and_its_path_refused() {
     tokio::time::timeout(Duration::from_secs(30), reached.notified())
         .await
         .expect("the removal reaches its deletion step");
+    store
+        .fork_session("fork-source", "fork-no-workspace", 0, r#"{"cwd":""}"#)
+        .await
+        .expect("a stored configuration without a workspace is not refused");
+    release.notify_one();
+    assert!(removal.await.unwrap().unwrap());
+    assert!(store.has_records("fork-no-workspace").await.unwrap());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
+/// Dropping the caller of a recorded removal keeps the spawned deletion
+/// running, the path refused and its record undeletable until it ends.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn dropping_the_caller_keeps_the_removal_and_its_path_refused() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let task = unregistered_task(&work, "aaaaaa");
+    std::fs::create_dir_all(task.join("repo")).unwrap();
+    let directory = WorktreeDirectory {
+        repository: work.repo.clone(),
+        root: task.clone(),
+    };
+    let reached = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let finished = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let directory = directory.clone();
+        let reached = reached.clone();
+        let release = release.clone();
+        let finished = finished.clone();
+        async move {
+            store
+                .remove_worktree(directory, move |path| {
+                    Box::pin(async move {
+                        reached.notify_one();
+                        release.notified().await;
+                        tokio::fs::remove_dir_all(&path)
+                            .await
+                            .map_err(|error| AgentError::Storage(error.to_string()))?;
+                        finished.notify_one();
+                        Ok(())
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), reached.notified())
+        .await
+        .expect("the removal reaches its deletion step");
     removal.abort();
     assert!(removal.await.unwrap_err().is_cancelled());
+    let record = store
+        .remove_worktree_directory(directory)
+        .await
+        .expect_err("the record of a path being removed cannot be deleted");
+    assert!(
+        matches!(&record, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{record:?}"
+    );
     let mut client = Client::new_version(&server, false, 3).await;
     let refused = tokio::time::timeout(
         Duration::from_secs(10),
@@ -2097,19 +2208,10 @@ async fn dropping_the_caller_keeps_the_removal_and_its_path_refused() {
         "{refused}"
     );
     release.notify_one();
-    let listed = tokio::time::timeout(Duration::from_secs(30), async {
-        loop {
-            if !task.exists() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await;
-    assert!(
-        listed.is_ok(),
-        "the deletion finishes after its caller is gone"
-    );
+    tokio::time::timeout(Duration::from_secs(10), finished.notified())
+        .await
+        .expect("the deletion finishes after its caller is gone");
+    assert!(!task.exists());
     server.shutdown();
     server.join().await.unwrap();
 }
