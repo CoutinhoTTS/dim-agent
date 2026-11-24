@@ -890,30 +890,42 @@ async fn pursuit_2_a_continue_conclusion_reads_the_latest_committed_cutoff() {
         "the queued input at {} commits after the conclusion's cutoff {cutoff}",
         queued.sequence
     );
-    let mut done = dim_goal::testing::hold_stage(
-        env.session_id(),
-        "main",
-        dim_goal::testing::Stage::Done,
-        conclusion.sequence,
-        Some(conclusion.sequence),
-    );
     cutoff_gate.release();
+
+    let stale = tokio::time::timeout(Duration::from_millis(750), async {
+        loop {
+            let writes = writes_with(&env, "main", &format!(r#"evaluation="{evaluation}""#)).await;
+            if let Some(block) = writes
+                .iter()
+                .find(|block| block.marker.contains(r#"kind="continuation""#))
+            {
+                return block.marker.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        stale.is_err(),
+        "the continue conclusion writes no continuation while a committed Queue is not folded: {stale:?}"
+    );
+
     queue_gate.release();
     env.dispatched("main", queued.sequence).await;
-    done.arrived().await;
-    let writes = writes_with(&env, "main", &format!(r#"evaluation="{evaluation}""#)).await;
+    let writes = env.settled("main").await;
     assert!(
-        !writes
-            .iter()
-            .any(|block| block.marker.contains(r#"kind="continuation""#)),
-        "the continue conclusion writes no continuation next to the Queue at {} that drives the next turn: {writes:#?}",
-        queued.sequence
+        !writes.iter().any(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"evaluation="{evaluation}""#))
+        }),
+        "the continue conclusion writes no continuation after the Queue folds: {writes:#?}"
     );
     assert!(
         env.pending_inputs("main").await.contains(&queued.id),
         "the Queue drives the next turn instead of the evaluated continuation"
     );
-    done.release();
     env.close().await;
 }
 
