@@ -6084,17 +6084,20 @@ fn settle_failed_turn(driven: &mut Driven, failed_turn: Option<String>) {
     }
 }
 
+/// The reason a run's own budget stop sends to every line: the requests that
+/// stop cut record it, so the export names the stop the same way.
+fn budget_stop_reason(stop: &str) -> String {
+    format!("budget: {stop}")
+}
+
 /// The run's first missing switch note, or `None` when the run is not scored
 /// on its notes: a run that already failed is not (Timeline branches §12.4).
 fn switch_note_failure(driven: &Driven, export: &str) -> Option<String> {
     if driven.error.is_some() {
         return None;
     }
-    switch_notes_unseen(
-        export,
-        &driven.switch_notes.expected,
-        driven.stop == "turns",
-    )
+    let cap_stop = (driven.stop == "turns").then(|| budget_stop_reason(driven.stop));
+    switch_notes_unseen(export, &driven.switch_notes.expected, cap_stop.as_deref())
 }
 
 /// Why a scored switch follow-up did not see its note, or `None` when every
@@ -6103,15 +6106,15 @@ fn switch_note_failure(driven: &Driven, export: &str) -> Option<String> {
 /// exact text (Timeline branches §12.4). An input no request consumed is not
 /// checked: no answer of that line is scored. A request a steer replaced
 /// before its model call is not checked either: the note travels in the
-/// request that replaces it. A run that stopped on its turn budget
-/// (`stopped_on_turns`) ended the request before its call, so its note is not
-/// reported as unseen (issue #2140); every other request that never reached
-/// the model is, because no request of the line carried the text being
-/// evaluated.
+/// request that replaces it in the same turn. Nor is a request the run's own
+/// turn-budget stop ended, whose reason `cap_stop` carries: that stop, not the
+/// note, kept it from the model (issue #2140). Every other request that never
+/// reached the model is reported, because no request of the line carried the
+/// text being evaluated.
 fn switch_notes_unseen(
     export: &str,
     notes: &[SwitchNote],
-    stopped_on_turns: bool,
+    cap_stop: Option<&str>,
 ) -> Option<String> {
     /// One `input/message` of the export, the line it is on, and the note it
     /// carries when it is one.
@@ -6119,11 +6122,20 @@ fn switch_notes_unseen(
         branch: String,
         note: Option<NoteSeen>,
     }
+    /// One `step/model-start`: the request it began, and its line and turn.
+    struct Start {
+        branch: String,
+        turn: String,
+        sequence: u64,
+        request: String,
+    }
     let mut messages: BTreeMap<String, Message> = BTreeMap::new();
     let mut consumed: Vec<(String, u64, String)> = Vec::new();
-    let mut starts: Vec<(String, u64, String)> = Vec::new();
+    let mut starts: Vec<Start> = Vec::new();
     let mut calls: BTreeMap<(String, String), Value> = BTreeMap::new();
     let mut replaced: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut cut: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut interrupted: Vec<(String, u64)> = Vec::new();
     for line in export.lines() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -6152,7 +6164,15 @@ fn switch_notes_unseen(
             }
             (Some("step"), Some("model-start")) => {
                 if let Some(request) = event["data"]["request_id"].as_str() {
-                    starts.push((branch, sequence, request.to_owned()));
+                    starts.push(Start {
+                        turn: event["data"]["turn_id"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                        branch,
+                        sequence,
+                        request: request.to_owned(),
+                    });
                 }
             }
             (Some("model"), Some("call")) => {
@@ -6164,14 +6184,36 @@ fn switch_notes_unseen(
                 }
             }
             (Some("step"), Some("model-output-end")) => {
+                let reason = event["data"]["reason"].as_str().unwrap_or_default();
                 if event["data"]["status"] == "cancelled"
-                    && event["data"]["reason"] == "replaced by steer"
                     && let Some(request) = event["data"]["request_id"].as_str()
                 {
-                    replaced.insert((branch, request.to_owned()));
+                    if reason == "replaced by steer" {
+                        replaced.insert((branch, request.to_owned()));
+                    } else if Some(reason) == cap_stop {
+                        cut.insert((branch, request.to_owned()));
+                    }
                 }
             }
+            (Some("stop"), Some("interrupt"))
+                if cap_stop.is_some() && event["data"]["reason"].as_str() == cap_stop =>
+            {
+                interrupted.push((branch, sequence));
+            }
             _ => {}
+        }
+    }
+    // The requests the run's own turn-budget stop ended: the one each of its
+    // interrupts found in flight on its line, and one whose own end names that
+    // stop, which the Loop writes when the interrupt lands before the
+    // request's `step/model-start`.
+    for (branch, at) in &interrupted {
+        if let Some(in_flight) = starts
+            .iter()
+            .filter(|start| &start.branch == branch && start.sequence < *at)
+            .max_by_key(|start| start.sequence)
+        {
+            cut.insert((in_flight.branch.clone(), in_flight.request.clone()));
         }
     }
     'notes: for note in notes {
@@ -6189,35 +6231,44 @@ fn switch_notes_unseen(
         else {
             continue;
         };
-        let mut requests: Vec<&(String, u64, String)> = starts
+        let mut requests: Vec<&Start> = starts
             .iter()
-            .filter(|(branch, sequence, _)| branch == &message.branch && *sequence > consumed_at)
+            .filter(|start| start.branch == message.branch && start.sequence > consumed_at)
             .collect();
-        requests.sort_by_key(|(_, sequence, _)| *sequence);
-        if requests.is_empty() {
+        requests.sort_by_key(|start| start.sequence);
+        let Some(first) = requests.first() else {
             return Some(format!(
                 "line {} consumed the switch input {} but started no request after it",
                 note.line, note.input
             ));
-        }
+        };
+        // A steer replaces a request inside the turn that began it, so the
+        // requests that can answer for this note are that turn's own: a later
+        // turn's request carries the note as context and cannot stand in for a
+        // request that never reached the model.
+        let turn = first.turn.clone();
+        requests.retain(|start| start.turn == turn);
         // A steer can replace the request a line began before it reaches the
         // model; the note then travels in the request that replaces it, so a
-        // replaced request is passed over (issue #2140). Any other request
-        // without a model call ended before the note reached the model.
+        // replaced request is passed over (issue #2140). So is a request the
+        // run's turn budget stopped: the cap ended it, not the note. Any other
+        // request without a model call ended before the note reached the model.
         let mut call = None;
-        for (branch, _, request) in &requests {
-            if let Some(found) = calls.get(&((*branch).clone(), (*request).clone())) {
+        for start in &requests {
+            let key = (start.branch.clone(), start.request.clone());
+            if let Some(found) = calls.get(&key) {
                 call = Some(found);
                 break;
             }
-            if !replaced.contains(&((*branch).clone(), (*request).clone())) {
-                break;
+            if replaced.contains(&key) {
+                continue;
             }
-        }
-        let Some(call) = call else {
-            if stopped_on_turns {
+            if cut.contains(&key) {
                 continue 'notes;
             }
+            break;
+        }
+        let Some(call) = call else {
             return Some(format!(
                 "line {} consumed the switch input {} but its request never reached the model",
                 note.line, note.input
@@ -6822,13 +6873,14 @@ async fn drive(
         }
     }
     if driven.stop == "turns" || driven.stop == "seconds" {
+        let reason = budget_stop_reason(driven.stop);
         let stop = async {
             for branch in &branches {
                 let _ = client
                     .rpc(
                         "session.stop",
                         json!({"sessionId": session, "branchId": branch,
-                               "reason": format!("budget: {}", driven.stop)}),
+                               "reason": reason.as_str()}),
                     )
                     .await;
             }
@@ -9832,10 +9884,10 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            switch_notes_unseen(&export(note), &notes, false).is_none(),
+            switch_notes_unseen(&export(note), &notes, None).is_none(),
             "the request carries the note"
         );
-        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, false)
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
             .expect("the request without the note is unseen");
         assert!(unseen.contains("line 2"), "{unseen}");
     }
@@ -9886,10 +9938,10 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            switch_notes_unseen(&export(note), &notes, false).is_none(),
+            switch_notes_unseen(&export(note), &notes, None).is_none(),
             "the replacement request carries the note"
         );
-        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, false)
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
             .expect("the request without the note is still unseen");
         assert!(unseen.contains("does not carry the note"), "{unseen}");
     }
@@ -9939,17 +9991,17 @@ mod tests {
             default: true,
             other: "main".into(),
         }];
-        let unseen = switch_notes_unseen(&export(true), &notes, false)
+        let unseen = switch_notes_unseen(&export(true), &notes, None)
             .expect("the closed request never reached the model");
         assert!(unseen.contains("never reached the model"), "{unseen}");
-        let unseen = switch_notes_unseen(&export(false), &notes, false)
+        let unseen = switch_notes_unseen(&export(false), &notes, None)
             .expect("no request started after the consumption");
         assert!(unseen.contains("started no request after it"), "{unseen}");
     }
 
     /// A run that stopped on its turn budget ended the request before its
-    /// model call, so its note is not reported as unseen; the same export with
-    /// any other stop is (issue #2140).
+    /// model call, so the note the missing call would have answered is not
+    /// reported; the same export with any other stop is (issue #2140).
     #[test]
     fn a_turn_budget_stop_does_not_report_a_note_its_stop_ended() {
         let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
@@ -9966,7 +10018,14 @@ mod tests {
                              "data": {"input_id": "f1"}}}),
             json!({"kind": "event", "branch_id": "2",
                    "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
-                             "data": {"request_id": "r1"}}}),
+                             "data": {"turn_id": "t1", "request_id": "r1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "i1", "sequence": 5, "type": "stop", "name": "interrupt",
+                             "data": {"reason": "budget: turns", "scope": "branch"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "o1", "sequence": 6, "type": "step", "name": "model-output-end",
+                             "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                      "reason": "budget: turns"}}}),
         ]
         .iter()
         .map(|record| serde_json::to_string(record).unwrap())
@@ -9979,12 +10038,133 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            switch_notes_unseen(&export, &notes, true).is_none(),
+            switch_notes_unseen(&export, &notes, Some("budget: turns")).is_none(),
             "the run's turn budget ended the request before its model call"
         );
-        let unseen = switch_notes_unseen(&export, &notes, false)
+        let unseen = switch_notes_unseen(&export, &notes, None)
             .expect("any other stop still reports the note");
         assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A turn-budget stop exempts the request it stopped and nothing else: a
+    /// follow-up whose request never reached the model for another reason is
+    /// still reported when a later request of its line meets the cap
+    /// (issue #2140).
+    #[test]
+    fn a_turn_budget_stop_keeps_a_missing_follow_up_the_cap_did_not_stop() {
+        let note = |line: &str| {
+            format!(
+                "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>"
+            )
+        };
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let carried =
+            |text: &str| json!({"blocks": [{"type": "raw", "key": "branch:line", "text": text}]});
+        let export = [
+            // The cap found line 2's follow-up in flight, so that note is not
+            // reported.
+            event("2", 1, "n2", ["input", "message"], carried(&note("2"))),
+            event("2", 2, "f2", ["input", "message"], json!({})),
+            event(
+                "2",
+                3,
+                "c2",
+                ["input", "consumed"],
+                json!({"input_id": "f2"}),
+            ),
+            event(
+                "2",
+                4,
+                "s2",
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r1"}),
+            ),
+            event(
+                "2",
+                5,
+                "i2",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "branch"}),
+            ),
+            // Line 3's follow-up ended before the model for another reason,
+            // and the request the cap stopped on that line is a later one.
+            event("3", 10, "n3", ["input", "message"], carried(&note("3"))),
+            event("3", 11, "f3", ["input", "message"], json!({})),
+            event(
+                "3",
+                12,
+                "c3",
+                ["input", "consumed"],
+                json!({"input_id": "f3"}),
+            ),
+            event(
+                "3",
+                13,
+                "s3",
+                ["step", "model-start"],
+                json!({"turn_id": "t3", "request_id": "r2"}),
+            ),
+            event(
+                "3",
+                14,
+                "o3",
+                ["step", "model-output-end"],
+                json!({"turn_id": "t3", "request_id": "r2", "status": "cancelled",
+                       "reason": "timeline closed"}),
+            ),
+            event(
+                "3",
+                20,
+                "s4",
+                ["step", "model-start"],
+                json!({"turn_id": "t4", "request_id": "r3"}),
+            ),
+            event(
+                "3",
+                21,
+                "m4",
+                ["model", "call"],
+                json!({"request_id": "r3",
+                       "request": {"messages": [{"role": "user",
+                                                  "content": "the follow-up was answered"}]}}),
+            ),
+            event(
+                "3",
+                22,
+                "i3",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "branch"}),
+            ),
+        ]
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let notes = [
+            SwitchNote {
+                line: "2".into(),
+                input: "f2".into(),
+                default: true,
+                other: "main".into(),
+            },
+            SwitchNote {
+                line: "3".into(),
+                input: "f3".into(),
+                default: true,
+                other: "main".into(),
+            },
+        ];
+        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"));
+        assert!(
+            unseen.as_deref().is_some_and(
+                |error| error.contains("line 3") && error.contains("never reached the model")
+            ),
+            "the follow-up the cap did not stop is still missing: {unseen:?}"
+        );
     }
 
     /// A turn-budget stop does not hide a request that reached the model
