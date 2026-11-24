@@ -1447,6 +1447,14 @@ impl Owner {
                 &self.texts,
             );
             let business = recovery::BusinessState::new(operation, objective, status, judge, None);
+            #[cfg(feature = "testing")]
+            crate::testing::stage_held(
+                &self.session_id,
+                &self.branch_id,
+                crate::testing::Stage::Append,
+                after,
+            )
+            .await;
             self.append_business(vec![input], business, None)?;
             let mut state = self.state.lock().unwrap();
             state.written.insert(after);

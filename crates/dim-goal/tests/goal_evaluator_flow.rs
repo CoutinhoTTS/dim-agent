@@ -731,6 +731,77 @@ async fn pursuit_5_a_queue_committed_before_the_evaluated_pause_holds_it() {
     env.close().await;
 }
 
+/// An evaluator's end that folds after the pause that settled it was abandoned
+/// does not pause the goal: the evaluation was ended for that pause, not by its
+/// own failure, and the Queue's turn decides (#2119, Pursuit §4.1, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pursuit_5_an_abandoned_pause_does_not_fail_an_in_flight_evaluation() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // A Queue drives a turn on the goal's branch, and its end decides the
+    // limit pause. The pause's record writer is held where it settled the
+    // decisions: the settlement ended the in-flight evaluator.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    let end = env.turn_ids("main", &[&queued.id]);
+    assert_eq!(
+        held.arrived().await,
+        end.sequence,
+        "the pause's record writer answers the turn end at {}",
+        end.sequence
+    );
+
+    // Another driving input commits in the settlement window: the pause is
+    // abandoned, and the evaluator's end folds after it.
+    let second = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    env.dispatched("main", second.sequence).await;
+    held.release();
+    let outside = env.emit(
+        "main",
+        EventKind::BranchEnded(BranchEndedData {
+            branch: create.branch.clone(),
+            end_event: 0,
+            source: BranchSource::Host {
+                operation_id: "user".into(),
+            },
+            ancestor: None,
+        }),
+    );
+    env.dispatched("main", outside.sequence).await;
+
+    // The Queue's own turn end decides the pause the abandoned record left
+    // open; the evaluator's end states nothing over it.
+    let next = env.turn_ids("main", &[&second.id]);
+    let pause = env.wait_for("main", r#"kind="state" status="paused""#).await;
+    assert_eq!(
+        pause.text,
+        texts::evaluated_pause(
+            "main",
+            "ship it",
+            "limit",
+            "the automatic continuation limit was reached",
+            next.sequence
+        ),
+        "the evaluator's end states no pause over the Queue at {}",
+        second.sequence
+    );
+    env.close().await;
+}
+
 #[tokio::test]
 async fn pursuit_13_e3_an_outside_end_before_the_conclusion_fails_the_evaluation() {
     let env = Env::start().await;

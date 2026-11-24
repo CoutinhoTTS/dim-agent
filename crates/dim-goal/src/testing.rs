@@ -107,6 +107,8 @@ pub enum Stage {
     /// After the state record writer took the write guard and settled the
     /// decisions, before it composes the record it answers `after` with.
     Record,
+    /// After a state record read the fold and before its append commits.
+    Append,
 }
 
 type StageHold = (

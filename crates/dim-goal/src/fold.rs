@@ -1122,7 +1122,7 @@ pub fn decide_evaluated_continuation(fold: &Fold, limit: Option<u64>) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{Conclusion, Fold, conclusion_of};
+    use super::{Conclusion, Fold, Source, TurnStatus, conclusion_of};
     use crate::text;
     use dim_agent_types::InputBlock;
 
@@ -1166,6 +1166,35 @@ mod tests {
         assert_eq!(report("done", "已完成并验证").result_text(), "证");
         assert_eq!(report("done", "😀abcd").result_text(), "d");
         assert_eq!(report("blocked", "完成").result_text(), "");
+    }
+
+    /// A turn end states a pause only as [`decide_turn_end`](super::decide_turn_end)
+    /// decides one: `completed`, with the turn closed and no driving input.
+    #[test]
+    fn only_a_completed_turn_end_states_a_pause() {
+        let fold = Fold {
+            objective: Some("ship it".into()),
+            state: text::State::Active,
+            ..Fold::default()
+        };
+        let mut cancelled = fold.clone();
+        cancelled.apply_source(
+            1,
+            Source::TurnEnd {
+                turn_id: "cancelled",
+                status: TurnStatus::Cancelled,
+            },
+        );
+        assert!(!cancelled.pauses_at_end(1));
+        let mut completed = fold;
+        completed.apply_source(
+            2,
+            Source::TurnEnd {
+                turn_id: "completed",
+                status: TurnStatus::Completed,
+            },
+        );
+        assert!(completed.pauses_at_end(2));
     }
 
     /// R1: each free-text field of a state record sits in its own element with

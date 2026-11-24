@@ -833,6 +833,135 @@ async fn a_queue_committed_before_the_pause_record_holds_the_pause() {
     env.close().await;
 }
 
+/// The pause record's append is as atomic as its decision: a Queue that
+/// commits after the writer read the fold but before the append commits makes
+/// the append write nothing, and the Queue's own turn end decides the pause
+/// (#2119, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queue_committed_before_the_pause_append_holds_the_pause() {
+    let env = Env::start_gated().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    let _set_end = env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    // The limit is reached, so this turn end decides a pause. Its record
+    // writer is held after it read the fold and before its append commits.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Append,
+        first.sequence,
+        None,
+    );
+    let second_end = env.tool_turn("main", &[&first]);
+    assert_eq!(
+        held.arrived().await,
+        second_end.sequence,
+        "the pause's record writer answers the turn end at {}",
+        second_end.sequence
+    );
+
+    // A driving input commits in that window. The append commits only while
+    // the head it composed from stands, so it writes nothing.
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    assert!(
+        queued.sequence > second_end.sequence,
+        "the Queue at {} commits after the turn end at {}",
+        queued.sequence,
+        second_end.sequence
+    );
+    env.dispatched("main", queued.sequence).await;
+    held.release();
+
+    let end = env.turn_ids("main", &[&queued.id]);
+    let pause = env.wait_for("main", r#"reason="limit""#).await;
+    assert_eq!(
+        pause.text,
+        texts::automatic_pause(
+            "main",
+            "make the tests pass",
+            "limit",
+            "the automatic continuation limit was reached",
+            end.sequence
+        ),
+        "the Queue's own turn end decides the pause at {}",
+        end.sequence
+    );
+    env.close().await;
+}
+
+/// A state record whose append fails is reported to its caller: the writer
+/// does not resume the decisions it settled, so the same pause is not decided
+/// again without a new fact (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_state_record_takes_no_second_decision() {
+    let env = Env::start_gated().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    let _set_end = env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    // The decision and any second one it may take are held where they read
+    // the fold, so the case sees each of them.
+    let mut decision = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        first.sequence,
+        None,
+    );
+    let mut second = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        first.sequence,
+        None,
+    );
+
+    // The pause's append fails: its published status no longer matches the
+    // state its writer states, which the writer checks under the commit.
+    let failure = env.probe.fail_next_state();
+    let second_end = env.tool_turn("main", &[&first]);
+    assert_eq!(
+        decision.arrived().await,
+        second_end.sequence,
+        "the turn end at {} decides",
+        second_end.sequence
+    );
+    decision.release();
+    failure.await.expect("the writer refuses the pause");
+    assert_eq!(
+        env.probe.failed_states(),
+        1,
+        "the writer's own check refuses the pause at {}",
+        second_end.sequence
+    );
+    assert!(
+        !env.writes("main").await.iter().any(|block| block
+            .marker
+            .contains(&format!(r#"after="{}""#, second_end.sequence))),
+        "a refused record writes nothing"
+    );
+
+    // The failed decision is not taken again while no fact moves the fold.
+    let retried =
+        tokio::time::timeout(std::time::Duration::from_millis(750), second.arrived()).await;
+    assert!(
+        retried.is_err(),
+        "a failed state record takes no second decision: it answered {:?}",
+        retried.ok()
+    );
+    env.close().await;
+}
+
 /// The closing pause is stated at the fold, not at the snapshot the close
 /// started from: a change that committed before it and is still waiting for the
 /// fold wins, and no record is written while the fold is behind (#2119).
