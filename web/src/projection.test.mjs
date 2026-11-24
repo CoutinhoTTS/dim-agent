@@ -118,6 +118,25 @@ test("a thought that continues after a tool call shows its new segment", () => {
   assert.deepEqual(thoughts, [["weigh", false], [" the options", true]])
 })
 
+test("a history read's counts cover the rows of a request that began before its window", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "thinking", requestId: "r1", delta: "options" }))
+  projection.apply(event(3, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "exec" }))
+  projection.apply(event(4, { kind: "text", requestId: "r1", delta: "file" }))
+  projection.apply(event(5, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} }))
+  projection.activeOutput({ requestId: "r1", textCharacters: 14, thinkingCharacters: 12 })
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " and run it", textOffset: 14, thinking: " again", thinkingOffset: 12, thinkingStartedAt: 1_006 })
+
+  const rows = projection.rows.map((row) => [row.kind, row.text, row.streaming])
+  assert.deepEqual(rows, [
+    ["thinking", "options", false],
+    ["assistant", "file", false],
+    ["tool", undefined, undefined],
+    ["thinking", " again", true],
+    ["assistant", " and run it", true],
+  ])
+})
+
 test("branch messages, ends and the last turn end become rows", () => {
   const projection = new Projection()
   projection.apply(event(1, {
