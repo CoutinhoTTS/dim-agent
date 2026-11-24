@@ -16,8 +16,8 @@ use crate::{
     host::{HostError, SessionFiles},
     host_platform::{
         HostPlatform, HostPlatformError, OutputRequest, ShellCommandStart, ShellEdition,
-        ShellEvent, ShellJobStart, ShellRequest, ShellStatus, ShellWrite, TaskRequest, WaitReply,
-        WaitRequest, WaitStatus,
+        ShellEvent, ShellEventRequest, ShellJobStart, ShellRequest, ShellStatus, ShellWrite,
+        TaskRequest, WaitReply, WaitRequest, WaitStatus,
     },
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -332,8 +332,6 @@ impl ShellSession {
                 task_id: task_id.clone(),
                 cursor: Some(delivered as u64),
                 limit: Some(OUTPUT_LIMIT as u64),
-                wait_ms: None,
-                event_cursor: None,
             })
             .await
             .ok();
@@ -498,42 +496,34 @@ impl ShellSession {
                     tokio::select! {
                         biased;
                         _ = lifecycle.cancelled() => break,
-                        page = this.host.output(OutputRequest {
+                        page = this.host.shell_events(ShellEventRequest {
                             task_id: task_id.clone(),
-                            cursor: None,
-                            limit: Some(64 * 1024),
-                            wait_ms: Some(100),
-                            event_cursor: Some(event_cursor),
+                            cursor: event_cursor,
+                            wait_ms: 100,
+                            limit: 64 * 1024,
                         }) => if let Ok(page) = page {
                             for event in page.events {
-                                event_cursor = event.cursor() + 1;
                                 this.handle_event(event).await;
                             }
-                            if let Some(next) = page.next_event_cursor {
-                                event_cursor = next;
-                            }
+                            event_cursor = page.next_cursor;
                         },
                         result = &mut wait => {
                             let end = result.ok();
                             loop {
-                                let page = this.host.output(OutputRequest {
+                                let page = this.host.shell_events(ShellEventRequest {
                                     task_id: task_id.clone(),
-                                    cursor: None,
-                                    limit: Some(64 * 1024),
-                                    wait_ms: Some(0),
-                                    event_cursor: Some(event_cursor),
+                                    cursor: event_cursor,
+                                    wait_ms: 0,
+                                    limit: 64 * 1024,
                                 }).await;
                                 let Ok(page) = page else { break };
                                 if page.events.is_empty() {
                                     break;
                                 }
                                 for event in page.events {
-                                    event_cursor = event.cursor() + 1;
-                                    this.handle_event(event).await;
+                                        this.handle_event(event).await;
                                 }
-                                if let Some(next) = page.next_event_cursor {
-                                    event_cursor = next;
-                                }
+                                event_cursor = page.next_cursor;
                             }
                             this.handle_shell_exit(generation, end).await;
                             break;
@@ -744,8 +734,6 @@ impl ShellSession {
                     task_id: occ.task_id.clone(),
                     cursor: None,
                     limit: Some(OUTPUT_LIMIT as u64),
-                    wait_ms: None,
-                    event_cursor: None,
                 })
                 .await
                 .ok();
@@ -945,8 +933,6 @@ impl ShellSession {
                 task_id: command_id.to_owned(),
                 cursor: None,
                 limit: Some(OUTPUT_LIMIT as u64),
-                wait_ms: None,
-                event_cursor: None,
             })
             .await
         {
@@ -1023,8 +1009,6 @@ impl ShellSession {
                             task_id: command_id.to_owned(),
                             cursor: None,
                             limit: Some(OUTPUT_LIMIT as u64),
-                            wait_ms: None,
-                            event_cursor: None,
                         })
                         .await
                     {
@@ -1118,8 +1102,6 @@ impl ShellSession {
                 task_id: command_id.to_owned(),
                 cursor: None,
                 limit: Some(OUTPUT_LIMIT as u64),
-                wait_ms: None,
-                event_cursor: None,
             })
             .await
             .ok();
@@ -1434,8 +1416,6 @@ impl ShellSession {
                     task_id: task_id.to_owned(),
                     cursor: None,
                     limit: Some(OUTPUT_LIMIT as u64),
-                    wait_ms: None,
-                    event_cursor: None,
                 })
                 .await
                 .ok();

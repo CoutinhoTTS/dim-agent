@@ -262,7 +262,7 @@ export type {
   AgentErrorThrown, BranchLifecycle, Dispatcher, PartRegistry, PartScope, ProcessActivity, Services, SessionFault, SessionIdentity, SessionLifecycle,
   TimelineIdentity, TreeCommands, PermissionState, SessionPermissions, SessionsErrorThrown,
   HostPlatform, HostInfo, ShellStatus, SandboxBackend, ExecShellRuntime, Os, ShellEdition,
-  ShellSource, OutputEncoding, OutputPage, OutputTail, OutputPathReply, ShellEvent, ShellState,
+  ShellSource, OutputEncoding, OutputPage, OutputTail, OutputPathReply,
   SpawnRequest, SpawnReply, WaitRequest, WaitReply, TaskRequest, OutputRequest, HostPlatformError,
   ShellRequest, ShellWrite, ShellCommandStart, ShellJobStart, ShellResize, OutputLimits,
   SpawnWithStdinRequest, SpawnWithStdinReply, ConfinedRequest, ConfinedReply, ChildPathRequest,

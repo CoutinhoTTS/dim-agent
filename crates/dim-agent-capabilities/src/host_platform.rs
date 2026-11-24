@@ -437,19 +437,11 @@ pub struct OutputPageReply {
     pub retained_from: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reset: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub events: Vec<ShellEvent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_event_cursor: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub event_retained_from: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub state: Option<ShellState>,
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ShellEvent {
+pub(crate) enum ShellEvent {
     Output { cursor: u64, text: String },
     Marker { cursor: u64, line: String },
 }
@@ -464,7 +456,7 @@ impl ShellEvent {
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ShellState {
+pub(crate) struct ShellState {
     pub busy: bool,
     pub ready: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -644,10 +636,25 @@ pub struct OutputRequest {
     pub task_id: String,
     pub cursor: Option<u64>,
     pub limit: Option<u64>,
-    #[serde(default)]
-    pub wait_ms: Option<u64>,
-    #[serde(default)]
-    pub event_cursor: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ShellEventRequest {
+    pub task_id: String,
+    pub cursor: u64,
+    pub wait_ms: u64,
+    pub limit: usize,
+}
+
+pub(crate) struct ShellEventPage {
+    pub events: Vec<ShellEvent>,
+    pub next_cursor: u64,
+    #[allow(
+        dead_code,
+        reason = "step 4a keeps the private ShellSession state read"
+    )]
+    pub state: ShellState,
 }
 
 #[derive(serde::Serialize)]
@@ -1541,26 +1548,9 @@ impl HostPlatform {
         }
         let limit = limit.min(4 * 1024 * 1024) as usize;
         if let Some(shell) = self.shell_task(&request.task_id) {
-            if let Some(cursor) = request.event_cursor {
-                let page = shell.events_page(cursor, request.wait_ms, limit).await;
-                return Ok(OutputPageReply {
-                    text: String::new(),
-                    bytes: 0,
-                    next_cursor: None,
-                    truncated: false,
-                    retained_from: page.retained_from,
-                    reset: page.reset.then_some(true),
-                    events: page.events,
-                    next_event_cursor: Some(page.next_cursor),
-                    event_retained_from: Some(page.retained_from),
-                    state: Some(page.state),
-                });
-            }
-            let mut page = shell
+            return shell
                 .page(request.cursor, limit)
-                .map_err(HostPlatformError::from)?;
-            page.state = Some(shell.state());
-            return Ok(page);
+                .map_err(HostPlatformError::from);
         }
         if let Some(command) = self.shell_command(&request.task_id) {
             return command
@@ -1578,10 +1568,6 @@ impl HostPlatform {
                 truncated: page.truncated,
                 retained_from: 0,
                 reset: None,
-                events: Vec::new(),
-                next_event_cursor: None,
-                event_retained_from: None,
-                state: None,
             });
         }
         let task = self.command_task(&request.task_id)?;
@@ -1596,10 +1582,25 @@ impl HostPlatform {
             truncated: page.truncated,
             retained_from: 0,
             reset: None,
-            events: Vec::new(),
-            next_event_cursor: None,
-            event_retained_from: None,
-            state: None,
+        })
+    }
+
+    /// The private ShellSession transport: the lossless owner event page.
+    /// Not a public data-face operation and never exposed through TypeScript.
+    pub(crate) async fn shell_events(
+        &self,
+        request: ShellEventRequest,
+    ) -> Result<ShellEventPage, HostPlatformError> {
+        let shell = self
+            .shell_task(&request.task_id)
+            .ok_or(HostPlatformError::TaskUnknown)?;
+        let page = shell
+            .events_page(request.cursor, Some(request.wait_ms), request.limit)
+            .await;
+        Ok(ShellEventPage {
+            events: page.events,
+            next_cursor: page.next_cursor,
+            state: page.state,
         })
     }
 
@@ -3778,10 +3779,6 @@ pub(crate) mod shell {
                 truncated: state.omitted > 0,
                 retained_from: 0,
                 reset: None,
-                events: Vec::new(),
-                next_event_cursor: None,
-                event_retained_from: None,
-                state: None,
             })
         }
     }
@@ -3992,7 +3989,6 @@ pub(crate) mod shell {
             EventPage {
                 events,
                 next_cursor,
-                retained_from: self.base,
                 state: self.state.clone(),
                 reset,
             }
@@ -4002,7 +3998,6 @@ pub(crate) mod shell {
     pub(crate) struct EventPage {
         pub(crate) events: Vec<super::ShellEvent>,
         pub(crate) next_cursor: u64,
-        pub(crate) retained_from: u64,
         pub(crate) state: super::ShellState,
         pub(crate) reset: bool,
     }
@@ -4377,10 +4372,6 @@ pub(crate) mod shell {
             }
         }
 
-        pub(crate) fn state(&self) -> super::ShellState {
-            self.events.lock().unwrap().state.clone()
-        }
-
         pub(crate) async fn events_page(
             &self,
             cursor: u64,
@@ -4440,10 +4431,6 @@ pub(crate) mod shell {
                     truncated: true,
                     retained_from: first,
                     reset: Some(true),
-                    events: Vec::new(),
-                    next_event_cursor: None,
-                    event_retained_from: None,
-                    state: None,
                 });
             }
             let start = (cursor - first).min(capture.text.len() as u64) as usize;
@@ -4461,10 +4448,6 @@ pub(crate) mod shell {
                 truncated: page.truncated,
                 retained_from: first,
                 reset: None,
-                events: Vec::new(),
-                next_event_cursor: None,
-                event_retained_from: None,
-                state: None,
             })
         }
         pub(crate) fn tail(&self) -> crate::workspace_tools::exec::OutputTail {

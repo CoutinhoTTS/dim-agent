@@ -31,10 +31,10 @@ shell and answers `task_running` otherwise; `kill` is the explicit stop. Output 
 `removeOutputDirectory` accepts only a persistent-shell output directory below the canonical
 `execRoot` and refuses traversal and symlink components.
 
-`output` serves either a text page or, with `eventCursor`, ordered `ShellEvent` lines
-(`output` or full `marker`) and `ShellState`; `waitMs` bounds an empty read, `limit` bounds both
-the text and event page. A shell command capture is read by its command id and records the bounded
-output, tail and task log. The command/task and shell settlement rules are in
+`output` serves a text page. Public reads are terminal records plus `output`, `tail`, `wait` and
+`retainOutput`; there is no public event cursor or shell state. The owner line queue is private to
+`ShellSession`. A shell command capture is read by its command id and records the bounded output,
+tail and task log. The command/task and shell settlement rules are in
 [resource faces §3.2](../../../design/resource-faces.md#32-settlement-and-retained-task-records).
 
 ## Events and lifetime

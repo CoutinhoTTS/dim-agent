@@ -121,8 +121,8 @@ keeps the task record and writes the facts. `shell` writes its bounded capture t
 real for both task and file reads. `ShellSession` creates the command id and marker pair, sends them
 with `write`, and keeps only the queue, timeout and occupancy policy; foreground output, the exit
 code and the task log are read back by command id through `output`, `wait` and `settle`. The owner
-records the stream as ordered `ShellEvent` lines (`output` or full `marker`) with a cursor and `ShellState`, and `output` takes
-`eventCursor` and `waitMs` for that read. Background shell jobs are registered in the owner under
+keeps its line queue private: public reads are terminal records plus `output`, `tail`, `wait` and
+`retainOutput`; no public event cursor or shell state exists. Background shell jobs are registered in the owner under
 the branch task id; the control side never sees a host pid. `wait` takes the existing cancellation callback; a timeout stops the wait and answers `running`,
 and neither a timeout nor a cancelled call kills the task. A command's own `spawn.timeoutMs` still
 terminates it at that deadline; stopping a task is an explicit `kill`. `spawnConfined` success means the helper stayed within its limits; an output limit is an
@@ -741,9 +741,10 @@ No other requirement is raised:
 3. **`owned` on the control side.** The fact is a row lookup, so it is answered by `sessionFiles`
    with the node's resolved path rather than on the node. If review wants it computed with the
    other three, the rows would have to move, which is #1298's kind of decision.
-4. **Where the persistent-shell protocol runs.** The owner records the command capture, markers
-   and `ShellState`; the control side keeps the queue, timeout and occupancy policy and reads the
-   command by id. #1295 wires the PTY and the foreground/occupancy path.
+4. **Where the persistent-shell protocol runs.** The owner records the command capture and
+   markers; the control side keeps the queue, timeout and occupancy policy and reads the command
+   by id. The owner line queue is private to `ShellSession`, not a public contract. #1295 wires the
+   PTY and the foreground/occupancy path.
 5. **Result text ownership.** File operations return their tool result from the provider because
    the text is the file operation's own (line numbers, previews, image blocks). A command returns
    records, and the control side composes the tool result, because the task identity, the

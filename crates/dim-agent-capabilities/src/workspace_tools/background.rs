@@ -587,8 +587,6 @@ impl BackgroundExec {
                     task_id: host_task_id,
                     cursor: Some(cursor),
                     limit: Some(limit as u64),
-                    wait_ms: None,
-                    event_cursor: None,
                 })
                 .await
             {

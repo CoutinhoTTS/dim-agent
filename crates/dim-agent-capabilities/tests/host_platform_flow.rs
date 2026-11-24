@@ -1228,6 +1228,30 @@ async fn the_host_platform_service_answers_info() {
 }
 
 #[test]
+fn public_output_has_no_event_fields() {
+    assert!(
+        serde_json::from_value::<OutputRequest>(serde_json::json!({
+            "taskId": "task",
+            "eventCursor": 0
+        }))
+        .is_err()
+    );
+    let reply = serde_json::to_value(OutputPageReply {
+        text: "done".into(),
+        bytes: 4,
+        next_cursor: None,
+        truncated: false,
+        retained_from: 0,
+        reset: None,
+    })
+    .unwrap();
+    assert!(reply.get("events").is_none());
+    assert!(reply.get("nextEventCursor").is_none());
+    assert!(reply.get("eventRetainedFrom").is_none());
+    assert!(reply.get("state").is_none());
+}
+
+#[test]
 fn task_failure_serializes_with_its_code() {
     assert_eq!(
         serde_json::to_value(TaskFailure::OutputWriteFailed {
@@ -1380,8 +1404,6 @@ async fn the_host_platform_service_starts_and_waits_for_a_command() {
             task_id: "long-task".into(),
             cursor: None,
             limit: Some(64 * 1024),
-            wait_ms: None,
-            event_cursor: None,
         })
         .await
         .unwrap();
@@ -1496,14 +1518,6 @@ async fn the_host_platform_service_serves_a_shell() {
     .await
     .unwrap();
     assert!(page["text"].as_str().unwrap().contains("hi"));
-    let events = invoke(
-        "output",
-        serde_json::json!({"taskId": "service-shell", "eventCursor": 0, "waitMs": 1000}),
-    )
-    .await
-    .unwrap();
-    assert!(!events["events"].as_array().unwrap().is_empty());
-    assert!(events["nextEventCursor"].as_u64().unwrap() > 0);
     invoke("settle", serde_json::json!({"taskId": "service-shell"}))
         .await
         .unwrap();
@@ -1881,40 +1895,23 @@ async fn a_shell_burst_is_backpressured_instead_of_reset() {
         })
         .await
         .unwrap();
-    let mut cursor = 0u64;
-    let mut total = 0usize;
+    let mut seen = false;
     for _ in 0..2000 {
         let page = platform
             .output(OutputRequest {
                 task_id: "burst-shell".into(),
                 cursor: None,
                 limit: Some(64 * 1024),
-                wait_ms: Some(100),
-                event_cursor: Some(cursor),
             })
             .await
             .unwrap();
-        assert_ne!(page.reset, Some(true));
-        total += page
-            .events
-            .iter()
-            .map(|event| match event {
-                dim_agent_capabilities::host_platform::ShellEvent::Output { text, .. } => {
-                    text.len()
-                }
-                dim_agent_capabilities::host_platform::ShellEvent::Marker { line, .. } => {
-                    line.len()
-                }
-            })
-            .sum::<usize>();
-        if let Some(next) = page.next_event_cursor {
-            cursor = next;
-        }
-        if total > 1_200_000 {
+        if page.text.contains("400000") {
+            seen = true;
             break;
         }
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(total > 1_000_000, "only {total} bytes were served");
+    assert!(seen, "the shell output never reached the public page");
     platform
         .kill(TaskRequest {
             task_id: "burst-shell".into(),
@@ -1997,8 +1994,6 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
             task_id: "owner-command".into(),
             cursor: None,
             limit: Some(4096),
-            wait_ms: None,
-            event_cursor: None,
         })
         .await
         .unwrap();
@@ -2088,8 +2083,6 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
             task_id: "capped-command".into(),
             cursor: Some(65_535),
             limit: Some(16),
-            wait_ms: None,
-            event_cursor: None,
         })
         .await
         .unwrap();
@@ -2099,8 +2092,6 @@ async fn a_shell_command_capture_is_owned_by_the_host() {
             task_id: "capped-command".into(),
             cursor: Some(65_534),
             limit: Some(16),
-            wait_ms: None,
-            event_cursor: None,
         })
         .await
         .unwrap();
