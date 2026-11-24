@@ -770,6 +770,9 @@ async fn pursuit_5_an_abandoned_pause_does_not_fail_an_in_flight_evaluation() {
     );
     env.dispatched("main", second.sequence).await;
     held.release();
+    // The settlement's own end is delivered while the record still holds its
+    // decisions, so that handler is dropped. The race this case states is the
+    // same end folding after the record, which the case writes here.
     let outside = env.emit(
         "main",
         EventKind::BranchEnded(BranchEndedData {
