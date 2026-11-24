@@ -43,15 +43,6 @@
 //! 20 judged runs of every scenario, and `inconclusive` otherwise — also when
 //! a comparison has no counted run in an arm. There is no absolute pass line.
 //!
-//! When the evaluation configures `timeline-tree/branch-description` and its
-//! scenario set carries the three opening probes, the report also applies the
-//! opening text's gate 2 (Timeline branches §12.4): the three opening probes
-//! form one family fixed at `m = 3`, each entering with its own arm's counted
-//! runs, a probe whose gain is at most `δ = 0.05` enters with p = 1, and at
-//! least one must gain more than δ and reject at Holm-adjusted `α = 0.10`. An
-//! arm with no counted run on a probe, or a family where no probe could gain
-//! more than δ, makes gate 2 inconclusive.
-//!
 //! A failed run is one that ended on an error or its wall-clock budget, or
 //! one whose judging did not happen: there was nothing the judge could be
 //! asked, or a judge call failed — the first call, its retry without a
@@ -8795,57 +8786,6 @@ fn comparisons(current: &Metrics, candidate: &Metrics, scenarios: &[Scenario]) -
     comparisons
 }
 
-/// The opening text's three probes, fixed before any data (Timeline branches
-/// §12.4). Every one stays in gate 2's family whatever its counts.
-const OPENING_PROBES: [(&str, &str); 3] = [
-    ("long-work-and-a-flaky-test", "line-opened-for-one-job"),
-    ("refactor-and-a-pasted-report", "line-opened-for-one-job"),
-    ("switch-then-open-lines", "new-default-opens-a-line"),
-];
-
-/// The text whose evaluation gate 2 applies to: the branch tool's opening
-/// description.
-const OPENING_TEXT: &str = "timeline-tree/branch-description";
-
-/// Gate 2 over the fixed opening-probe family (Timeline branches §12.4): at
-/// least one probe gains more than δ and rejects at Holm-adjusted α, and every
-/// probe enters with its own counts whatever they are.
-fn opening_gate(current: &Metrics, candidate: &Metrics) -> rule::GainRule {
-    let counts = |metrics: &Metrics, scenario: &str, probe: &str| {
-        let counts = metrics.counts(&(scenario.to_owned(), probe.to_owned()));
-        rule::Counts::new(counts.passed.into(), counts.runs.into())
-    };
-    let gains = OPENING_PROBES.map(|(scenario, probe)| rule::Gain {
-        name: format!("{scenario}/{probe}"),
-        current: counts(current, scenario, probe),
-        candidate: counts(candidate, scenario, probe),
-    });
-    rule::judge_gains(&gains)
-}
-
-/// Whether the evaluation configured the opening text, in this evaluation or
-/// in the saved runs it pooled.
-fn evaluates_opening_text(instrument: &Instrument, records: &[RunRecord]) -> bool {
-    instrument.texts.iter().any(|text| text == OPENING_TEXT)
-        || records
-            .iter()
-            .any(|record| record.texts.iter().any(|text| text.id == OPENING_TEXT))
-}
-
-/// Whether the scenario set carries all three opening probes, so gate 2 can
-/// be judged at all; a set without them is not the opening text's evaluation.
-fn has_opening_probes(scenarios: &[Scenario]) -> bool {
-    OPENING_PROBES.iter().all(|(scenario, probe_id)| {
-        scenarios.iter().any(|candidate| {
-            candidate.id == *scenario
-                && candidate
-                    .probes
-                    .iter()
-                    .any(|probe| probe.id == *probe_id && probe.kind == ProbeKind::MustShow)
-        })
-    })
-}
-
 /// The finished evaluations a report was built from, in the order given: each
 /// directory with the runs it supplied. Such a report names them, and leaves
 /// out what no saved run records.
@@ -9185,18 +9125,6 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         "candidate",
     ));
     text.push('\n');
-    if evaluates_opening_text(instrument, records) && has_opening_probes(scenarios) {
-        let gate = opening_gate(current, candidate);
-        text.push_str("\n**Gate 2, the opening rate.**\n\n");
-        text.push_str(rule::GAIN_HEADER);
-        for row in &gate.rows {
-            text += &row.gain_line();
-            text.push('\n');
-        }
-        text.push('\n');
-        text.push_str(&rule::gain_verdict_line(&gate, "candidate"));
-        text.push('\n');
-    }
     text
 }
 
@@ -12042,83 +11970,6 @@ mod tests {
         assert!(
             text.contains("candidate fails: case/reports (must_show) falls from 1.000 to 0.400"),
             "a regression fails below the floor: {text}"
-        );
-    }
-
-    /// Gate 2 applies to the opening text's evaluation and keeps its three
-    /// probes as one family: a probe at its ceiling enters with p = 1, and one
-    /// rejecting probe passes the gate (Timeline branches §12.4).
-    #[test]
-    fn the_report_judges_gate_2_for_the_opening_text() {
-        let scenarios: Vec<Scenario> = OPENING_PROBES
-            .iter()
-            .map(|(id, probe_id)| Scenario {
-                id: (*id).into(),
-                probes: vec![probe(probe_id, ProbeKind::MustShow)],
-                ..scenario(Vec::new())
-            })
-            .collect();
-        let mut records = Vec::new();
-        for scenario in &scenarios {
-            let probe_id = scenario.probes[0].id.as_str();
-            let current_passes = scenario.id != "long-work-and-a-flaky-test";
-            for _ in 0..20 {
-                records.push(record(
-                    "current",
-                    scenario,
-                    &[(
-                        probe_id,
-                        if current_passes {
-                            ProbeVerdict::Present
-                        } else {
-                            ProbeVerdict::Absent
-                        },
-                    )],
-                    JudgeOutcome::Judged,
-                ));
-                records.push(record(
-                    "candidate",
-                    scenario,
-                    &[(probe_id, ProbeVerdict::Present)],
-                    JudgeOutcome::Judged,
-                ));
-            }
-        }
-        let mut opening = instrument(model());
-        opening.texts = vec![OPENING_TEXT.into()];
-        let text = report(&opening, &scenarios, &records);
-        assert!(text.contains("**Gate 2, the opening rate.**"), "{text}");
-        assert!(
-            text.contains(
-                "| long-work-and-a-flaky-test/line-opened-for-one-job | 0/20 (0.000) | 20/20 (1.000) | 1.000 |"
-            ),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "candidate passes gate 2: long-work-and-a-flaky-test/line-opened-for-one-job gains from 0.000 to 1.000"
-            ),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "| refactor-and-a-pasted-report/line-opened-for-one-job | 20/20 (1.000) | 20/20 (1.000) | 0.000 | 1 |"
-            ),
-            "a probe at its ceiling enters with p = 1: {text}"
-        );
-        let text = report(&instrument(model()), &scenarios, &records);
-        assert!(
-            !text.contains("Gate 2"),
-            "other texts do not judge it: {text}"
-        );
-        let text = report(
-            &opening,
-            &[scenario(vec![probe("reports", ProbeKind::MustShow)])],
-            &[],
-        );
-        assert!(
-            !text.contains("Gate 2"),
-            "a set without the opening probes cannot judge it: {text}"
         );
     }
 
