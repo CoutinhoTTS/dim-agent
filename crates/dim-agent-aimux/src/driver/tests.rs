@@ -595,3 +595,161 @@ async fn a_responses_start_inside_its_allowance_delivers_the_output() {
     }
     assert_eq!(text, "hello");
 }
+
+/// The timer that ends the header allowance fires on its next millisecond
+/// tick, so a report written just after the allowance can be read before the
+/// timer fires. It is late by its own instant there too: the wait ends as
+/// missing headers instead of starting a fresh window from a late report.
+#[tokio::test(start_paused = true)]
+async fn a_header_report_written_after_its_allowance_is_late() {
+    let (fetch, reply) = scripted();
+    let driver = driver(fetch);
+    // Half a tick puts the allowance between two ticks, so the timer fires up
+    // to one tick after it.
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiChat),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    // The exchange is polled 0.2 ms after the allowance, before its timer.
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT + Duration::from_micros(200)).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body: ScriptedBody::default(),
+        })
+        .unwrap();
+    assert!(
+        poll_once(invoke.as_mut()).is_pending(),
+        "the exchange must stop after the report"
+    );
+    tokio::time::advance(Duration::from_micros(100)).await;
+    let error = match poll_until_idle(invoke.as_mut()) {
+        Some(Err(error)) => error,
+        Some(Ok(_)) => panic!("a reply must not start from a late report"),
+        None => panic!("a report written after the allowance must fail before the timer fires"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("no response headers arrived within 300 seconds of sending the request")
+    );
+}
+
+/// The same late report read after the timer tick: the deadline arm rejects a
+/// report stamped after the allowance, so a report's classification does not
+/// depend on which arm polls it first.
+#[tokio::test(start_paused = true)]
+async fn a_header_report_written_after_its_allowance_is_late_after_the_tick() {
+    let (fetch, reply) = scripted();
+    let driver = driver(fetch);
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiChat),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT + Duration::from_micros(200)).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body: ScriptedBody::default(),
+        })
+        .unwrap();
+    assert!(
+        poll_once(invoke.as_mut()).is_pending(),
+        "the exchange must stop after the report"
+    );
+    tokio::time::advance(Duration::from_micros(600)).await;
+    let error = match poll_until_idle(invoke.as_mut()) {
+        Some(Err(error)) => error,
+        Some(Ok(_)) => panic!("a reply must not start from a late report"),
+        None => panic!("the deadline arm must fail a late report"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("no response headers arrived within 300 seconds of sending the request")
+    );
+}
+
+/// A report written exactly at the allowance is on time in either arm: the
+/// comparison includes the instant, and the reply starts from it.
+#[tokio::test(start_paused = true)]
+async fn a_header_report_written_at_the_allowance_stays_on_time() {
+    let (fetch, reply) = scripted();
+    let body = ScriptedBody::default();
+    let driver = driver(fetch);
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiChat),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    // The exchange is polled exactly at the allowance, still before its timer.
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body: body.clone(),
+        })
+        .unwrap();
+    assert!(
+        poll_once(invoke.as_mut()).is_pending(),
+        "the exchange must stop after the report"
+    );
+    tokio::time::advance(Duration::from_micros(100)).await;
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "a report written at the allowance must not be read as late"
+    );
+    body.push(format!(
+        "data: {}\n\n",
+        json!({"id": "remote-id", "choices": [{"index": 0, "delta": {"content": "hello"}, "finish_reason": Value::Null}]})
+    ));
+    let mut stream = poll_until_idle(invoke.as_mut())
+        .expect("the report must start the reply")
+        .expect("the reply must start after the report");
+    let start = next_chunk(&mut stream)
+        .expect("the reply must deliver its start")
+        .expect("the reply must not fail before its start");
+    assert!(matches!(start, ModelChunk::MessageStart { .. }));
+    let text = next_chunk(&mut stream)
+        .expect("the reply must deliver its text")
+        .expect("the first event must deliver text");
+    assert!(matches!(text, ModelChunk::Text(text) if text == "hello"));
+}
