@@ -478,6 +478,151 @@ async fn a_usage_fact_before_a_cut_stops_the_retry() {
     .unwrap();
 }
 
+/// The failure the aimux stream builds when no part arrives inside its idle
+/// allowance: a network failure with no provider response behind it.
+fn idle_timeout() -> HostError {
+    let reason = "the stream delivered nothing for 300 seconds";
+    HostError::Failed {
+        message: ModelFailureKind::Network.line(Some(reason)),
+        budget: None,
+        kind: HostErrorKind::Transport,
+        model: Some(Box::new(ModelFailureFacts {
+            kind: ModelFailureKind::Network,
+            reason: Some(reason.into()),
+            status: None,
+            provider_code: None,
+            request_id: None,
+            cause: Vec::new(),
+            retry_after: None,
+            attempts: 1,
+            waited: Duration::ZERO,
+            retry_after_stop: None,
+            retry_forbidden: false,
+        })),
+        presentation: None,
+    }
+}
+
+/// An idle timeout before the attempt committed anything is replaced in place,
+/// as any network failure is: one request, two attempts, one reply.
+#[tokio::test(start_paused = true)]
+async fn an_idle_timeout_before_any_committed_event_retries_in_place() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (cut, cut_stream) = mpsc::unbounded_channel();
+        let (retry, retry_stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![cut_stream, retry_stream]));
+        let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        send(
+            &cut,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "cut".into(),
+                }),
+                Ok(ModelChunk::Thinking("partial thought".into())),
+                Err(idle_timeout()),
+            ],
+        );
+        drop(cut);
+
+        let ended = tokio::select! {
+            _ = model.second_attempt.notified() => None,
+            outcome = turn_end(&session) => Some(outcome),
+        };
+        assert!(
+            ended.is_none(),
+            "an idle timeout before any committed output retries in place; the turn ended with {ended:?}"
+        );
+
+        send(&retry, reply("retry"));
+        drop(retry);
+        model.release.notify_one();
+        session.idle("main").await.unwrap();
+
+        assert_eq!(model.calls.load(Ordering::SeqCst), 2);
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event.kind, EventKind::ModelCall(_)))
+                .count(),
+            1,
+            "the retry belongs to the same request"
+        );
+        assert_eq!(text_events(&events), ["answer"]);
+        assert!(events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        )));
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// An idle timeout after committed text is not replayed: the turn ends with the
+/// network failure and resending is the user's call.
+#[tokio::test(start_paused = true)]
+async fn an_idle_timeout_after_a_committed_event_ends_the_turn_without_retrying() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (cut, cut_stream) = mpsc::unbounded_channel();
+        let model = Arc::new(ScriptedModel::new(vec![cut_stream]));
+        let agent = MinimalHost::start(&builder(model.clone(), Arc::new(MockTools)))
+            .await
+            .unwrap();
+        let session = agent
+            .create_session(SessionConfig::default())
+            .await
+            .unwrap();
+        session
+            .submit("go".into(), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        let committed = "x".repeat(4096);
+        send(
+            &cut,
+            vec![
+                Ok(ModelChunk::MessageStart {
+                    message_id: "cut".into(),
+                }),
+                Ok(ModelChunk::Text(committed.clone())),
+                Err(idle_timeout()),
+            ],
+        );
+        drop(cut);
+        session.idle("main").await.unwrap();
+
+        assert_eq!(model.calls.load(Ordering::SeqCst), 1);
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        assert_eq!(text_events(&events), [committed]);
+        let failure = model_end_failure(&events);
+        assert_eq!(failure["kind"], "network", "{failure}");
+        assert_eq!(failure["attempts"], 1, "committed text stops the retry");
+        assert!(matches!(
+            events.iter().find_map(|event| match &event.kind {
+                EventKind::TurnEnd(data) => Some(&data.outcome),
+                _ => None,
+            }),
+            Some(TurnOutcome::Failed { .. })
+        ));
+        agent.close().await.unwrap();
+    })
+    .await
+    .unwrap();
+}
+
 #[tokio::test(start_paused = true)]
 async fn thinking_progress_is_shown_once_per_interval() {
     tokio::time::timeout(Duration::from_secs(10), async {
