@@ -492,6 +492,8 @@ pub struct ShellWrite {
 pub struct ShellJobStart {
     pub task_id: String,
     pub end_marker: String,
+    /// Absolute path of the job's log; it must be inside the shell output directory.
+    pub output_path: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -863,7 +865,9 @@ impl HostPlatform {
         })
     }
 
-    /// Composes the PATH a child process gets, as data.
+    /// Composes the PATH a child process gets, as data. The served base is
+    /// UTF-8; a non-UTF-8 daemon PATH uses [`Self::child_path_process`] in
+    /// process and is not expressible through this face.
     pub fn child_path(&self, request: ChildPathRequest) -> Option<String> {
         self.child_path_process(&request.directories, OsStr::new(&request.base))
             .and_then(|path| path.to_str().map(str::to_owned))
@@ -1435,6 +1439,11 @@ impl HostPlatform {
             ));
         }
         let command = if let Some(start) = request.command {
+            if !valid_shell_marker(&start.start_marker) || !valid_shell_marker(&start.end_marker) {
+                return Err(HostPlatformError::Invalid(
+                    "shell command markers must be __DIM_START_<8 hex>_<8 hex>__ and __DIM_END_<8 hex>_<8 hex>__".into(),
+                ));
+            }
             if start.task_id.is_empty()
                 || start.task_id.contains(['/', '\\', '\0', ':'])
                 || matches!(start.task_id.as_str(), "." | "..")
@@ -1471,6 +1480,11 @@ impl HostPlatform {
             None
         };
         let job = if let Some(start) = request.job {
+            if !valid_shell_marker(&start.end_marker) {
+                return Err(HostPlatformError::Invalid(
+                    "shell job end marker must be __DIM_END_<8 hex>_<8 hex>__".into(),
+                ));
+            }
             if start.task_id.is_empty()
                 || start.task_id.contains(['/', '\\', '\0', ':'])
                 || matches!(start.task_id.as_str(), "." | "..")
@@ -1484,7 +1498,17 @@ impl HostPlatform {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf();
-            let output_path = directory.join(format!("{}.log", start.task_id));
+            let output_path = PathBuf::from(&start.output_path);
+            if !output_path.is_absolute()
+                || output_path
+                    .components()
+                    .any(|component| matches!(component, Component::CurDir | Component::ParentDir))
+                || !output_path.starts_with(&directory)
+            {
+                return Err(HostPlatformError::Invalid(
+                    "job outputPath must be absolute and inside the shell output directory".into(),
+                ));
+            }
             let completion = shell.pwsh().then(|| {
                 (
                     directory.join(format!("{}.result", start.task_id)),
@@ -3535,14 +3559,24 @@ impl HostPlatform {
                 "not a persistent shell output directory",
             ));
         }
-        if std::fs::symlink_metadata(path)
-            .map(|metadata| metadata.file_type().is_symlink())
-            .unwrap_or(false)
+        let mut current = root.clone();
+        for component in path
+            .strip_prefix(&root)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "outside the exec root"))?
+            .components()
         {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "not a persistent shell output directory",
-            ));
+            current.push(component);
+            match std::fs::symlink_metadata(&current) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "a symlink component is not a persistent shell output directory",
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error),
+            }
         }
         match std::fs::remove_dir_all(&target) {
             Ok(()) => {}
@@ -3555,6 +3589,26 @@ impl HostPlatform {
         }
         Ok(())
     }
+}
+
+fn valid_shell_marker(marker: &str) -> bool {
+    let Some(rest) = marker
+        .strip_prefix("__DIM_START_")
+        .or_else(|| marker.strip_prefix("__DIM_END_"))
+    else {
+        return false;
+    };
+    let Some((first, rest)) = rest.split_once('_') else {
+        return false;
+    };
+    let Some((second, tail)) = rest.split_once("__") else {
+        return false;
+    };
+    tail.is_empty()
+        && first.len() == 8
+        && second.len() == 8
+        && first.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && second.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn canonicalize_existing_prefix(path: &Path) -> io::Result<PathBuf> {
@@ -4896,6 +4950,30 @@ mod tests {
                 .is_none(),
             "a runtime already on the PATH changes nothing"
         );
+    }
+
+    #[test]
+    fn a_child_path_without_an_addition_answers_none() {
+        let platform = host_with(&[], None);
+        assert!(
+            platform
+                .child_path(ChildPathRequest {
+                    directories: Vec::new(),
+                    base: joined(&["/base"]),
+                })
+                .is_none()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_native_child_path_preserves_a_non_utf8_base() {
+        use std::os::unix::ffi::OsStrExt;
+        let platform = host_with(&[], Some(vec![toolchain("/runtimes/node/bin")]));
+        let base = OsStr::from_bytes(b"/base/\xff");
+        let composed = platform.child_path_process(&[], base).unwrap();
+        assert_eq!(&composed.as_bytes()[..base.len()], base.as_bytes());
+        assert!(composed.as_bytes().ends_with(b"/runtimes/node/bin"));
     }
 
     #[test]

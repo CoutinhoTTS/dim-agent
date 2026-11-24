@@ -114,6 +114,9 @@ the task record and the facts. `shell`/`write`/`resize` are served by the same o
 records the command capture and `ShellSession` keeps only queue, timeout and occupancy policy. `spawnWithStdin` and `spawnConfined` are the existing methods
 Hooks and OCR call, now with data requests and replies. `removeOutputDirectory` and `childPath`
 are the existing cleanup and PATH helpers, now data methods; SessionStore and MCP call them. The
+served `childPath` composes from UTF-8 data; a non-UTF-8 daemon PATH is accepted by the native
+`child_path_process` as `OsStr` and is not expressible through the face, so no replacement
+characters are written. The
 in-process cores stay as the shared implementation, not a second public operation.
 
 The command process, output file, PTY and command capture are owned by `HostPlatform`; the branch
@@ -163,10 +166,12 @@ that job ended so it can be settled. A caller that never settles keeps the recor
 the owner unloads.
 
 Output logs live below `execRoot`. The branch registers the logs it gives the model (foreground,
-occupying, background and shell); Session deletion removes the registered candidates. The owner
-removes the shell's own PTY log when the shell task drops. `removeOutputDirectory` accepts only a
-persistent-shell output directory below the canonical `execRoot`, refusing traversal and symlink
-components.
+occupying, background and shell); Session deletion removes the registered candidates. A shell log
+is registered before the `shell` reply exposes it and is kept until `removeOutputDirectory` or
+Session deletion; settling the shell does not delete it. The init log is internal and is removed
+when its command is released. `retainOutput` is idempotent. `removeOutputDirectory` accepts only a
+UTF-8 path that is a persistent-shell output directory strictly below the canonical `execRoot`;
+`.`/`..` and every symlink component are refused, an absent target is `Ok`.
 
 ## 4. `fsHost`
 

@@ -362,6 +362,8 @@ export type ShellCommandStart = {
 export type ShellJobStart = {
   taskId: string
   endMarker: string
+  /** Absolute path of the job's log; it must be inside the shell output directory. */
+  outputPath: string
 }
 
 export type ShellWrite = {
@@ -413,7 +415,11 @@ export interface HostPlatform {
    * @throws {HostPlatformErrorThrown}
    */
   spawnConfined(request: ConfinedRequest, cancelled: () => void | Promise<void>): Promise<ConfinedReply>
-  /** Composes the PATH a child process gets, as data. */
+  /**
+   * Composes the PATH a child process gets, as data. The served base is
+   * UTF-8; a non-UTF-8 daemon PATH uses [`Self::child_path_process`] in
+   * process and is not expressible through this face.
+   */
   childPath(request: ChildPathRequest): Promise<string | null>
   /**
    * Removes a persistent-shell output directory below `execRoot`.

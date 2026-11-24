@@ -431,22 +431,42 @@ impl ShellSession {
             }
         };
         let id = format!("shell-{}", uuid::Uuid::new_v4());
+        let cwd = self
+            .config
+            .cwd
+            .to_str()
+            .ok_or_else(|| HostError::failed("the shell cwd is not UTF-8"))?
+            .to_owned();
+        let output_dir = self
+            .config
+            .output_dir
+            .to_str()
+            .ok_or_else(|| HostError::failed("the shell output directory is not UTF-8"))?
+            .to_owned();
+        let roots = roots
+            .iter()
+            .map(|root| {
+                root.to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| HostError::failed("a shell workspace root is not UTF-8"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let reply = self
             .host
             .shell(ShellRequest {
                 task_id: id.clone(),
-                cwd: self.config.cwd.to_string_lossy().into_owned(),
-                workspace: self.config.cwd.to_string_lossy().into_owned(),
-                roots: roots
-                    .iter()
-                    .map(|root| root.to_string_lossy().into_owned())
-                    .collect(),
-                output_dir: self.config.output_dir.to_string_lossy().into_owned(),
+                cwd: cwd.clone(),
+                workspace: cwd,
+                roots,
+                output_dir,
                 cols: 500,
                 rows: 50,
             })
             .await
             .map_err(|error| HostError::failed(error.to_string()))?;
+        self.register_output(std::path::Path::new(&reply.output_path))
+            .await
+            .map_err(HostError::failed)?;
         let dialect = match runtime.edition {
             ShellEdition::Pwsh | ShellEdition::WindowsPowershell => ShellDialect::Pwsh,
             _ => ShellDialect::Posix,
@@ -1289,6 +1309,10 @@ impl ShellSession {
                 ShellJobStart {
                     task_id: task_id.clone(),
                     end_marker: completion.full(),
+                    output_path: output_path
+                        .to_str()
+                        .ok_or_else(|| "the job output path is not UTF-8".to_owned())?
+                        .to_owned(),
                 },
             )
             .await

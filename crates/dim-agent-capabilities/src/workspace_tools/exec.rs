@@ -2169,7 +2169,11 @@ impl CommandTask {
 
 fn settled_from_reply(reply: &WaitReply) -> (Settled, Option<CommandExit>) {
     let settled = Settled {
-        output_path: reply.text.is_none().then(|| reply.output_path.clone()),
+        output_path: reply
+            .text
+            .is_none()
+            .then(|| reply.output_path.clone())
+            .filter(|path| std::path::Path::new(path).exists()),
         output_bytes: reply.output_bytes,
         truncated: reply.output_truncated,
         preview: reply.preview.clone(),

@@ -1855,6 +1855,18 @@ async fn output_removal_refuses_traversal_and_links() {
             .unwrap_err();
         assert!(matches!(link_error, HostPlatformError::Invalid(_)));
         assert!(outside.join("keep").exists());
+        let real = exec_root.join("session/real");
+        std::fs::create_dir_all(real.join("child")).unwrap();
+        let alias = exec_root.join("session/alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let component = platform
+            .remove_output_directory(RemoveOutputDirectoryRequest {
+                path: path_string(alias.join("child")),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(component, HostPlatformError::Invalid(_)));
+        assert!(real.join("child").exists());
     }
     platform
         .remove_output_directory(RemoveOutputDirectoryRequest {
