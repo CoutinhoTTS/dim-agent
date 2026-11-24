@@ -510,9 +510,11 @@ The requirements that answer these items are in [Model-facing prompts](model-pro
 
 ### 12.3 Evaluation scenarios
 
-The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: eight under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), each declaring a window of 131,072 tokens, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), declaring 16,000 so that compaction happens. `budget.window` is a check, not a setting: a run whose Session declares another window fails before its first turn, so a rerun needs a model that declares exactly the scenario's window, and a model that declares none falls back to 128,000 and fails too. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
+The set lives in the repository, one directory per scenario, holding a `scenario.json` and the starting `workspace/` beside it: fifteen under [`xtask/scenario-eval/timeline-branches/`](../../xtask/scenario-eval/timeline-branches/), each declaring a window of 131,072 tokens, and `identity-after-compaction` under [`xtask/scenario-eval/timeline-branches-compact/`](../../xtask/scenario-eval/timeline-branches-compact/), declaring 29,000 so that compaction happens. `budget.window` is a check, not a setting: a run whose Session declares another window fails before its first turn, so a rerun needs a model that declares exactly the scenario's window, and a model that declares none falls back to 128,000 and fails too. These are run locally on real models, and the results are reported in the implementation PR. CI asserts only behavior.
 
 `main-moved-on` is the scenario for the parent block (§7.1.1): `main` works before the cut, opens a line, then keeps working; the line must read what `main` did after the cut before it answers or ends, and it must not page through all of `main`'s activity. It is the scenario for [§12.4](#124-texts-and-their-classes)'s parent-block policy sentence.
+
+The opening and switching roles add seven scenarios: `long-work-and-a-flaky-test`, `refactor-and-a-pasted-report`, `same-file-tradeoff`, `background-command-not-branch`, `switch-continue-directly`, `switch-then-open-lines` and `root-opens-after-switch`.
 
 `identity-after-compaction` reuses `redone-work`'s message and workspace, and `flooding` and `never-ending` share one workspace: each pair stays identical, and the no-model test that reads both committed directories fails when one copy changes alone.
 
@@ -530,6 +532,7 @@ The set lives in the repository, one directory per scenario, holding a `scenario
 | Sibling relay | `timeline-branches/sibling-relay` | An opener is used to pass messages between lines that should have been one line |
 | Identity after compaction | `timeline-branches-compact/identity-after-compaction` | After compaction on `main` and on a line, each still knows which line it is and which lines are its own |
 | Continuing on a line after a switch | `—` | A line that became the default branch calls `end` on itself, hands its work to another line, keeps waking its opener with idle notices, or cannot open a line while the root could |
+| Opening lines after a switch | `timeline-branches/switch-then-open-lines` | The new default branch does both independent additions itself instead of opening a line for one of them, or the former default branch takes the new work |
 | The root opens while a line holds the role | `timeline-branches/root-opens-after-switch` | The user asks the root for a line after another line became the default branch: the root must open it, the new line must start from the root's history, and it must report to the root |
 | Ping-pong | `timeline-branches/ping-pong` | Steer exchanges that do not move the work forward |
 | Asking the user | `timeline-branches/asking-the-user` | A line asks the user directly when it should, and does not route through `main` |
@@ -643,6 +646,37 @@ The move and an end take the same tree lock and admit in one order (§10): a tar
 refused, and a line whose descendant is the default branch is refused as an end target. So of two operations that
 conflict, exactly one is admitted, and each reads the state the other would have written.
 
+**The default branch on older connections.** The move is reachable through RPC now, but the clients that follow it
+come later, so every field and behaviour an existing client relies on keeps its old meaning and the new meaning
+arrives through new fields. A v1 connection's event projection carries the root alone (`connection/subscription.rs`
+`project` and the v1 branch watch), so on that connection an omitted `branchId` keeps naming the root for every call
+this section routes a default for: `session.submit`, `session.stop` and `session.idle` (the three a v1 client may send
+unnamed; every other routed call is admitted from v3 on, whose projection carries every branch). A v1 client therefore
+still sees the turn its input runs after a newer connection has moved the default. v2 and later connections carry every
+branch, must name a line where v1 could not, and a v3 connection's unnamed calls follow the default branch. Nothing
+else an older client reads changes meaning: `SessionInfo.sequence` on the `session.attach` reply stays the root's
+sequence — the cutoff the CLI keeps as the `main` window's `through` and as the root model-update watermark — and the
+line the conversation is on arrives beside it as `defaultBranch {branchId, sequence}`. The cursor belongs to that reply
+alone: a `session.summaries` item is a directory row, so it carries no `defaultBranch`, and a client reads the line
+after it attaches rather than from a list. A client that predates the field ignores it; one that follows the move
+resumes that line from it. The same rule holds the catalog row's
+`sequence`: it is the root's in both projections, the loaded overlay and the stored query, so loading or unloading a
+Session never changes it, while `running` and `updatedAt` follow the default branch. A persisted move refreshes
+`updatedAt` in its own transaction from the new default's latest activity, and the switch itself counts as none, so an
+idle move never leaves the row recent by the line the Session left.
+
+The reply's `model`, `modelPreferences` and `capabilitySnapshot` stay the root's adopted configuration, the watermark a
+Session on its root has always read. A client that follows the move pairs the configuration with the cursor instead of
+mixing the two: it takes the configuration of the line the cursor names through
+`session.model.get {sessionId, branchId, through}`, so a Session whose conversation is on a line shows the model that
+line adopted at or below its cursor, and the reply's record seeds the root alone. The read answers the line's own
+configuration with its own committed cutoff, so it works when a display transcript omits `context/configured` and a
+bounded window begins after the adoption; that cutoff is the watermark a later configuration must pass. A server that
+cannot answer the read does not name that line's configuration, and its attach reply is the root's, so no client shows
+the root's model for a line. A reply that
+carries no `defaultBranch` names the root, because a server without the field cannot move the default branch, so
+its record is the Session's one model and every client keeps using it.
+
 The directory read performs no history I/O. Its display fields are null or absent.
 `session.branch.get {sessionId, branchId}` (v3, separately listed in
 `hello.features`) reads one line's directory record and display fields:
@@ -654,6 +688,25 @@ reported on this detail call and does not prevent directory listing; an unknown
 branch is an error. This read writes no facts and does not reopen an ended line. An ended line inherited by a Session fork can
 have no own history; its fixed directory end identity remains even when the
 `end` detail is unavailable.
+
+`session.model.get {sessionId, branchId, through?}` (v3, listed in `hello.features` with the
+other Session methods under `session.attach`'s admission) reads one line's adopted configuration at
+that line's own cutoff: `{branchId, through, configuration: {model: {providerId, modelId},
+catalogProviderId?, capabilitySnapshot?, modelPreferences?} | null}`. The returned `through` is always the requested
+line's committed cutoff, never the sequence of an ancestor's adoption, so a client applies only
+that line's `Configuration` events whose `sequence > through` and refreshes by calling again without
+`through`. An open line waits for the Dispatcher to reach the committed head, so an adoption
+committed just before the call is included rather than missed, and it reports the cutoff of the
+state it answers from: that is the captured head while the owner is still there, and the last
+applied source fact's sequence when the owner has already applied a later one, so reading at the
+returned cutoff always answers the returned configuration. A line whose scope is closing answers
+at its published head instead of its owner: a fact whose publication is still pending is not visible
+to any read, so the line does not answer past it, and the read never replays sources or writes a
+recovery checkpoint while the line closes. An ended line reads at
+its fixed head through the ancestor chain and is not reopened; an explicit `through` reads the same
+chain at that cutoff, and a value past the line's head is refused as a future sequence. An unknown
+line is an error. Old servers do not advertise the method: a client then uses the attach reply for
+the root alone and does not present the root's configuration as another line's.
 
 Three rules about `head` decide what a client may do with it:
 
@@ -681,7 +734,7 @@ refusal is shown where the action was raised. The commands the composer offers a
 | TreeTimeline | Consumes `branch/end`, plus the line's next turn end for an end issued by a tool call, and routes them to TimelineTree. It reports every `turn/end` to TimelineTree, which publishes it for the line's children | It routes `branch/create` the same way |
 | BranchTool | The action-based tool, plus the new BranchLine branch part. `read` and `message` reach the line the caller was cut from and the tool lines it opened, with one cursor rule. `create` admits the root and the current default branch and refuses every other line with `branch_not_opener`, then checks the Session's cap and refuses with `branch_limit_reached` | The tool's actions and one line's view of its lines |
 | Session facade | `Session::end_branch(id, source)`, `Session::default_branch(id)` and `Session::set_default_branch(id, source)`. An ended line's head is `Session::sequence`; its history is read at that fixed head through `TreeCommands.page` | §17 |
-| App Server | `session.branch_end` (v3, a user source with a minted `operation_id`, listed in `hello.features` with the other Session methods when `session_execution` is on and the connection's entry is not bare or the daemon profile is not protected). `session.branch_set_default` (v3, the same admission). `session.history` on an ended line returns immediately, at its stored head. `session.branches` reads the tree's directory and carries `defaultBranchId` (§14). Every Session-level default target that today names `main` reads the default branch instead: `session.submit`, `session.stop`, `session.idle`, `session.goal.*` and `shell.run`, and a newly created scheduled job. `session.model.update`, `session.agent.update` and `session.prompt.refresh` act on the default branch rather than refusing every line but the root. `approval.respond` keeps the `branchId` its notice carried, so a pending request stays on the line that asked for it. `ProductEvent::new` carries the new kind in v3 and leaves it out of v1 and v2 | An entry and three reads, no business logic |
+| App Server | `session.branch_end` (v3, a user source with a minted `operation_id`, listed in `hello.features` with the other Session methods when `session_execution` is on and the connection's entry is not bare or the daemon profile is not protected). `session.branch_set_default` (v3, the same admission). `session.history` on an ended line returns immediately, at its stored head. `session.branches` reads the tree's directory and carries `defaultBranchId` (§14). Every Session-level default target that today names `main` reads the default branch instead: `session.submit`, `session.stop`, `session.idle`, `session.goal.*` and `shell.run`, and a newly created scheduled job. `session.model.update`, `session.agent.update` and `session.prompt.refresh` act on the default branch rather than refusing every line but the root. `approval.respond` keeps the `branchId` its notice carried, so a pending request stays on the line that asked for it. On a connection whose projection carries the root alone (v1) an omitted `branchId` keeps reaching the root; v2 and later may name a line, and a v3 connection's unnamed calls follow the default branch. `session.attach` keeps `sequence` as the root's and adds `defaultBranch {branchId, sequence}`; a catalog row's `sequence` stays the root's in both projections while `running` and the activity follow the default branch, and a persisted move refreshes that activity in its own transaction. `session.branches` reads the default and the directory under one tree snapshot. Collaboration stores the member branch a request's input was delivered on and reads it for the idle wait, settlement and every stop; a read page reports its branch, and a continuation carries it or is refused. PromptSuggestion binds its cached turn, offer and generation to a line and withdraws them on a move. EventHub answers admission, source ownership and the type before it resolves an omitted target branch. `ProductEvent::new` carries the new kind in v3 and leaves it out of v1 and v2 | An entry and three reads, no business logic |
 | dim-agent-types | `branch/end` and `branch/ended` in `EventKind` and the v1 exclusion list, then `branch/default`, registered in the contract tests. `BranchSource` gains a kind for a line the user opened, distinct from a plugin's. The frozen fixtures are unchanged | Core facts (§16) |
 | Storage | `FORMAT` 52 → 53 as a marker-only upgrade `(52, &[])`: no table scan and no data migration, so an older daemon refuses the store instead of failing on its first decode. `SqliteTimelineStore`'s writer thread caches each Session's default branch for the catalog's recent activity, initialised by the same indexed point query that restore uses | A new event kind and a new `BranchSource` variant are rows a 52 daemon cannot decode |
 | Goal (Pursuit amendment) | Recognizes its evaluator from the line's source and ends it ([Pursuit §13](plugins/Pursuit.md#13-ending-the-evaluator-with-427)) | Goal owns its evaluator's protocol |
@@ -695,9 +748,13 @@ New public content:
 - one RPC method, `session.branch_set_default`;
 - one TreeCommands read and one write, `default_branch()` and `set_default_branch(id, source)`;
 - `defaultBranchId` on the directory reply;
+- `defaultBranch {branchId, sequence}` on the `session.attach` reply, beside the root's `sequence`, and on no `session.summaries` item;
+- the `branchId` a collaboration read page reports and accepts for its continuation;
+- the `branch_changed` reason a PromptSuggestion clearing notice and refusal carry;
 - a `BranchSource` kind for a line the user opened;
 - the roster's key, `branch:roster`, announced to the model through the `<dim-branch-lines>` guide entry;
-- two refusal codes, `branch_not_opener` and `branch_limit_reached`.
+- two refusal codes, `branch_not_opener` and `branch_limit_reached`;
+- one branch-qualified read, `session.model.get`, which answers a line's adopted configuration at that line's own committed cutoff.
 
 BranchLine's service is read only by the tool, inside the same plugin. The turn-end signal is crate-internal, beside `TreeCommands.page` and `head`: it is not exported, and the TypeScript binding does not change.
 

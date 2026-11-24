@@ -576,8 +576,10 @@ impl ToolRegistry {
         });
     }
 
-    /// A configured name, a host tool's name and a registered tool's name
-    /// are offered only by their own owner, never by another source.
+    /// A host tool's name and a registered tool's name are offered only by
+    /// their own owner, never by another source. A name the mount list names
+    /// may come from a source: the list filters host and registered tools,
+    /// and each source decides its own visibility.
     fn validate(
         &self,
         name: &str,
@@ -603,13 +605,7 @@ impl ToolRegistry {
             if !names.insert(tool_name.as_str()) {
                 return Err(format!("duplicate tool {tool_name}"));
             }
-            let reserved = self
-                .configured
-                .iter()
-                .flatten()
-                .any(|name| name == tool_name)
-                || self.is_host(tool_name)
-                || registered.contains(tool_name);
+            let reserved = self.is_host(tool_name) || registered.contains(tool_name);
             if reserved && set.key != format!("{CONTRIBUTED}:{tool_name}") {
                 return Err(format!("tool {tool_name} is a fixed tool"));
             }

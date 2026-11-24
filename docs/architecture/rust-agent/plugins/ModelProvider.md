@@ -123,7 +123,9 @@ provider boundary gets `unknown` and the message it already carried. A tool
 start whose name is not in `request.tools` fails the request before a call is
 committed; it is a host failure, so its `failure.kind` is `unknown`. Arguments
 that never complete fail it with `failure.kind = malformed_response`, the kind
-the same defect carries when the bridge reports unparseable arguments.
+the same defect carries when the bridge reports unparseable arguments, unless
+the stream reports a content filter after the interrupted call: the known filter
+terminal wins and the reply is `content_filtered`.
 `failure` is absent on events written before it existed and on failures that are
 not a provider call's: the agent loop's unsettled call on a reload and a context
 preparation failure. `error` is the default English line
