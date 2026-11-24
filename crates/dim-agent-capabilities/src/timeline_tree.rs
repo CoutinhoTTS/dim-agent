@@ -515,7 +515,9 @@ impl TreeCommands {
         self.get(&id)?.input(input).await
     }
     /// Commits `input` to branch `id` only while its last assigned sequence is
-    /// still `head`: a fact behind `head` writes nothing and answers `null`.
+    /// still `head`: a fact behind `head` writes nothing and answers `null`,
+    /// even for a submission id already committed. At `head` it answers the
+    /// committed event, or the input already committed with its submission id.
     pub async fn input_if_head(
         &self,
         id: String,

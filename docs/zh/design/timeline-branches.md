@@ -685,7 +685,7 @@ BranchLine 的服务只由同一插件里的工具读取。轮次结束信号是
 - **考虑过的现有机制。**
   - `Timeline::lock_tail` 持有提交锁，但要求时间线空闲、会冻结后续写入，也不能等待存储读取，带不了决定。
   - `before` 回调在提交锁内运行，但只能变换草稿，不能拒绝写入（第 3 条）。
-  - 准入检查 `input_checked(data, expected, admit)` 在提交锁内运行，但只按线自己的状态（`branch/end`）判断；把调用方的前提放进运行时就等于把功能的含义写进核心（第 4 条）。
+  - 准入检查 `input_checked(data, admit)` 在提交锁内运行，但 `admit` 只按线自己的状态（`branch/end`）判断；把调用方的前提放进运行时就等于把功能的含义写进核心（第 4 条）。
   - 提交 id 回答幂等，不回答先后：续行每次决定都带新的 id。
 - **通用能力。** 输入提交带上传入方作出决定时的最后分配序号：`TreeCommands::input_if_head(id, input, head)`（与 `input` 一样按名导出，所有语言调用同一操作）、`Branch::input_if_head`、`TimelineContext::input_if_head` 与 `Timeline::input_checked(data, expected, admit)`。提交锁内 `Timeline::committed() != expected` 时不写入、不分配序号，返回 `Appended::Moved`；否则与原 `input` 一样提交。不带业务含义：调用方给出一个序号，其后任何事实都拒绝这次提交。
 - **对序号、批次、中断、重载的影响。** 被拒的提交不分配序号、不发布。批次不变：一条输入就是一个事件，拒绝发生在提交之前。`admit` 仍在写入之前运行，`branch_ended` 的答复不变。不落盘，重载不变。

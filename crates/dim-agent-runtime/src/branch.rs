@@ -79,7 +79,10 @@ impl Branch {
         self.0.input(data).await
     }
     /// [`Self::input`] only while the branch's last assigned sequence is still
-    /// `head`: a fact behind `head` writes nothing and answers `None`.
+    /// `head`: a fact behind `head` writes nothing and answers `None`, even for
+    /// a submission id already committed. Otherwise it answers as
+    /// [`Self::input`] does: the committed event, or the input already
+    /// committed with its submission id.
     pub async fn input_if_head(
         &self,
         data: InputMessageData,

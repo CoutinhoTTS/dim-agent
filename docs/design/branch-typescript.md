@@ -59,9 +59,11 @@ closures stay as they are for Rust callers:
 
 - `TreeCommands::info`, `input`, `input_if_head`, `create`, `end` and `page` address branches by
   id and return data: `TimelineInfo` (with `source`, and answered for an ended line as well), the
-  committed `AgentEvent`, `null` when a fact committed behind `input_if_head`'s `head`, the new
-  branch's id, and one page of an open or ended line's committed batches. `create` takes the
-  caller's cancellation explicitly (§Cancellation); `end` is
+  committed `AgentEvent`, `null` when a fact committed behind `input_if_head`'s `head` (an
+  already committed submission id included), the new branch's id, and one page of an open or
+  ended line's committed batches. At its head `input_if_head` answers the committed event, or the
+  input already committed with its submission id. `create` takes the caller's cancellation
+  explicitly (§Cancellation); `end` is
   [timeline branches](timeline-branches.md#10-ending-a-line).
 - `Dispatcher::listen` is `subscribe` in data form. Its `&Ctx` parameter is the calling row's
   context, so the subscription belongs to that row and ends when it unloads or restarts. The

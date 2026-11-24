@@ -411,7 +411,9 @@ impl TimelineContext {
     }
     /// [`Self::input`] only while the branch's last assigned sequence is still
     /// `head`. `None` means a fact committed behind `head`: nothing was
-    /// written, no sequence was assigned and the caller decides again.
+    /// written, no sequence was assigned and the caller decides again, even
+    /// for a submission id already committed; otherwise it answers as
+    /// [`Self::input`] does.
     pub(crate) async fn input_if_head(
         &self,
         data: InputMessageData,
