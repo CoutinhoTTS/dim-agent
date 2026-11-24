@@ -134,8 +134,9 @@ hands Goal the pending mode and Goal checks that it would be effective.
 - **Order.** The update runs: Goal settles, the record is written, the live mode is replaced. A
   failure before the record write leaves the mode pair unchanged and a committed Goal pause in
   place, and the operator resumes it; a Goal failure stops the update before the mode changes.
-- **Guarantee.** A turn that starts after the pause is committed carries the pause text in its
-  history, and its requests declare no `goal_update`.
+- **Guarantee.** A turn that starts in `shell` after the pause is committed carries the pause text
+  in its history, and its requests declare no `goal_update`. A failed update leaves the old mode in
+  force, as above, so a `normal` turn still declares `goal_update` while the goal is paused.
 - While `shell` is in force, a new continuation pauses the goal instead of continuing.
 - `session.goal.set` and `session.goal.resume` are refused while `shell` is in force, with a named
   error; `pause`, `edit`, `clear` and `get` keep working.
@@ -436,9 +437,9 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   `shell` effective without an update; a held continuation released in that window can reach one
   turn, whose `goal_update` call is refused. The pause is committed before the record write and the
   live mode, so a turn that starts in `shell` has the pause text in history; a cancelled update
-  after the pause leaves the goal paused and the mode unchanged. `set`/`resume` are refused while
-  `shell` is in force; a chosen `shell` that runs `normal` (no `execute`) neither pauses nor
-  refuses; after leaving, the operator resumes the goal.
+  after the pause and before the record write leaves the goal paused and the mode unchanged.
+  `set`/`resume` are refused while `shell` is in force; a chosen `shell` that runs `normal` (no
+  `execute`) neither pauses nor refuses; after leaving, the operator resumes the goal.
 - Flow: stop a shell task with `session.exec.stop` after switching the Session to `normal`; the
   route resolves the live `ExecStop` before `BackgroundExec`, and neither answers for a live task
   from history. The minimal-execution profile's Session runs `shell` and keeps `execute`.
