@@ -237,7 +237,6 @@ const ENVIRONMENT: &[&str] = &[
 /// Process facts and the source of the exec shell preference.
 #[derive(Clone)]
 pub struct HostPlatform {
-    mounted: std::sync::Weak<Self>,
     pub home: PathBuf,
     pub os: Os,
     /// Node's `process.arch` name (`arm64`, `x64`), as the TS texts use it.
@@ -765,7 +764,6 @@ impl HostPlatform {
                 status: shell,
             })),
             shell_file: None,
-            mounted: std::sync::Weak::new(),
             commands: Arc::default(),
             command_shutdown: CancellationToken::new(),
             command_workers: tokio_util::task::TaskTracker::new(),
@@ -2312,10 +2310,7 @@ impl DynPlugin for HostPlatformPlugin {
             platform.toolchain = Some(toolchain.clone());
             platform.shell.lock().await.config = config;
             platform.command_shutdown = ctx.cancellation_token().child_token();
-            let platform = Arc::new_cyclic(|mounted| {
-                platform.mounted = mounted.clone();
-                platform
-            });
+            let platform = Arc::new(platform);
             let owner = platform.clone();
             ctx.effect(move || async move {
                 {
