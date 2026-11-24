@@ -167,7 +167,8 @@ it ends a background job the owner marks that job ended so it can be settled. `w
 job performs a bounded seek/read of its log. A terminal shell answers `write`/`resize` with
 `task_ended`. A caller that never settles keeps the record and its log until the owner unloads.
 
-Output logs live below `execRoot`. The branch registers the logs it gives the model (foreground,
+Command and job output logs live below the output directory the caller gives the owner; the
+persistent shell defaults to `execRoot`. The branch registers the logs it gives the model (foreground,
 occupying, background and shell); Session deletion removes the registered candidates. A shell log
 is registered before the `shell` reply exposes it and is kept until `removeOutputDirectory` or
 Session deletion; settling the shell does not delete it. The init log is internal and is removed

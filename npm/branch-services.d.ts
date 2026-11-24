@@ -439,7 +439,10 @@ export interface HostPlatform {
   execShell(): Promise<ShellStatus>
   /** The sandbox backend a new process would use. */
   sandboxBackend(): Promise<SandboxBackend>
-  /** The directory the persistent shell owns: `<home>/.dim/exec`. */
+  /**
+   * The directory the persistent shell owns: `<home>/.dim/exec`.
+   * @throws {HostPlatformErrorThrown}
+   */
   execRoot(): Promise<string>
   /**
    * The process facts a consumer needs, in one call. Resolves the exec
