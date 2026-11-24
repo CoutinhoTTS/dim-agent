@@ -115,7 +115,7 @@ behind the operator's back.
 | Situation | Rule | Why |
 | --- | --- | --- |
 | A new Session from a client | starts in the mode the request names, or `normal` when it names none; the client sends the mode it last used | the operator should not re-choose for every Session |
-| A running Session | the operator can switch it at any time; the next request declares the new mode, and a turn in flight keeps the mode it pinned | otherwise a change of style means abandoning the conversation |
+| A running Session | the operator can switch it at any time; the next model request declares the new mode, a request already prepared keeps its pin (including its own recovery), and a call already admitted finishes | otherwise a change of style means abandoning the conversation |
 | A branch (line) | has no mode of its own; every line of a Session runs the Session's mode | a line is the same agent; a line in another mode would hand the agent tools the operator excluded |
 | A member Session | starts in its creator Session's current mode, and the operator can switch it like any Session | the member is the same agent doing delegated work; the model must not decide how the agent acts |
 | The model | never chooses or changes a mode | it is the operator's choice of capability |
@@ -126,35 +126,39 @@ declarations.
 ## 4. The tool surface rule
 
 The Session's tools are one set with one owner. `ToolRegistry` already owns the mount list and the
-Session's tool set ([ToolRegistry](../architecture/rust-agent/plugins/ToolRegistry.md)), so it
-also owns this projection. Four terms:
+Session's tool set ([ToolRegistry](../architecture/rust-agent/plugins/ToolRegistry.md)), so it also
+owns this projection. Four terms:
 
 - **callable**: what the Session mounts: host tools, registered tools and each source's sets, after
   `SessionConfig.tools` and `excluded_tools`. The branch adopts and pins this set, and it does not
   change when the mode does.
 - **entry tool**: `codemode` → `codemode`, `shell` → `execute`, `normal` → none.
-- **exposed**: what a call of this mode may reach.
-- **visible**: what the request declares to the model.
+- **visible**: what the request declares and what a top-level model call may name.
+- **delegated**: what a Code Mode child call may name. Their union is the request's exposed set, the
+  only tools the request binds.
 
-| Mode | exposed | visible | entry tool absent from callable |
+| Mode | visible (top-level) | delegated (child) | entry tool absent |
 | --- | --- | --- | --- |
-| `normal` | callable − {`codemode`, `execute`} | same as exposed | — |
-| `codemode` | callable | {`codemode`} | the Session runs `normal` |
-| `shell` | {`execute`} | {`execute`} | the Session runs `normal` |
+| `normal` | callable − {`codemode`, `execute`} | none | — |
+| `codemode` | {`codemode`} | callable − {`codemode`} | the Session runs `normal` |
+| `shell` | {`execute`} | none | the Session runs `normal` |
 
-- Only `visible` reaches the model request, its token accounting and compaction. `exposed` never
+- Admission is by call origin: a top-level call is admitted only inside `visible`, a child call only
+  inside `delegated`. Both then pass the called tool's own Permission and Approval. A call outside
+  its origin's set is refused as an unknown tool, even when the tool is bound. The origin is the
+  existing parent-call scope (`current_parent_call_id`), so a hidden tool cannot be reached by
+  naming it directly.
+- A Code Mode program discovers and calls exactly the `delegated` set: `tools.list` and
+  `tools.describe` project it, and `tools.call` admits inside it. `codemode` itself is never
+  delegated, so a program cannot nest one.
+- A request pins the mode it was prepared under, together with the callable set it pins today, and
+  derives both sets from that pin. A switch takes effect with the next request and needs no
+  re-adoption: the branch's configuration, the version pins and the source sets stay as they are. A
+  request retried through its own source (a budget recovery or a restart recovery) keeps the pin; a
+  continuation request is a new request and pins the current mode, as does the request that follows
+  a tool result.
+- Only `visible` reaches the model request, its token accounting and compaction. `delegated` never
   appears in a prompt, a declaration or the usage counter.
-- A request pins the mode it was prepared under, together with the callable set it pins today. The
-  declarations are the projection of that pinned set, so a switch takes effect with the next
-  request and needs no re-adoption: the branch's configuration, the version pins and the source
-  sets stay as they are. Each request is itself a `model/call` fact carrying its declarations, so a
-  restore keeps what past requests declared and the next request projects with the current mode.
-- A call outside the request's pinned `exposed` is refused as an unknown tool. The check reads the
-  pinned mode, so a turn in flight keeps the mode it started with even if the Session switches
-  meanwhile.
-- A Code Mode program projects its list from the pinned set: `tools.list` and `tools.describe` are
-  `exposed − {codemode}`, and `tools.call` still resolves the pinned handler with Permission and
-  Approval ([CodeMode §1.4](plugins/CodeMode.md#14-tool-exposure-and-eligibility)).
 - The mount list and an Agent profile's tool list narrow the surface and never widen it. `normal`
   hides the two mode tools even when a list names them.
 
@@ -211,12 +215,24 @@ only in the minimal-execution profile, where `ShellTools` takes the Session's si
   declaration and handler with `ToolRegistry` instead of providing `ToolHost`, and still resolves
   the calling branch's `ShellSession` per call. The registry's registration already carries what a
   host tool needs: declaration, handler, risk, mount-list filtering and per-Session lifetime.
-- The minimal-execution profile, which has no other host tools, binds an empty host table.
+- The minimal-execution profile is `shell` by construction: its Sessions set `toolMode: shell`,
+  because `normal` would filter the only tool it has.
 
 Why not conditional mounting: a Session has one `ToolHost` (`WorkspaceTools` provides it in the
 product), and mounting `ShellTools` instead of `WorkspaceTools` for shell Sessions would also remove
 the client methods that part registers (`session.files` mention search, command-output paging), so a
 shell Session would lose client features that have nothing to do with its tools.
+
+Stopping a task is a separate route. Today `session.exec.stop` resolves the branch's
+`BackgroundExec` and stops a native process; a live persistent-shell command belongs to
+`ShellSession`, which provides the branch's `dyn ExecStop`. With `execute` in the product, both
+kinds exist in one Session:
+
+- The stop route asks `BackgroundExec` first and, when it does not know the id, the branch's
+  `ExecStop`, so either kind stops and writes its `exec/ended`.
+- Both parts stay mounted when the mode changes, so a task started in `shell` or `codemode` can
+  still be stopped after the Session switches to `normal`.
+- `session.stop` remains the turn's stop and stops no background task.
 
 ## 7. What each mode still needs
 
@@ -300,18 +316,24 @@ effective mode, so a mode that fell back to `normal` is not reported as in force
 - Flow: create a Session in each mode (request field; absent = `normal`) and assert the request's
   declarations: `normal` = the mounted tools without `codemode`/`execute`, `codemode` = only
   `codemode`, `shell` = only `execute`.
-- Flow: switch a running Session in each direction; the next request declares the new visible set,
-  the turn in flight finishes under its pinned mode, and a line created before the switch uses the
-  new mode at its next request.
+- Flow: in `codemode` mode a top-level call naming `read` is refused as an unknown tool even though
+  the request pinned it for children, and a child call to `codemode` is refused as outside
+  `delegated`. In `normal` mode a top-level call naming `codemode` or `execute` is refused.
 - Flow: in `codemode` mode, a program calls a tool the model does not see; the child
   `step/tool-call` and `step/tool-result` carry `parent_call_id`, and Permission admits the child by
-  its own risk. A call outside the pinned `exposed` set is refused as an unknown tool.
+  its own risk.
+- Flow: switch a running Session in each direction; the next request declares the new visible set,
+  the request after a tool result uses the new mode, a request retried through its own source
+  (budget or restart recovery) keeps its pin, and a call already admitted finishes.
 - Flow: fallback — a mode whose entry tool is absent stays chosen in `get` and is reported as not in
   force; the Session declares the `normal` surface.
 - Flow: a member created under `codemode` records it; switching the creator leaves the member
   unchanged.
 - Flow: restore a record without the field, and fork a Session; both keep `normal` and the source
   mode respectively.
+- Flow: stop a shell task with `session.exec.stop` after switching the Session to `normal`; the same
+  route stops a native process from `BackgroundExec`. The minimal-execution profile's Session runs
+  `shell` and keeps `execute`.
 - Clients: a web component test for the composer menu and the remembered choice, and one tmux TUI
   case for the row and the picker.
 - No event type, envelope or stored format changes, so the fixture compatibility baseline is
