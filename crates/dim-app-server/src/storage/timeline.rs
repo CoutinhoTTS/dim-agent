@@ -1839,13 +1839,15 @@ impl SessionStore {
 
     /// Deletes a directory record after its worktree was removed, or after
     /// its root was verified missing. Refuses while any Session association
-    /// remains, so the non-cascading foreign key stays satisfied; the caller
-    /// re-checks under the same ownership lock before its Git removal.
-    /// Returns whether this database had the record.
+    /// remains, so the non-cascading foreign key stays satisfied, and while a
+    /// removal is deleting the same path; the caller re-checks under the same
+    /// ownership lock before its Git removal. Returns whether this database
+    /// had the record.
     pub async fn remove_worktree_directory(&self, directory: WorktreeDirectory) -> Result<bool> {
         let repository = stored_worktree_path(&directory.repository)?.to_owned();
         let root = stored_worktree_path(&directory.root)?.to_owned();
         let _ownership = self.ownership.lock().await;
+        self.reject_deletion(Path::new(&root)).await?;
         self.timeline
             .db
             .run(move |connection| {
