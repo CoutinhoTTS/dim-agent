@@ -2,7 +2,7 @@
   "description": "The same two-subsystem task on a small window, so main and its line compact and must still know which line they are",
   "message": "Two independent subsystems need building in this project, and each has its own failing test suite:\n\n- parser/ — the integer expression parser specified in parser/expr.py\n- cache/ — the bounded LRU cache with TTL specified in cache/lru.py\n\nThey share no code and do not touch the same files. Make `python3 -m unittest discover -s tests` pass for both, and keep the implementations to their specs.",
   "calls": [
-    {"method": "session.branch_create", "params": {"parentBranchId": "main", "at": 0, "prompt": "Build the parser/ subsystem specified in parser/expr.py so `python3 -m unittest discover -s tests -p 'test_expr.py' -v` passes, keeping to its spec. Do not touch cache/ or tests/test_lru.py."}}
+    {"method": "session.branch_create", "params": {"parentBranchId": "main", "at": "session_open", "prompt": "Build the parser/ subsystem specified in parser/expr.py so `python3 -m unittest discover -s tests -p 'test_expr.py' -v` passes, keeping to its spec. Do not touch cache/ or tests/test_lru.py."}}
   ],
   "steers": [
     {"afterSeconds": 0.1, "text": "A user line is already building parser/ (parser/expr.py and tests/test_expr.py). Keep main strictly on cache/ (cache/lru.py and tests/test_lru.py): do not open another line and do not edit parser/ files."}

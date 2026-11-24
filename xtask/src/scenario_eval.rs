@@ -2128,6 +2128,10 @@ pub(crate) enum SwitchRole {
 /// turn before the line is marked ready.
 const UNKNOWN_BRANCH_RETRIES: u32 = 3;
 
+/// The `at` a `session.branch_create` call writes to start where the Session
+/// did: `drive` replaces it with the sequence `session.create` returned.
+const SESSION_OPEN: &str = "session_open";
+
 /// The tool line a `branch/create` notice opened: the branch tool's line, which
 /// [`SwitchRole::LatestToolLine`] names. Any other notice answers `None`.
 fn tool_line(event: &Value) -> Option<&str> {
@@ -2456,6 +2460,10 @@ pub(crate) struct EventSpec {
     #[serde(skip)]
     pub(crate) declared_mode: InputMode,
 }
+/// One call the runner makes before the message. A `session.branch_create`
+/// whose `parentBranchId` is `main` may set `at` to `"session_open"` instead
+/// of a sequence: the runner replaces it with the sequence `session.create`
+/// returned, so the line starts where the Session did.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Call {
@@ -2636,6 +2644,19 @@ fn into_scenario(
         }
         if !call.params.is_object() && !call.params.is_null() {
             return Err(format!("call {}: params must be an object", call.method));
+        }
+        if call.params.get("at").and_then(Value::as_str) == Some(SESSION_OPEN) {
+            if call.method != "session.branch_create" {
+                return Err(format!(
+                    "call {}: {SESSION_OPEN} is only for session.branch_create",
+                    call.method
+                ));
+            }
+            if call.params.get("parentBranchId").and_then(Value::as_str) != Some("main") {
+                return Err(format!(
+                    "session.branch_create: {SESSION_OPEN} needs parentBranchId main"
+                ));
+            }
         }
     }
     if raw.sources.is_empty() && !raw.events.is_empty() {
@@ -6493,8 +6514,11 @@ async fn drive(
         create["tools"] = json!(tools);
     }
     let created = client.rpc("session.create", create).await;
-    let session = match created {
-        Ok(reply) => reply["sessionId"].as_str().unwrap_or_default().to_owned(),
+    let (session, created_sequence) = match created {
+        Ok(reply) => (
+            reply["sessionId"].as_str().unwrap_or_default().to_owned(),
+            reply["sequence"].as_u64(),
+        ),
         Err(error) => {
             return Driven {
                 session: String::new(),
@@ -6568,6 +6592,18 @@ async fn drive(
             _ => serde_json::Map::new(),
         };
         params.insert("sessionId".to_owned(), json!(session));
+        if params.get("at").and_then(Value::as_str) == Some(SESSION_OPEN) {
+            let Some(sequence) = created_sequence else {
+                driven.stop = "setup_failed";
+                driven.error = Some(format!(
+                    "the calls step {} ({}) starts where the Session did, but session.create returned no sequence",
+                    index + 1,
+                    call.method
+                ));
+                return driven;
+            };
+            params.insert("at".to_owned(), json!(sequence));
+        }
         match client.rpc(&call.method, Value::Object(params)).await {
             Ok(reply) => {
                 if call.method == "session.branch_create" {
@@ -9784,6 +9820,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    /// `session_open` is filled from `session.create`, so only a
+    /// `session.branch_create` on `main` may write it: any other call or
+    /// parent would name a line the Session never opened. A numeric `at` is
+    /// still a call's own sequence, whatever its parent.
+    #[test]
+    fn the_session_open_placeholder_needs_a_main_branch_create() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-parse-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        let parse = |calls: Value| {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "first",
+                "calls": calls,
+                "budget": {"turns": 3, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "it ran"}]
+            }))
+            .unwrap();
+            into_scenario("case".into(), directory.clone(), file)
+        };
+        let create = |at: Value, parent: &str| {
+            json!([{"method": "session.branch_create",
+                    "params": {"parentBranchId": parent, "at": at,
+                               "prompt": "the user's line"}}])
+        };
+        let scenario = parse(create(json!(SESSION_OPEN), "main")).unwrap();
+        assert_eq!(scenario.calls[0].params["at"], SESSION_OPEN);
+        let Err(error) = parse(create(json!(SESSION_OPEN), "3")) else {
+            panic!("a line cut from another line cannot start where the Session did");
+        };
+        assert!(
+            error.contains(SESSION_OPEN) && error.contains("main"),
+            "{error}"
+        );
+        let Err(error) = parse(json!([{"method": "session.context.usage",
+                                       "params": {"at": SESSION_OPEN}}]))
+        else {
+            panic!("the placeholder is only a branch_create's at");
+        };
+        assert!(error.contains("session.branch_create"), "{error}");
+        let scenario = parse(create(json!(0), "3")).unwrap();
+        assert_eq!(scenario.calls[0].params["at"], 0);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     /// A second move fires right after the first, and a move that names a
     /// former-default input sends it to the line it moved away from: the note
     /// a move writes goes in as `append` input, which never starts a turn, so
@@ -11200,7 +11282,7 @@ mod tests {
         );
         assert_eq!(identity.calls[0].method, "session.branch_create");
         assert_eq!(identity.calls[0].params["parentBranchId"], "main");
-        assert_eq!(identity.calls[0].params["at"], 0);
+        assert_eq!(identity.calls[0].params["at"], "session_open");
         assert!(
             identity.calls[0].params["prompt"]
                 .as_str()
@@ -15655,6 +15737,10 @@ mod tests {
         /// so the check is deferred, and the deferred read answers
         /// `session_reloading`: a failure that is not the deferral itself.
         DeferredUsageFails,
+        /// The Session is created at its opening sequence, which
+        /// `session.create` reports, and the submitted turn starts and ends
+        /// at once: a scenario's `session_open` call has a sequence to use.
+        OpensAtTheSessionStart,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -15670,6 +15756,8 @@ mod tests {
         usages: AtomicUsize,
         /// The `branchId` of every `session.branch_set_default`, in order.
         moves: Mutex<Vec<String>>,
+        /// The parameters of every `session.branch_create`, in order.
+        opens: Mutex<Vec<Value>>,
         attached: tokio::sync::Notify,
         closes: AtomicUsize,
     }
@@ -15800,7 +15888,7 @@ mod tests {
             // The line is busy until the peer writes the call's result, the
             // way a running turn is: `session.idle` stays unanswered and the
             // driver's own deadline reports the line busy.
-            let mut settled = false;
+            let mut settled = matches!(script, PeerScript::OpensAtTheSessionStart);
             // [`PeerScript::HeldIdle`]'s hold: the calls it kept, and the
             // deadline it answers them at. The deadline stands after the
             // release, so a later call starts no second hold.
@@ -15834,6 +15922,13 @@ mod tests {
                             .unwrap_or_default()
                             .to_owned(),
                     );
+                }
+                if method == "session.branch_create" {
+                    recorded
+                        .opens
+                        .lock()
+                        .unwrap()
+                        .push(request["params"].clone());
                 }
                 if method == "session.attach" {
                     recorded.attached.notify_one();
@@ -15960,6 +16055,7 @@ mod tests {
                         PeerScript::ChainedToolLineBeforeActivation
                         | PeerScript::ChainedToolLineAfterActivation => None,
                         PeerScript::DeferredUsageFails => None,
+                        PeerScript::OpensAtTheSessionStart => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -15996,7 +16092,11 @@ mod tests {
                         "features": ["session.create", "session.history"],
                         "daemonProfile": {"kind": "mock"},
                     }}),
-                    "session.create" => json!({"result": {"sessionId": "peer"}}),
+                    "session.create" => match &script {
+                        PeerScript::OpensAtTheSessionStart => json!({"result": {
+                            "sessionId": "peer", "sequence": 12}}),
+                        _ => json!({"result": {"sessionId": "peer"}}),
+                    },
                     "session.context.usage" => {
                         let read = recorded.usages.fetch_add(1, Ordering::SeqCst) + 1;
                         match (matches!(script, PeerScript::DeferredUsageFails), read) {
@@ -16111,10 +16211,13 @@ mod tests {
                         PeerScript::HeldIdle
                             | PeerScript::SwitchNeverFires
                             | PeerScript::DeferredUsageFails
+                            | PeerScript::OpensAtTheSessionStart
                     ) {
                         if matches!(
                             script,
-                            PeerScript::SwitchNeverFires | PeerScript::DeferredUsageFails
+                            PeerScript::SwitchNeverFires
+                                | PeerScript::DeferredUsageFails
+                                | PeerScript::OpensAtTheSessionStart
                         ) {
                             write
                                 .write_all(&notice(json!({"type": "turn", "name": "end",
@@ -16233,6 +16336,88 @@ mod tests {
         assert!(
             error.contains("the decline of c1 failed") && error.contains("session_reloading"),
             "{error}"
+        );
+    }
+
+    /// A `session.branch_create` whose `at` is `session_open` is sent with the
+    /// sequence `session.create` reported, so the line starts where the
+    /// Session did without the scenario naming a number.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_open_call_starts_the_line_where_the_session_did() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-drive-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::OpensAtTheSessionStart).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        scenario.calls = vec![Call {
+            method: "session.branch_create".into(),
+            params: json!({"parentBranchId": "main", "at": SESSION_OPEN,
+                           "prompt": "the line's job"}),
+        }];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let opened = reads.opens.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "idle", "{:?}", driven.error);
+        assert_eq!(opened.len(), 1, "one line is opened before the message");
+        assert_eq!(
+            opened[0]["at"], 12,
+            "the reply's sequence fills the placeholder: {}",
+            opened[0]
+        );
+        assert_eq!(opened[0]["parentBranchId"], "main");
+        assert_eq!(opened[0]["sessionId"], "peer");
+    }
+
+    /// A `session_open` call needs the sequence `session.create` reports: a
+    /// reply without one fails the run in its calls step, before the message,
+    /// and the call is never sent.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_open_call_without_a_session_sequence_is_a_setup_failure() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-missing-{}",
+            std::process::id()
+        ));
+        let (socket, reads) = scripted_peer(&directory, 8_000, PeerScript::SwitchNeverFires).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        scenario.calls = vec![Call {
+            method: "session.branch_create".into(),
+            params: json!({"parentBranchId": "main", "at": SESSION_OPEN,
+                           "prompt": "the line's job"}),
+        }];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let opened = reads.opens.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "setup_failed", "{:?}", driven.error);
+        assert!(opened.is_empty(), "the call is not sent without a sequence");
+        assert!(
+            driven.error.unwrap_or_default().contains("no sequence"),
+            "the error names the missing sequence"
         );
     }
 
