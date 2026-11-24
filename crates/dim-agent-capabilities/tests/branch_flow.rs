@@ -5688,7 +5688,6 @@ async fn a_parent_read_carries_the_effects_its_tool_results_declared() {
             "branch".into(),
             "touch".into(),
         ]),
-        system_prompt: "You are a test.".into(),
         ..SessionConfig::default()
     }))
     .await
