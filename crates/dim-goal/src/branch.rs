@@ -1985,7 +1985,20 @@ impl Owner {
         self.task(
             format!("conclusion:{sequence}"),
             Some(Retry::Settle),
-            move |owner| Box::pin(async move { owner.run_conclusion(sequence, conclusion).await }),
+            move |owner| {
+                Box::pin(async move {
+                    let result = owner.run_conclusion(sequence, conclusion).await;
+                    #[cfg(feature = "testing")]
+                    crate::testing::stage_held(
+                        &owner.session_id,
+                        &owner.branch_id,
+                        crate::testing::Stage::Done,
+                        sequence,
+                    )
+                    .await;
+                    result
+                })
+            },
         );
     }
 
@@ -2087,45 +2100,50 @@ impl Owner {
                         )
                         .await?;
                     }
-                    Some(Decision::Continuation { .. }) => loop {
-                        let through = self.await_dispatched().await?;
-                        let decision = {
-                            let state = self.state.lock().unwrap();
-                            if self.timeline.committed() != through {
-                                continue;
-                            }
-                            if state.written.contains(&sequence)
-                                || fold::decide_conclusion(&state.fold, sequence, &conclusion)
-                                    != Some(ConclusionAction::Continue)
-                                || state.fold.turn_end.as_ref().map(|end| end.sequence)
-                                    != Some(end.sequence)
-                                || state.fold.turn_start != turn_start
-                            {
+                    Some(Decision::Continuation { .. }) => {
+                        #[cfg(feature = "testing")]
+                        crate::testing::write_held(&self.session_id, &self.branch_id, evaluation)
+                            .await;
+                        loop {
+                            let through = self.await_dispatched().await?;
+                            let decision = {
+                                let state = self.state.lock().unwrap();
+                                if self.timeline.committed() != through {
+                                    continue;
+                                }
+                                if state.written.contains(&sequence)
+                                    || fold::decide_conclusion(&state.fold, sequence, &conclusion)
+                                        != Some(ConclusionAction::Continue)
+                                    || state.fold.turn_end.as_ref().map(|end| end.sequence)
+                                        != Some(end.sequence)
+                                    || state.fold.turn_start != turn_start
+                                {
+                                    return Ok(());
+                                }
+                                fold::decide_evaluated_continuation(&state.fold, limit)
+                            };
+                            let Some(Decision::Continuation { count, idle }) = decision else {
+                                return Ok(());
+                            };
+                            let input = text::evaluated_continuation(
+                                &self.branch_id,
+                                count,
+                                limit,
+                                idle,
+                                evaluation,
+                                &named,
+                            );
+                            // The input is committed before the fold consumes it; a
+                            // retry in between must not answer it again.
+                            if self.state.lock().unwrap().written.contains(&sequence) {
                                 return Ok(());
                             }
-                            fold::decide_evaluated_continuation(&state.fold, limit)
-                        };
-                        let Some(Decision::Continuation { count, idle }) = decision else {
-                            return Ok(());
-                        };
-                        let input = text::evaluated_continuation(
-                            &self.branch_id,
-                            count,
-                            limit,
-                            idle,
-                            evaluation,
-                            &named,
-                        );
-                        // The input is committed before the fold consumes it; a
-                        // retry in between must not answer it again.
-                        if self.state.lock().unwrap().written.contains(&sequence) {
-                            return Ok(());
+                            if self.write_if_head(input, through).await?.is_some() {
+                                self.state.lock().unwrap().written.insert(sequence);
+                                return Ok(());
+                            }
                         }
-                        if self.write_if_head(input, through).await?.is_some() {
-                            self.state.lock().unwrap().written.insert(sequence);
-                            return Ok(());
-                        }
-                    },
+                    }
                 }
             }
         }

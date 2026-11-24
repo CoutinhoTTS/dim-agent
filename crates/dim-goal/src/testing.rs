@@ -101,7 +101,8 @@ pub enum Stage {
     Create,
     /// After a `continue` conclusion took its action, before its settings read.
     Continue,
-    /// After `do_turn_end` took every decision it carries.
+    /// After a turn-end or conclusion decision took every decision it
+    /// carries.
     Done,
 }
 
