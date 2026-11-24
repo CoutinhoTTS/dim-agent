@@ -962,6 +962,84 @@ async fn a_failed_state_record_takes_no_second_decision() {
     env.close().await;
 }
 
+/// The pause a turn end decides is stated with the reason the fold gives at
+/// the record's own cutoff: an ordinary Append resets the continuation count
+/// without opening a turn, so the limit pause is no longer the answer (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_appended_note_returns_the_turn_end_to_its_continuation() {
+    let env = Env::start_gated().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    let _set_end = env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    // The second turn end decides the limit pause, and its record writer is
+    // held where it settled the decisions, before it composes the record.
+    let mut record = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        first.sequence,
+        None,
+    );
+    let end = env.tool_turn("main", &[&first]);
+    assert_eq!(
+        record.arrived().await,
+        end.sequence,
+        "the pause's record writer answers the turn end at {}",
+        end.sequence
+    );
+
+    // An ordinary Append commits in the settlement window: the fold resets the
+    // continuation count without a driving input, so no limit pause is due.
+    let note = env.emit("main", user("a note", InputMode::Append));
+    env.dispatched("main", note.sequence).await;
+    let mut pause = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Append,
+        end.sequence,
+        Some(end.sequence),
+    );
+    let mut retaken = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        end.sequence,
+        Some(end.sequence),
+    );
+    record.release();
+
+    let recorded = tokio::select! {
+        _ = pause.arrived() => true,
+        _ = retaken.arrived() => false,
+    };
+    assert!(
+        !recorded,
+        "the Append at {} takes the limit pause back, but the record at {} reached its append",
+        note.sequence, end.sequence
+    );
+    retaken.release();
+    let continuation = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="continuation" count="1" limit="1" after="{}""#,
+                end.sequence
+            ),
+        )
+        .await;
+    assert_eq!(
+        continuation.text,
+        texts::continuation("main", 1, Some(1), 0, end.sequence),
+        "the turn end at {} continues the goal the Append left running",
+        end.sequence
+    );
+    env.close().await;
+}
+
 /// The closing pause is stated at the fold, not at the snapshot the close
 /// started from: a change that committed before it and is still waiting for the
 /// fold wins, and no record is written while the fold is behind (#2119).
@@ -1004,55 +1082,119 @@ async fn the_closing_pause_writes_nothing_while_a_committed_change_is_unfolded()
     env.close().await;
 }
 
-/// A creation that folds after the pause belongs to a goal that is not running:
-/// the settle ends that evaluator line instead of leaving it open (#2119,
-/// Pursuit §13 E2).
+/// The closing pause states the fold its snapshot was taken from and commits
+/// only while that fold is still the branch's head: a fact that commits after
+/// the close caught up leaves no pause labeled with the newer sequence (#2119).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_creation_that_folds_after_the_pause_is_ended() {
-    let env = Env::start().await;
-    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
-        .await
-        .expect("set writes");
-    env.wait_for("main", r#"op="set""#).await;
-    env.goal("pause", json!({})).await.expect("pause writes");
-    env.wait_for("main", r#"op="pause""#).await;
+async fn a_change_committed_after_the_close_caught_up_leaves_no_pause() {
+    let env = Env::start_gated().await;
+    env.set("ship it").await;
+    let head = env.timeline("main").committed();
+    env.dispatched("main", head).await;
 
-    // A creation committed for a goal that already stopped commits its
-    // `branch/create` after the pause: nothing evaluates it any more.
-    let at = env.timeline("main").sequence();
+    // The close catches up, reads the fold it states and is held before its
+    // append.
+    let timeline = env.timeline("main");
+    let mut closing = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Closing,
+        head,
+        None,
+    );
+    let change = texts::pause("main");
+    let (env, ()) = tokio::join!(env.restore(), async {
+        closing.arrived().await;
+        timeline
+            .append(message(vec![raw(&change, None, false)], InputMode::Append).into())
+            .expect("the change commits inside the close");
+        closing.release();
+    });
+    let pauses: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| block.marker.contains(r#"reason="interrupted_unload""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        pauses.is_empty(),
+        "the close states no pause at a head its snapshot does not hold, yet it wrote {pauses:?}"
+    );
+    env.close().await;
+}
+
+/// A creation that folds after the evaluation it belongs to was answered is
+/// ended by the settlement that holds task admission, with no later input to
+/// wake it (#2119, Pursuit §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_creation_that_folds_while_the_settlement_holds_admission_is_ended() {
+    let env = Env::start().await;
+    let set = env.set("make the tests pass").await;
+    let end = env.turn("main", &[&set]);
+    let evaluation = end.sequence;
+    let first = env
+        .open_branch(
+            "main",
+            "check the result",
+            BranchSource::Host {
+                operation_id: format!("goal:evaluate:{evaluation}"),
+            },
+        )
+        .await;
+    env.dispatched("main", env.timeline("main").committed())
+        .await;
+
+    // The conclusion's record writer is held where it settled the decisions,
+    // before it composes its record.
+    let mut record = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let conclusion = texts::conclusion("main", &first, evaluation, "done", "DONE: verified");
+    let conclusion = env
+        .write_message(
+            "main",
+            vec![raw(&conclusion, None, false)],
+            InputMode::Append,
+        )
+        .sequence;
+    assert_eq!(
+        record.arrived().await,
+        conclusion,
+        "the conclusion's record writer answers the conclusion at {conclusion}"
+    );
+
+    // A creation for the evaluation the conclusion already answered commits its
+    // `branch/create` while admission is suspended: nothing evaluates it any
+    // more, and its cleanup is owed.
     let evaluator = env
         .open_branch(
             "main",
             "check the result",
             BranchSource::Host {
-                operation_id: format!("goal:evaluate:{at}"),
+                operation_id: format!("goal:evaluate:{evaluation}"),
             },
         )
         .await;
-    // The pause's own answer record can still hold the decisions when the
-    // creation folds, and one more fact takes the settle over a fold that holds
-    // both.
-    env.emit(
-        "main",
-        message(vec![raw("a note", None, false)], InputMode::Append),
+    env.dispatched("main", env.timeline("main").committed())
+        .await;
+
+    // The record's own fold is held too, so no later fact takes the cleanup up:
+    // only the settlement that suspended admission owes it.
+    let written = dim_goal::testing::hold_input(env.session_id(), "main", conclusion);
+    let mut ended = dim_agent_capabilities::timeline_tree::testing::hold_end_record(
+        env.session_id(),
+        &evaluator,
     );
-    let ended = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if env
-                .ended("main")
-                .await
-                .iter()
-                .any(|end| end.branch == evaluator)
-            {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    assert!(
-        ended.is_ok(),
-        "the creation for a paused goal is ended, not left open"
-    );
+    record.release();
+    ended.arrived().await;
+    ended.release();
+    written.release();
+    env.dispatched("main", env.timeline("main").committed())
+        .await;
     env.close().await;
 }

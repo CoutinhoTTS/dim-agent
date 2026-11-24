@@ -361,16 +361,36 @@ enum Retry {
 enum Answers {
     /// The newest change trigger, which `after` names.
     Change,
-    /// The pause the turn end at `after` decides.
-    TurnEnd,
-    /// The pause the conclusion at `after` of `evaluation` decides: a
-    /// `continue` at the limit, or a `failed` report.
+    /// The pause the turn end at `after` decides, with the limit and progress
+    /// its decision read: the record states the reason the fold gives at the
+    /// writer's own cutoff.
+    TurnEnd {
+        limit: Option<u64>,
+        progress: Option<fold::Progress>,
+    },
+    /// The pause the `continue` conclusion at `after` of `evaluation` decides.
+    EvaluatedContinuation { evaluation: u64, limit: Option<u64> },
+    /// The pause the failed conclusion at `after` of `evaluation` states.
     Conclusion(u64),
     /// The pause the failed evaluation states: its creation failed or its
     /// line ended before a conclusion.
     EvaluationFailed(u64),
     /// The fact `after` names, decided once by its caller.
     Fact,
+}
+
+impl Answers {
+    /// The pause `after` still decides at `fold`, with the reason that fold
+    /// gives it now.
+    fn pause(&self, fold: &fold::Fold, after: u64) -> Option<&'static str> {
+        match *self {
+            Answers::TurnEnd { limit, progress } => fold.pause_at_end(after, limit, progress),
+            Answers::EvaluatedContinuation { evaluation, limit } => {
+                fold.pause_at_conclusion(after, evaluation, limit)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -411,8 +431,10 @@ impl State {
         }
         match answers {
             Answers::Change => self.fold.pending_change() != Some(after),
-            Answers::TurnEnd => !self.fold.pauses_at_end(after),
-            Answers::Conclusion(evaluation) => !self.fold.pauses_at_conclusion(after, evaluation),
+            Answers::TurnEnd { .. } | Answers::EvaluatedContinuation { .. } => {
+                answers.pause(&self.fold, after).is_none()
+            }
+            Answers::Conclusion(evaluation) => !self.fold.conclusion_decides(after, evaluation),
             Answers::EvaluationFailed(evaluation) => !self.fold.pauses_at_failure(evaluation),
             Answers::Fact => false,
         }
@@ -579,7 +601,7 @@ impl Owner {
         let _write = self.write_guard().await?;
         let settled = self.settle_decisions().await;
         if let Err(error) = settled {
-            self.state.lock().unwrap().terminating = false;
+            self.resume_settlement();
             return Err(error);
         }
         let result = async {
@@ -667,7 +689,7 @@ impl Owner {
             Ok(sequence)
         }
         .await;
-        self.state.lock().unwrap().terminating = false;
+        self.resume_settlement();
         result
     }
 
@@ -1002,9 +1024,9 @@ impl Owner {
         // fold, and a record composed before it would state the state that
         // change replaced: the close catches up first, and states no pause
         // while the fold is behind.
-        if !self.catch_up().await? {
+        let Some(head) = self.catch_up().await? else {
             return Ok(());
-        }
+        };
         let (objective, judge, live, evaluations) = {
             let state = self.state.lock().unwrap();
             if !state.fold.running() {
@@ -1017,6 +1039,38 @@ impl Owner {
                 state.fold.evaluations.values().cloned().collect::<Vec<_>>(),
             )
         };
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
+            &self.branch_id,
+            crate::testing::Stage::Closing,
+            head,
+        )
+        .await;
+        let status = text::State::Paused("interrupted_unload".into());
+        // The snapshot and the batch name the cutoff the fold was read at: a
+        // fact that commits after catch-up leaves nothing written, and the load
+        // mapping covers the missing pause.
+        let input = text::state(
+            &self.branch_id,
+            objective.as_deref(),
+            status.clone(),
+            judge,
+            text::Answered::Sequence(head),
+            live,
+            &self.texts,
+        );
+        let Some(events) = self.append_business_if_head(
+            vec![input],
+            recovery::BusinessState::new("pause", objective, status.clone(), judge, None),
+            None,
+            Some(head),
+        )?
+        else {
+            return Ok(());
+        };
+        // The pause is the fact that makes the evaluations unwanted, so their
+        // lines end only once it committed (Pursuit §13 E2).
         for branch in evaluations {
             if self.session.phase() >= dim_agent_runtime::SessionPhase::Closing {
                 break;
@@ -1035,21 +1089,6 @@ impl Owner {
                 Err(error) => return Err(error),
             }
         }
-        let status = text::State::Paused("interrupted_unload".into());
-        let input = text::state(
-            &self.branch_id,
-            objective.as_deref(),
-            status.clone(),
-            judge,
-            text::Answered::Sequence(self.timeline.committed()),
-            live,
-            &self.texts,
-        );
-        let events = self.append_business(
-            vec![input],
-            recovery::BusinessState::new("pause", objective, status.clone(), judge, None),
-            None,
-        )?;
         self.publication(events.last().expect("paused state").sequence)
             .await?;
         self.state.lock().unwrap().fold.state = status;
@@ -1402,7 +1441,7 @@ impl Owner {
         let owner = self.clone();
         self.tasks.spawn(async move {
             let result = owner.record_inner(after, status, answers).await;
-            owner.state.lock().unwrap().terminating = false;
+            owner.resume_settlement();
             // A record the fold no longer asked for leaves the goal running
             // with a decision still due: a fact that committed while the
             // settlement held the decisions asked for one, and nothing else
@@ -1421,11 +1460,12 @@ impl Owner {
             .map_err(|_| AgentError::Closed("Goal".into()))?
     }
 
-    /// States `status` as the answer to the fact at `after`, and answers
-    /// whether it did. The record is composed only from a fold that has caught
-    /// up to the branch's committed cutoff, and only while that fact still
-    /// decides it: a driving input or a newer turn that folds while the
-    /// decisions settle leaves the state to that turn (C4, C5, D3).
+    /// States `status` — or the pause the fold still decides for `answers` —
+    /// as the answer to the fact at `after`, and answers whether it did. The
+    /// record is composed only from a fold that has caught up to the branch's
+    /// committed cutoff, and only while that fact still decides it: a driving
+    /// input or a newer turn that folds while the decisions settle leaves the
+    /// state to that turn (C4, C5, D3).
     async fn record_inner(
         self: &Arc<Self>,
         after: u64,
@@ -1456,9 +1496,16 @@ impl Owner {
                 if state.stale(after, answers) {
                     return Ok(false);
                 }
+                let status = match status.clone() {
+                    Some(status) => status,
+                    None => match answers.pause(&state.fold, after) {
+                        Some(reason) => text::State::Paused(reason.to_owned()),
+                        None => state.fold.state.clone(),
+                    },
+                };
                 (
                     state.fold.objective.clone(),
-                    status.clone().unwrap_or_else(|| state.fold.state.clone()),
+                    status,
                     state.fold.judge,
                     state.fold.live,
                 )
@@ -1502,17 +1549,18 @@ impl Owner {
     }
 
     /// Waits until the fold has stepped the branch's committed cutoff and
-    /// answers whether it did. A closing branch states the state it ended on,
-    /// so it reads the facts already committed before it composes its last
-    /// record. `false` means the fold is still behind, and the caller writes
+    /// answers the cutoff it read. A closing branch states the state it ended
+    /// on, so it reads the facts already committed before it composes its last
+    /// record. `None` means the fold is still behind, and the caller writes
     /// nothing: the newest committed change stays in effect, and the load
     /// mapping covers the missing pause. The wait is bounded by the grace a
     /// closing branch gives its own delivery, and spent once: the branch runs
     /// its closing pause on both its lifecycle and its cleanup, and the second
     /// reads the fold as it stands instead of waiting again.
-    async fn catch_up(&self) -> Result<bool, AgentError> {
+    async fn catch_up(&self) -> Result<Option<u64>, AgentError> {
         if self.state.lock().unwrap().closing_grace {
-            return Ok(self.dispatcher.sequence() >= self.timeline.committed());
+            let through = self.timeline.committed();
+            return Ok((self.dispatcher.sequence() >= through).then_some(through));
         }
         let through = self.timeline.committed();
         let mut dispatched = self.dispatcher.watch();
@@ -1522,18 +1570,22 @@ impl Owner {
                     return Err(error);
                 }
                 if dispatched.changed().await.is_err() {
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
-            Ok(self.timeline.committed() == through)
+            Ok((self.timeline.committed() == through).then_some(through))
         };
         let result = tokio::time::timeout(CLOSING_GRACE, stepped)
             .await
-            .unwrap_or(Ok(false));
+            .unwrap_or(Ok(None));
         self.state.lock().unwrap().closing_grace = true;
         result
     }
 
+    /// Ends the decisions this generation still runs and waits for the fold to
+    /// take every write it made. It ends no evaluator: a line ends only from a
+    /// folded fact that makes it unwanted ([`Self::settle`], `pause_closing`),
+    /// never from a pause that has not committed yet (Pursuit §13 E2).
     async fn settle_decisions(&self) -> Result<(), AgentError> {
         let previous = {
             let mut state = self.state.lock().unwrap();
@@ -1544,35 +1596,7 @@ impl Owner {
         };
         previous.close();
         previous.wait().await;
-        self.await_fold().await?;
-        let evaluations = {
-            let state = self.state.lock().unwrap();
-            state
-                .fold
-                .evaluations
-                .iter()
-                .filter(|(_, branch)| {
-                    !state.fold.ended.contains(*branch) && !state.fold.failed.contains(*branch)
-                })
-                .map(|(at, branch)| (*at, branch.clone()))
-                .collect::<Vec<_>>()
-        };
-        for (at, branch) in evaluations {
-            match self
-                .tree
-                .end(
-                    branch,
-                    BranchSource::Host {
-                        operation_id: fold::evaluation_operation(at),
-                    },
-                )
-                .await
-            {
-                Ok(()) | Err(AgentError::BranchEnded(_)) => (),
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(())
+        self.await_fold().await
     }
 
     /// States the newest change trigger, once (D3): the record names the
@@ -1858,14 +1882,10 @@ impl Owner {
         // evaluator-first decision when a Queue that held it back was
         // withdrawn. A pause was decided above, at the writer's cutoff.
         match decision {
-            Decision::Pause { reason } => {
+            Decision::Pause { .. } => {
                 drop(write);
-                self.record(
-                    after,
-                    Some(text::State::Paused(reason.to_owned())),
-                    Answers::TurnEnd,
-                )
-                .await?;
+                self.record(after, None, Answers::TurnEnd { limit, progress })
+                    .await?;
             }
             Decision::Continuation { .. } => loop {
                 let through = self.await_dispatched().await?;
@@ -2269,12 +2289,12 @@ impl Owner {
                 };
                 match decision {
                     None => {}
-                    Some(Decision::Pause { reason }) => {
+                    Some(Decision::Pause { .. }) => {
                         drop(write);
                         self.record(
                             sequence,
-                            Some(text::State::Paused(reason.to_owned())),
-                            Answers::Conclusion(evaluation),
+                            None,
+                            Answers::EvaluatedContinuation { evaluation, limit },
                         )
                         .await?;
                     }

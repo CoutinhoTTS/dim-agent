@@ -807,6 +807,122 @@ async fn pursuit_5_an_abandoned_pause_does_not_fail_an_in_flight_evaluation() {
     env.close().await;
 }
 
+/// A pause the Queue abandons leaves the evaluator it settled open: the
+/// settlement cancels and drains the decisions, and the evaluator ends only
+/// once a folded fact makes it unwanted (#2119, Pursuit §4.1, §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pause_a_queue_abandons_leaves_its_evaluator_to_conclude() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // A Queue drives a turn whose end decides the limit pause, and the pause's
+    // record writer is held after it settled the decisions.
+    let mut record = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    let end = env.turn_ids("main", &[&queued.id]);
+    assert_eq!(
+        record.arrived().await,
+        end.sequence,
+        "the pause's record writer answers the turn end at {}",
+        end.sequence
+    );
+
+    // A second Queue commits in the settlement window: the pause is abandoned,
+    // and the evaluation its writer settled is still wanted.
+    let second = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    env.dispatched("main", second.sequence).await;
+    let ended: Vec<String> = env
+        .ended("main")
+        .await
+        .iter()
+        .filter(|end| end.branch == create.branch)
+        .map(|end| format!("{:?}", end.source))
+        .collect();
+    assert!(
+        ended.is_empty(),
+        "the Queue at {} abandons the pause at {}, but its settlement ended the evaluator: {ended:?}",
+        second.sequence,
+        end.sequence
+    );
+    // The turn end returns only after the record writer released admission, so
+    // the conclusion below folds into a decision the settlement still takes.
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        end.sequence,
+        Some(end.sequence),
+    );
+    record.release();
+    done.arrived().await;
+    done.release();
+
+    // The abandoned pause leaves the evaluation to conclude.
+    let conclusion = write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified");
+    let completed = env.wait_for("main", r#"status="completed""#).await;
+    assert_eq!(
+        completed.text,
+        texts::evaluated("main", "ship it", "completed", "verified", conclusion),
+        "the evaluator the pause settled concludes for the goal the Queue kept running"
+    );
+    env.close().await;
+}
+
+/// The end of an evaluator the settlement ended for a pause folds after that
+/// pause: it is cleanup, not the evaluation's own failure, and it does not
+/// restate the pause (#2119, Pursuit §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_evaluator_does_not_restate_the_pause_that_settled_it() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, _create) = completion_requested_with(&env, Some(1)).await;
+
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    let end = env.turn_ids("main", &[&queued.id]);
+    let pause = env
+        .wait_for("main", r#"kind="state" status="paused""#)
+        .await;
+    assert_eq!(
+        pause.text,
+        texts::evaluated_pause(
+            "main",
+            "ship it",
+            "limit",
+            "the automatic continuation limit was reached",
+            end.sequence
+        ),
+        "the end of the evaluator at {evaluation} does not restate the limit pause"
+    );
+    let restated: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| block.marker.contains(r#"reason="evaluation_failed""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        restated.is_empty(),
+        "the ended evaluator restated the pause as its own failure: {restated:?}"
+    );
+    env.close().await;
+}
+
 #[tokio::test]
 async fn pursuit_13_e3_an_outside_end_before_the_conclusion_fails_the_evaluation() {
     let env = Env::start().await;

@@ -104,6 +104,9 @@ pub enum Stage {
     /// After a turn-end or conclusion decision took every decision it
     /// carries.
     Done,
+    /// After the closing pause read the fold it states and before it composes
+    /// and appends that record.
+    Closing,
     /// After the state record writer took the write guard and settled the
     /// decisions, before it composes the record it answers `after` with.
     Record,

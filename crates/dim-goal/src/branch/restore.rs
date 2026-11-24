@@ -39,6 +39,15 @@ impl Owner {
         Ok(through)
     }
 
+    /// Releases task admission and takes up what the settlement deferred: a
+    /// creation or a fold that reached `settle` while the decisions were
+    /// suspended ran no task, and no later input may be needed for it
+    /// (Pursuit §13 E2).
+    pub(super) fn resume_settlement(self: &Arc<Self>) {
+        self.state.lock().unwrap().terminating = false;
+        self.settle();
+    }
+
     pub(super) fn resume_decisions(self: &Arc<Self>) {
         if !self.state.lock().unwrap().fold.running() {
             return;
