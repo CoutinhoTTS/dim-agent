@@ -97,6 +97,17 @@ export class Projection {
   private discardedThoughts = new Map<string, Set<string>>()
   /** Requests whose terminal fact arrived: no later snapshot describes them. */
   private endedRequests = new Set<string>()
+  /** The requests the running turn has shown, by its start, output steps, frames and reads. */
+  private turnRequests = new Set<string>()
+  /**
+   * The requests of the turn whose end this line applied: their rows are closed
+   * and their counts dropped, so a frame that still names one arrives late and
+   * draws nothing. A later turn cannot name one again, since every request gets
+   * a fresh id (crates/dim-agent-capabilities/src/agent_loop.rs, `start_request`),
+   * and one turn is as late as a client can be: it keeps one frame per line and
+   * drops it when the turn end applies (stores/chat.ts).
+   */
+  private endedTurnRequests = new Set<string>()
   /** Names each thought row; a rebuilt row gets a new one. */
   private rowSeq = 0
   /** The error of the model failure the latest turn end may repeat. */
@@ -139,6 +150,8 @@ export class Projection {
   }
 
   activeOutput(output: { requestId: string; textCharacters: number; thinkingCharacters: number }): void {
+    if (this.endedTurnRequests.has(output.requestId)) return
+    this.turnRequests.add(output.requestId)
     this.output = output
     const committed = this.requestChars(output.requestId)
     committed.text = output.textCharacters
@@ -156,6 +169,7 @@ export class Projection {
     this.cursor = event.sequence
     this.applyControl(event)
     const content = event.content
+    if ("requestId" in content) this.turnRequests.add(content.requestId)
     switch (content.kind) {
       case "input":
         if (content.text !== undefined) {
@@ -307,6 +321,8 @@ export class Projection {
         // ended stays ended; the counts only matter while it may still write.
         this.discardedThoughts.clear()
         this.committed.clear()
+        this.endedTurnRequests = this.turnRequests
+        this.turnRequests = new Set()
         // The marker belongs to this turn only, whatever the outcome.
         const shown = this.shownFailure
         this.shownFailure = undefined
@@ -329,7 +345,8 @@ export class Projection {
   /** Shows a request's output that is not written yet. */
   progress(progress: ModelProgress): void {
     const requestId = progress.requestId
-    if (requestId === undefined || this.endedRequests.has(requestId)) return
+    if (requestId === undefined || this.endedRequests.has(requestId) || this.endedTurnRequests.has(requestId)) return
+    this.turnRequests.add(requestId)
     // A notice with no output at offset zero is the producer restarting the
     // request: a retry starts from nothing, whatever the attempt before showed.
     if (progress.text === "" && progress.textOffset === 0 && progress.thinking === "" && progress.thinkingOffset === 0) this.committed.delete(requestId)
