@@ -10207,6 +10207,55 @@ async fn a_user_opened_line_records_its_own_source() {
     soon(agent.close()).await.unwrap();
 }
 
+/// A line the user opened reads the end rule it lives under: the line cannot
+/// end itself and the user ends it, which no move changes, and the note that
+/// makes it the default branch states the rule once (design §4, §12.1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_opened_line_states_the_end_rule_that_never_changes() {
+    let probe = Arc::new(Probe::default());
+    let agent = setup(&probe).await;
+    let session = soon(agent.create_session(SessionConfig::default()))
+        .await
+        .unwrap();
+    let line = soon(session.branch(
+        "main".into(),
+        0,
+        BranchOptions {
+            prompt: "the user opened this".into(),
+            source: BranchSource::User {
+                operation_id: "client-op".into(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    soon(session.idle(&line)).await.unwrap();
+    let opening = blocks_with(&local_events(&session, &line).await, "<dim-branch-line ");
+    assert_eq!(opening.len(), 1, "{opening:?}");
+    assert!(
+        opening[0].contains("You cannot call end on yourself; the user ends this line."),
+        "{}",
+        opening[0]
+    );
+    assert!(
+        !opening[0].contains("Unless the user makes this line the default branch"),
+        "the birth block names no state in which the line may end itself: {}",
+        opening[0]
+    );
+    switch(&session, &line).await;
+    let note = owed_notes(&session, &line, 1).await.pop().unwrap();
+    assert!(
+        note.contains("you can open lines with create"),
+        "the note states the right the move adds: {note}"
+    );
+    assert_eq!(
+        note.matches("cannot call end on yourself").count(),
+        1,
+        "the note states the end rule once: {note}"
+    );
+    soon(agent.close()).await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_default_branch_that_was_a_tool_line_stops_sending_its_idle_notice() {
     let probe = Arc::new(Probe::default());

@@ -5057,7 +5057,7 @@ impl BranchLine {
                 ),
                 _ => (
                     format!(
-                        "The user has now made this line the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you cannot call end on yourself; the user ends this line. Line {other} stays open and keeps the lines it opened."
+                        "The user has now made this line the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create. Line {other} stays open and keeps the lines it opened."
                     ),
                     self.config.user_default_note.as_deref().unwrap_or(""),
                 ),
@@ -6164,7 +6164,7 @@ fn user_line_identity(line: &str, parent: &str) -> InputBlock {
 /// The birth sentences of a line the user opened (design §12.1).
 fn user_line_body(line: &str, parent: &str) -> String {
     format!(
-        "You are line {line} of this session, opened by the user from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You can read {parent}'s work after this point. Unless the user makes this line the default branch, you cannot call end on yourself. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one is from the user for this line."
+        "You are line {line} of this session, opened by the user from line {parent} at this point of its history. You are the same agent as {parent}: everything above is your own history, and you continue from here on your own line, in parallel with {parent}. You can read {parent}'s work after this point. You cannot call end on yourself; the user ends this line. Messages above that were addressed to {parent} are {parent}'s, not yours. The message after this one is from the user for this line."
     )
 }
 
