@@ -10,6 +10,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [CLI feature list](feature-list.md)
 - [Model preferences and Agent configuration](design/model-configuration.md)
 - [Model startup](design/model-startup.md): temporary model, effort and multi-protocol connections with branch/member/compaction inheritance
+- [Agent tool modes](design/agent-tool-modes.md) (#2135): normal, codemode and shell as one user-scope choice, the visible/exposed tool surface, and the shell tool's place in the product assembly
 - [Model failures](design/model-failures.md)（[中文](zh/design/model-failures.md)）: the failure kind, the fact on the terminal event, who words the line, and retry (#1197)
 - [模型请求重试与任务续接方案](design/research/model-retry-recovery.md)（中文，#1210）：请求重试的可见性、独立恢复能力的边界及所有者合同需求
 - [服务面：跨语言形状的策略、盘点与第一批改造](design/service-faces.md)（中文，Draft），装配现状见[生成的服务目录](architecture/rust-agent/generated/catalog.md)。
