@@ -77,6 +77,94 @@ test("a thought opened only by progress settles from its producer start", () => 
   assert.equal(projection.rows[0].elapsedMs, 3)
 })
 
+test("a coalesced clear rebuilds the replaced attempt's thought row", () => {
+  const projection = new Projection()
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1_000 })
+  const first = projection.rows[0]
+  assert.equal(first.kind, "thinking")
+  // The clear frame was coalesced away; the next notice is the new attempt's.
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "second", text: "", textOffset: 0, thinking: "a longer successful thought", thinkingOffset: 0, thinkingStartedAt: 1_002 })
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.notEqual(thoughts[0].key, first.key, "the rebuilt thought row has a new identity")
+  assert.equal(thoughts[0].text, "a longer successful thought")
+
+  projection.apply({ id: "second", sequence: 4, createAt: 1_003, content: { kind: "thinking", requestId: "r1", delta: "a longer successful thought" } })
+  projection.apply(event(5, { kind: "text", requestId: "r1", delta: "Done." }))
+  const thought = projection.rows.find((row) => row.kind === "thinking")
+  assert.equal(thought.elapsedMs, 3, "the span starts at the new attempt")
+})
+
+test("a coalesced clear before text leaves no empty thought row", () => {
+  const projection = new Projection()
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1_000 })
+  // The clear frame was coalesced away; the next notice starts the new attempt's text.
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: "partial answer", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  projection.apply(event(5, { kind: "text", requestId: "r1", delta: "partial answer" }))
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 0, JSON.stringify(projection.rows))
+  assert.equal(projection.rows.find((row) => row.kind === "assistant").text, "partial answer")
+})
+
+function failedThought() {
+  return { sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "first", text: "", textOffset: 0, thinking: "failed attempt", thinkingOffset: 0, thinkingStartedAt: 1_000 }
+}
+
+test("a durable thought before the retry notice rebuilds the row", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  projection.progress(failedThought())
+  const replaced = projection.rows[0]
+  // The progress notice is coalesced; the retry's first committed thought arrives first.
+  projection.apply({ id: "second", sequence: 2, createAt: 1_002, content: { kind: "thinking", requestId: "r1", delta: "a longer successful thought" } })
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.notEqual(thoughts[0].key, replaced.key, "the rebuilt thought row has a new identity")
+  assert.equal(thoughts[0].text, "a longer successful thought")
+  projection.apply(event(3, { kind: "text", requestId: "r1", delta: "Done." }))
+  assert.equal(projection.rows.find((row) => row.kind === "thinking").elapsedMs, 1, "the span starts at the new attempt")
+})
+
+test("a durable text before the retry notice leaves no empty thought row", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  projection.progress(failedThought())
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "answer" }))
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+  assert.equal(projection.rows.find((row) => row.kind === "assistant").text, "answer")
+})
+
+test("a durable tool event before the retry notice leaves no empty thought row", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  projection.progress(failedThought())
+  projection.apply(event(2, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "echo" }))
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+  projection.apply(event(3, { kind: "model-end", requestId: "r1", error: "boom", failure: failure() }))
+  const row = projection.rows.at(-1)
+  assert.equal(row.kind, "error")
+  assert.ok(!row.text.startsWith("The response above is incomplete."), row.text)
+
+  const second = new Projection()
+  second.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  second.progress(failedThought())
+  second.apply(event(2, { kind: "tool-use", requestId: "r1", callId: "call", name: "echo", input: {} }))
+  assert.equal(second.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(second.rows))
+})
+
+test("a stale progress snapshot does not reopen a replaced thought", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "model-start", requestId: "r1" }))
+  const failed = failedThought()
+  projection.progress(failed)
+  projection.apply({ id: "second", sequence: 2, createAt: 1_002, content: { kind: "thinking", requestId: "r1", delta: "success" } })
+  // The page replays its cached snapshot, still the replaced attempt's.
+  projection.progress(failed)
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "success", "the stale snapshot leaves the new attempt's thought alone")
+})
+
 test("a tool start settles a thought before its arguments arrive", () => {
   const projection = new Projection()
   projection.apply(event(2, { kind: "thinking", requestId: "r1", delta: "weigh" }))
@@ -135,6 +223,73 @@ test("a history read's counts cover the rows of a request that began before its 
     ["thinking", " again", true],
     ["assistant", " and run it", true],
   ])
+})
+
+test("an empty notice keeps a request's committed counts", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "Write the file" }))
+  projection.apply(event(3, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} }))
+  // The producer opens every request with an empty notice at offset zero; it is not a restart.
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: "", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " and run it", textOffset: 14, thinking: "", thinkingOffset: 0 })
+
+  const answers = projection.rows.filter((row) => row.kind === "assistant").map((row) => [row.text, row.streaming])
+  assert.deepEqual(answers, [["Write the file", false], [" and run it", true]], "the notice keeps the committed count, so the tail beyond it draws")
+})
+
+test("a progress frame that arrives after its turn ended draws no row", () => {
+  const shown = (projection) => projection.rows.map((row) => [row.kind, row.text, row.streaming])
+
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "Write the file" }))
+  projection.apply(event(3, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} }))
+  projection.apply(event(4, { kind: "turn-end", outcome: "completed" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " and run it", textOffset: 14, thinking: " the options", thinkingOffset: 6, thinkingStartedAt: 1_004 })
+  assert.deepEqual(shown(projection), [
+    ["assistant", "Write the file", false],
+    ["tool", undefined, undefined],
+  ], "the rows the turn ended keep what they showed, and its late frame neither opens nor reopens one")
+
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r2", text: "next turn", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  assert.deepEqual(shown(projection).at(-1), ["assistant", "next turn", true], "the next turn's request is another id, so its own frame still opens a row")
+
+  const thought = new Projection()
+  thought.progress({ sessionId: "s", branchId: "main", requestId: "r3", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1_000 })
+  thought.apply(event(2, { kind: "turn-end", outcome: "completed" }))
+  thought.progress({ sessionId: "s", branchId: "main", requestId: "r3", text: "", textOffset: 0, thinking: " and more", thinkingOffset: 5 })
+  assert.equal(thought.rows.length, 1, "the late frame of a request only a frame showed opens no row")
+  assert.equal(thought.rows[0].streaming, false, "and the row its turn closed stays closed")
+
+  const read = new Projection()
+  read.activeOutput({ requestId: "r4", textCharacters: 21, thinkingCharacters: 5 })
+  read.apply(event(2, { kind: "turn-end", outcome: "completed" }))
+  read.progress({ sessionId: "s", branchId: "main", requestId: "r4", text: " and run it", textOffset: 21, thinking: "weigh", thinkingOffset: 5 })
+  read.activeOutput({ requestId: "r4", textCharacters: 21, thinkingCharacters: 5 })
+  assert.deepEqual(read.rows, [], "a window that opens inside its request and closes with its turn draws nothing for its late frame")
+  assert.equal(read.committed.size, 0, "and a read that still reports the request leaves no count behind")
+
+  const called = new Projection()
+  for (const item of [
+    event(2, { kind: "model-start", requestId: "r5" }),
+    event(3, { kind: "tool-use-start", requestId: "r5", callId: "call", name: "exec" }),
+    event(4, { kind: "tool-use", requestId: "r5", callId: "call", name: "exec", input: {} }),
+    event(5, { kind: "model-end", requestId: "r5" }),
+    event(6, { kind: "turn-end", outcome: "completed" }),
+  ]) called.apply(item)
+  called.progress({ sessionId: "s", branchId: "main", requestId: "r5", text: "late text", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  assert.deepEqual(shown(called), [["tool", undefined, undefined]], "a request whose output was a call draws no answer for its late frame")
+})
+
+test("a progress frame that arrives after its request ended draws no row", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "done" }))
+  projection.apply(event(3, { kind: "model-end", requestId: "r1" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " later", textOffset: 4, thinking: "", thinkingOffset: 0 })
+  assert.deepEqual(
+    projection.rows.map((row) => [row.kind, row.text, row.streaming]),
+    [["assistant", "done", false]],
+    "the request's own end closes its rows before its turn ends, and its late frame leaves them alone",
+  )
 })
 
 test("branch messages, ends and the last turn end become rows", () => {
@@ -332,4 +487,100 @@ test("a user row is settled by the turn end after its consumption, across an ear
   assert.deepEqual(settled(latest), { first: true, queued: true, steered: false, next: false })
   latest.apply(event(15, { kind: "turn-end", outcome: "completed" }))
   assert.deepEqual(settled(latest), { first: true, queued: true, steered: true, next: true })
+})
+
+test("a zero-output retry takes the replaced thought on its terminal fact", () => {
+  const projection = new Projection()
+  projection.progress(failedThought())
+  projection.apply(event(2, { kind: "model-end", requestId: "r1", error: "boom", failure: failure({ attempts: 2, retried: true }) }))
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+  const row = projection.rows.at(-1)
+  assert.equal(row.kind, "error")
+  assert.ok(!row.text.startsWith("The response above is incomplete."), row.text)
+})
+
+test("a retry that showed its own thought keeps it on the terminal fact", () => {
+  const projection = new Projection()
+  projection.progress(failedThought())
+  projection.progress({ ...failedThought(), thinkingPartId: "second", thinking: "final thought", thinkingStartedAt: 2_000 })
+  projection.apply(event(3, { kind: "model-end", requestId: "r1", error: "boom", failure: failure({ attempts: 2, retried: true, thinkingPartId: "second" }) }))
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].streaming, false)
+  assert.equal(thoughts[0].text, "", "only progress showed it")
+  const row = projection.rows.at(-1)
+  assert.ok(row.text.startsWith("The response above is incomplete. The provider reported a server error"), row.text)
+})
+
+test("a steer cancellation takes the replaced thought on its terminal fact", () => {
+  const projection = new Projection()
+  projection.progress(failedThought())
+  projection.apply(event(2, { kind: "model-end", requestId: "r1", cancelled: "replaced by steer" }))
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+})
+
+test("a delayed snapshot cannot reopen a thought after committed text", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "text", requestId: "r1", delta: "answer" }))
+  projection.progress(failedThought())
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 0, JSON.stringify(projection.rows))
+  assert.equal(projection.rows.find((row) => row.kind === "assistant").text, "answer")
+})
+
+test("a delayed snapshot cannot extend a shorter committed thought", () => {
+  const projection = new Projection()
+  projection.apply({ id: "second", sequence: 1, createAt: 1_001, content: { kind: "thinking", requestId: "r1", delta: "new" } })
+  projection.progress(failedThought())
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "new")
+})
+
+test("a new thought block after committed text is kept", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "text", requestId: "r1", delta: "answer" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "next", text: "", textOffset: 6, thinking: "next thought", thinkingOffset: 0 })
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "next thought")
+})
+
+test("committed text keeps the terminal's incomplete claim through a new thought", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "text", requestId: "r1", delta: "answer" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "next", text: "", textOffset: 6, thinking: "next thought", thinkingOffset: 0 })
+  projection.apply(event(3, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "echo" }))
+  projection.apply(event(4, { kind: "model-end", requestId: "r1", error: "boom", failure: failure() }))
+  const row = projection.rows.at(-1)
+  assert.equal(row.kind, "error")
+  assert.ok(row.text.startsWith("The response above is incomplete. The provider reported a server error"), row.text)
+})
+
+test("a committed thought does not hold back the same notice's text", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "thinking", requestId: "r1", delta: "weigh" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "e1", text: "hello", textOffset: 0, thinking: "weigh", thinkingOffset: 0 })
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "weigh", "the committed thought is not shown twice")
+  assert.equal(projection.rows.find((row) => row.kind === "assistant")?.text, "hello", "the same notice's text is not held back by the thought")
+})
+
+test("a closed thought does not hold back the same notice's text", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "thinking", requestId: "r1", delta: "weigh" }))
+  projection.apply(event(2, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "read_file" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "e1", text: "hello", textOffset: 0, thinking: "weigh", thinkingOffset: 0 })
+  assert.equal(projection.rows.filter((row) => row.kind === "thinking").length, 1, JSON.stringify(projection.rows))
+  assert.equal(projection.rows.find((row) => row.kind === "assistant")?.text, "hello", "the tool start does not swallow the text after it")
+})
+
+test("committed text does not hold back the same notice's thought", () => {
+  const projection = new Projection()
+  projection.apply(event(1, { kind: "text", requestId: "r1", delta: "hi" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", thinkingPartId: "next", text: "hi", textOffset: 0, thinking: "weigh", thinkingOffset: 0 })
+  assert.equal(projection.rows.find((row) => row.kind === "assistant")?.text, "hi")
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking")
+  assert.equal(thoughts.length, 1, JSON.stringify(projection.rows))
+  assert.equal(thoughts[0].text, "weigh", "the same notice's thought is not held back by the text")
 })

@@ -107,7 +107,9 @@ ModelFailure {
   attempts,         // at least 1
   waitedMs,         // total backoff slept
   retryForbidden?,  // true only when the failure policy forbids retrying
-  retryAfterMs?     // the provider asked to wait longer than the budget left, so Dim stopped
+  retryAfterMs?,    // the provider asked to wait longer than the budget left, so Dim stopped
+  retried?,         // true only when a retry replaced an earlier attempt of this request
+  thinkingPartId?   // the thinking block the final attempt left open, when it showed one
 }
 ```
 
@@ -119,6 +121,14 @@ ModelFailure {
 - `retryForbidden` is present only when true. ModelProvider sets it when its
   failure policy forbids retrying the failure that ended the request, and a
   continuation declines it, so the prohibition covers the continuation.
+- `retried` is present only when true: a retry replaced an earlier attempt of
+  this request. `thinkingPartId` is written only with it and names the thinking
+  block the final attempt left open when it showed one as progress. A client
+  showing an open thought row from progress keeps it when the identity matches
+  and takes it, with the replaced attempt, when it does not; the terminal fact
+  is the only place the boundary is observable when the empty progress between
+  the attempts was coalesced away. `attempts` counts a failure chain's attempts
+  as well, so it does not mean an in-place retry.
 - `reason` is the provider's error message for a response or stream-event
   failure, and the innermost frame of the cause chain for a transport failure.
   A reply that completed with no answer has no provider error behind it, so its
@@ -167,15 +177,30 @@ ModelFailure {
   "the response had no text and no tool call". Thinking alone is not an answer,
   so a reply of thinking only counts as empty. The bridge decides it where the
   stream completes, because it is the only part that sees the whole response.
-  Whether the request is retried depends on what the attempt handed on: with
-  nothing but the message start handed on, it is retried once like any
-  `malformed_response`; once anything else has been handed on, a whitespace
-  text part included, the request is past the point where it may be retried
+  Whether the request is retried depends on what the attempt committed: while
+  it committed nothing to the Timeline, a classified cut is retried once like
+  any `malformed_response`, and the failed attempt's progress is dropped before
+  the retry starts, so the next attempt replaces it. Once it committed
+  anything, a whitespace text part or a usage fact included, the request is
+  past the point where it may be retried
   ([output.rs](../../crates/dim-agent-capabilities/src/output.rs) clears replay
-  safety on every chunk but the message start), so the turn ends with the
-  failure recorded and shown and the user resends by hand. A retry cannot
-  follow committed output: what the request committed must match the next
-  complete reply, thinking included
+  safety when the attempt commits an event), so the turn ends with the failure
+  recorded and shown and the user resends by hand. A cut flushes buffered text
+  before it decides: text that already reached the screen is committed at the
+  failure and is never replaced by a retry, and a final flush whose Timeline
+  append fails is a local write failure that ends the turn without a retry
+  instead of being reported as the provider's cut. Received thinking that was
+  never committed is not a fact and does not stop the retry; while it is still
+  private it is not visible output either, so a Steer still replaces the
+  request, and a retry starts from nothing with every client resetting what the
+  replaced attempt showed. Only a retry reopens the request: a terminal
+  failure leaves the attempt's shown output alone, so an input that arrives
+  while the failed stream drains cannot replace it and the turn ends with the
+  provider's failure. An unclassified stream ending carries no failure
+  facts and is not retried; classifying an ending as a cut belongs to the
+  driver. A retry cannot follow committed output: what the request committed
+  must match
+  the next complete reply, thinking included
   ([output.rs](../../crates/dim-agent-capabilities/src/output.rs)), and a second
   attempt brings its own thinking.
   The rule holds for every turn, driven Loop and Goal turns included: an empty
@@ -240,9 +265,9 @@ line's `tried N times` is the persistent record.
 `invoke` is shared by ModelProvider, the auxiliary model and the summary
 strategy, so there is one policy and no per-caller setting, but not always the
 same outcome: replay safety is the consumer's to clear, and the auxiliary model
-and the summary strategy read the stream without handing anything on, so a
-reply that streamed only thinking or whitespace text is retried there, while
-a main turn ends on it.
+and the summary strategy read the stream without committing anything, so a
+failure after they received output is retried there, while a main turn ends on
+it once the attempt committed.
 
 | item | value |
 | --- | --- |
@@ -252,7 +277,7 @@ a main turn ends on it.
 | backoff | the n-th retry sleeps 1 s × 2^(n−1), capped at 30 s, times a uniform jitter in [0.8, 1.0] |
 | `Retry-After` | used exactly as the delay, even above 30 s, while it fits in the budget left; if it does not fit, the request stops at once and records `retryAfterMs` |
 | wait budget | a request sleeps at most five minutes in all before it fails; a wait that does not fit in what is left stops the request at once |
-| unchanged | no retry once the attempt handed anything but the message start on, thinking and whitespace text included; an interrupt cancels the sleep; one credential recovery with no delay, still within the 8 attempts; `ModelFailurePolicy::forbids_retry`; a terminal credential rejection is settled |
+| unchanged | no retry once the attempt committed an event to the Timeline, a whitespace text part or a usage fact included; received but uncommitted progress, thinking included, does not stop a retry and is dropped before it; an interrupt cancels the sleep; one credential recovery with no delay, still within the 8 attempts; `ModelFailurePolicy::forbids_retry`; a terminal credential rejection is settled |
 
 The nominal backoff sleeps are 1, 2, 4, 8, 16, 30 and 30 s, about 91 s in all.
 The numbers follow the outage in #1197, which lasted tens of seconds: eight
@@ -305,10 +330,11 @@ written with it, because `ModelOutputOutcome` denies unknown fields. That is the
 same forward-compatibility limit `presentation` has, so a downgrade across this
 change is unsupported, as it already was for `presentation`.
 
-The same decision covers the continuation fields, the retry prohibition and
-handover inputs. The optional `failure_chain` on `ContextPrepareData` and
-`ModelCallData`, the optional `handover` on `InputMessageData`, and the optional
-`retryForbidden` on `ModelFailure` are additive, and a binary without them
+The same decision covers the continuation fields, the retry prohibition, the
+retry boundary and handover inputs. The optional `failure_chain` on
+`ContextPrepareData` and `ModelCallData`, the optional `handover` on
+`InputMessageData`, the optional `retryForbidden`, `retried` and
+`thinkingPartId` on `ModelFailure` are additive, and a binary without them
 cannot read a record that carries them, so a downgrade across this change is
 unsupported. Each addition registers the
 decision in the contract tests with its compatibility cases; the frozen

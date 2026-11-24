@@ -283,6 +283,8 @@ pub struct Progress {
     pub session_id: String,
     pub branch_id: String,
     pub request_id: Option<String>,
+    /// Stable identity of the open thinking block, when one exists.
+    pub thinking_part_id: Option<String>,
     pub text: String,
     pub text_offset: u64,
     /// Reasoning not written to the Timeline yet: it follows the first

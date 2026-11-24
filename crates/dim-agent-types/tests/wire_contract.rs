@@ -383,6 +383,94 @@ fn retry_forbidden_roundtrips_and_rejects_invalid_contracts() {
 }
 
 #[test]
+fn retry_boundary_roundtrips_and_rejects_invalid_contracts() {
+    use std::sync::Arc;
+    let old = fixture("step/model-output-end", Some("failed"));
+    // A failure written before the retry boundary existed still decodes and
+    // re-encodes without it.
+    let old_event: AgentEvent = serde_json::from_value(old.clone()).unwrap();
+    equal_json(&serde_json::to_value(old_event).unwrap(), &old);
+
+    let mut event = old;
+    event["data"]["failure"] = json!({
+        "kind": "server_error",
+        "status": 503,
+        "cause": [],
+        "attempts": 2,
+        "waitedMs": 0,
+        "retried": true,
+        "thinkingPartId": "second"
+    });
+    let decoded = serde_json::from_value::<AgentEvent>(event.clone());
+    assert!(
+        decoded.is_ok(),
+        "the terminal fact carries its retry boundary: {}",
+        serde_json::to_string(&event).unwrap()
+    );
+    let decoded = decoded.unwrap();
+    equal_json(&serde_json::to_value(&decoded).unwrap(), &event);
+    let decoded_v1: v1::AgentEvent = serde_json::from_value(event.clone()).unwrap();
+    equal_json(&serde_json::to_value(decoded_v1).unwrap(), &event);
+    let outbound = serde_json::to_value(
+        v1::SharedEvent::new(Arc::new(
+            serde_json::from_value::<AgentEvent>(event.clone()).unwrap(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    equal_json(&outbound, &event);
+
+    // A failure that was not retried omits both fields; `retried: false` is
+    // accepted and re-encoded by its omission.
+    let mut allowed = fixture("step/model-output-end", Some("failed"));
+    allowed["data"]["failure"] = json!({
+        "kind": "server_error",
+        "attempts": 1,
+        "waitedMs": 0,
+        "retried": false
+    });
+    let decoded: AgentEvent = serde_json::from_value(allowed).unwrap();
+    let encoded = serde_json::to_value(&decoded).unwrap();
+    assert!(
+        encoded["data"]["failure"].get("retried").is_none(),
+        "{encoded}"
+    );
+    assert!(
+        encoded["data"]["failure"].get("thinkingPartId").is_none(),
+        "{encoded}"
+    );
+
+    for retried in [json!("yes"), json!(1), json!(null)] {
+        let mut invalid = fixture("step/model-output-end", Some("failed"));
+        invalid["data"]["failure"] = json!({
+            "kind": "server_error",
+            "attempts": 1,
+            "waitedMs": 0,
+            "retried": retried
+        });
+        assert!(
+            serde_json::from_value::<AgentEvent>(invalid.clone()).is_err(),
+            "{invalid}"
+        );
+    }
+
+    for part in [json!(1), json!(null), json!(false)] {
+        let mut invalid = fixture("step/model-output-end", Some("failed"));
+        invalid["data"]["failure"] = json!({
+            "kind": "server_error",
+            "attempts": 2,
+            "waitedMs": 0,
+            "retried": true,
+            "thinkingPartId": part
+        });
+        assert!(
+            serde_json::from_value::<AgentEvent>(invalid.clone()).is_err(),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
 fn handover_roundtrips_and_rejects_invalid_contracts() {
     use std::sync::Arc;
     // The frozen fixtures hold `input/message` records only in the v1

@@ -22,6 +22,7 @@ mod interrupt_flow;
 mod legacy_port_faces;
 mod legacy_session_faces;
 mod method_declarations;
+mod model_stream_recovery_flow;
 #[path = "permission_flow.rs"]
 mod permission_flow;
 mod recall_flow;

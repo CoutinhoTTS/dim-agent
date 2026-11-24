@@ -813,6 +813,19 @@ pub struct ModelFailure {
     /// The failure policy forbids retrying this failure.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retry_forbidden: bool,
+    /// A retry replaced an earlier attempt of this request, so output shown
+    /// as progress may belong to an attempt the terminal fact does not keep.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retried: bool,
+    /// The thinking block the final attempt left open, when it showed one as
+    /// progress; written only with `retried`, so a client showing another
+    /// block holds the replaced attempt's row.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::optional_non_null"
+    )]
+    pub thinking_part_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

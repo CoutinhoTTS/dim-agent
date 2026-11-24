@@ -237,3 +237,47 @@ test("a prompt hook's context is counted, not read as the operator's message", (
     assert.equal(read.events[0].content.hooks, undefined, typed)
   }
 })
+
+test("model-end reads the retry boundary and a steer cancellation", () => {
+  const failed = readNotification("session.event", {
+    sessionId: "s",
+    branchId: "main",
+    event: event("step", "model-output-end", {
+      turn_id: "t",
+      request_id: "r",
+      status: "failed",
+      error: "boom",
+      failure: { kind: "server_error", cause: [], attempts: 2, waitedMs: 0, retried: true, thinkingPartId: "second" },
+    }, 3),
+  })
+  assert.equal(failed.event.content.kind, "model-end")
+  assert.equal(failed.event.content.failure.retried, true)
+  assert.equal(failed.event.content.failure.thinkingPartId, "second")
+
+  const cancelled = readNotification("session.event", {
+    sessionId: "s",
+    branchId: "main",
+    event: event("step", "model-output-end", {
+      turn_id: "t",
+      request_id: "r",
+      status: "cancelled",
+      reason: "replaced by steer",
+    }, 4),
+  })
+  assert.equal(cancelled.event.content.kind, "model-end")
+  assert.equal(cancelled.event.content.cancelled, "replaced by steer")
+
+  const plain = readNotification("session.event", {
+    sessionId: "s",
+    branchId: "main",
+    event: event("step", "model-output-end", {
+      turn_id: "t",
+      request_id: "r",
+      status: "failed",
+      error: "boom",
+      failure: { kind: "server_error", cause: [], attempts: 1, waitedMs: 0 },
+    }, 5),
+  })
+  assert.equal(plain.event.content.failure.retried, undefined)
+  assert.equal(plain.event.content.failure.thinkingPartId, undefined)
+})

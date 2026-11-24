@@ -75,6 +75,17 @@ export type SessionView = {
   historyError: string
 }
 
+/** A live update held in arrival order until the projection can apply it. */
+type QueuedLive =
+  | { kind: "event"; event: SessionEvent }
+  | { kind: "progress"; progress: ModelProgress }
+
+/** A queued item's part in the reconciliation: a snapshot, or a fact about the Timeline. */
+type QueuedFact = { event: SessionEvent } | { progress: ModelProgress }
+
+/** What a window's facts say about which requests were still producing at its cutoff. */
+type WindowFacts = { turnEnded: boolean; active: string | undefined; seen: ReadonlySet<string> }
+
 type BranchStream = {
   projection: Projection
   liveTask: Promise<void> | undefined
@@ -87,8 +98,8 @@ type BranchStream = {
   through: number
   loadingEarlier: boolean
   historyError: string
-  /** Live events held while this line's history is paged in. */
-  queued: SessionEvent[]
+  /** Live events and progress notices held while the projection cannot apply them yet, in arrival order. */
+  queued: QueuedLive[]
 }
 
 type Channel = {
@@ -421,13 +432,11 @@ export const useChatStore = defineStore("chat", () => {
         const stream = ensureBranch(channel, branchId)
         if (stream.syncing) {
           channel.lines.apply(branchId, notification.event)
-          const content = notification.event.content
-          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use-start" || content.kind === "tool-use") && content.requestId === stream.progress?.requestId)) stream.progress = undefined
-          stream.queued.push(notification.event)
+          stream.queued.push({ kind: "event", event: notification.event })
         } else if (!stream.opened) {
           applyEvent(channel, branchId, notification.event)
         } else {
-          stream.queued.push(notification.event)
+          stream.queued.push({ kind: "event", event: notification.event })
           // A failed centre is replaced by the retry's window: its events wait
           // there instead of being applied to a transcript that read replaces.
           // A side line's tab is not part of that read, so it keeps applying.
@@ -442,8 +451,14 @@ export const useChatStore = defineStore("chat", () => {
       case "session.model.progress": {
         const branchId = notification.progress.branchId
         const stream = ensureBranch(channel, branchId)
+        // An unopened line's tab is not reading it: its transient progress is
+        // not cached for a later open.
+        if (!stream.opened) break
+        if (stream.syncing || stream.liveTask !== undefined || stream.queued.length > 0 || (branchId === view.defaultBranchId && view.status === "failed")) {
+          queueProgress(stream, notification.progress)
+          break
+        }
         stream.progress = notification.progress
-        if (stream.syncing || !stream.opened || stream.liveTask !== undefined) break
         stream.projection.progress(notification.progress)
         changed(channel)
         break
@@ -524,19 +539,32 @@ export const useChatStore = defineStore("chat", () => {
     }
   }
 
+  /** Holds a progress notice after an earlier one for the same request, keeping arrival order. */
+  function queueProgress(stream: BranchStream, progress: ModelProgress): void {
+    const last = stream.queued[stream.queued.length - 1]
+    if (last?.kind === "progress" && last.progress.requestId === progress.requestId) last.progress = progress
+    else stream.queued.push({ kind: "progress", progress })
+  }
+
   function consumeLive(channel: Channel, branchId: string): Promise<void> {
     const branch = ensureBranch(channel, branchId)
     if (branch.liveTask !== undefined) return branch.liveTask
     const projection = branch.projection
     branch.liveTask = (async () => {
       while (!branch.syncing && branch.queued.length > 0) {
-        const event = branch.queued[0]!
+        const item = branch.queued[0]!
+        if (item.kind === "progress") {
+          branch.queued.shift()
+          branch.progress = item.progress
+          projection.progress(item.progress)
+          continue
+        }
+        const event = item.event
         if (event.sequence > projection.cursor) await hydrateTools(channel, branchId, projection, event)
         if (branch.projection !== projection || branch.syncing) return
         branch.queued.shift()
         applyEvent(channel, branchId, event)
       }
-      if (!branch.syncing && branch.progress !== undefined) projection.progress(branch.progress)
     })().then(() => {
       branch.liveTask = undefined
       if (!branch.syncing && branch.queued.length > 0) return consumeLive(channel, branchId)
@@ -704,6 +732,67 @@ export const useChatStore = defineStore("chat", () => {
     if (adopted?.configuration !== undefined && branch.projection.model === undefined) branch.projection.model = adopted.configuration.model
   }
 
+  /**
+   * Whether a snapshot taken before the window still describes output: only the
+   * request the turn read reports running at the cutoff, or one whose start
+   * arrived after it, does. A model or tool step is not an end (`output.rs`).
+   */
+  function staleProgress(progress: ModelProgress, facts: WindowFacts, started: ReadonlySet<string>): boolean {
+    if (progress.requestId === undefined) return facts.turnEnded
+    if (started.has(progress.requestId) || progress.requestId === facts.active) return false
+    return facts.turnEnded || facts.active !== undefined || facts.seen.has(progress.requestId)
+  }
+
+  /** The requests the window holds an event of: each started at or before its cutoff. */
+  function seenRequests(events: readonly SessionEvent[]): Set<string> {
+    const seen = new Set<string>()
+    for (const event of events) if ("requestId" in event.content) seen.add(event.content.requestId)
+    return seen
+  }
+
+  /**
+   * The queued positions whose snapshot a later queued fact already answered.
+   * One connection delivered them in this order, so the snapshot was produced
+   * before that fact, and only two ends settle it: a turn end, or the request's
+   * own model end. A tool step leaves nothing a snapshot before it lacks, since
+   * the step commits the text there and the projection drops the thought it
+   * never committed.
+   */
+  function settledSnapshots<T>(items: readonly T[], fact: (item: T) => QueuedFact | undefined): Set<number> {
+    const settled = new Set<number>()
+    const ended = new Set<string>()
+    let turnEnded = false
+    for (let index = items.length - 1; index >= 0; index--) {
+      const queued = fact(items[index]!)
+      if (queued === undefined) continue
+      if ("event" in queued) {
+        const content = queued.event.content
+        if (content.kind === "turn-end") turnEnded = true
+        else if (content.kind === "model-end") ended.add(content.requestId)
+        continue
+      }
+      const requestId = queued.progress.requestId
+      if (requestId !== undefined && (turnEnded || ended.has(requestId))) settled.add(index)
+    }
+    return settled
+  }
+
+  /**
+   * The requests whose queued start is newer than the window's cutoff: the read
+   * that returned `through` cannot hold their progress.
+   */
+  function startedRequests(branch: BranchStream, channel: Channel, branchId: string, through: number): Set<string> {
+    const started = new Set<string>()
+    const record = (event: SessionEvent) => {
+      if (event.sequence > through && event.content.kind === "model-start") started.add(event.content.requestId)
+    }
+    for (const item of branch.queued) if (item.kind === "event") record(item.event)
+    for (const notification of channel.queued) {
+      if ((notification.method === "session.event" || notification.method === "session.display") && notification.branchId === branchId) record(notification.event)
+    }
+    return started
+  }
+
   async function loadHistory(channel: Channel, branchId: string): Promise<"ok" | "lost" | "failed"> {
     const branch = ensureBranch(channel, branchId)
     branch.syncing = true
@@ -712,6 +801,9 @@ export const useChatStore = defineStore("chat", () => {
     for (let attempt = 0; ; attempt++) {
       try {
         const loaded = await window(channel, branchId)
+        // A progress notice from that interval has no sequence of its own: the
+        // window's facts, and the queue's own order, decide whether it still
+        // describes anything.
         const through = loaded.window.through!
         await restoreControls(channel, branchId, loaded.projection, through)
         if (branchId !== ROOT_BRANCH_ID) channel.lines.detail(await client().call("session.branch.get", { sessionId: channel.view.sessionId, branchId }, readBranchDetail))
@@ -720,11 +812,18 @@ export const useChatStore = defineStore("chat", () => {
         branch.projection = loaded.projection
         branch.before = loaded.window.before
         branch.through = through
-        for (const event of loaded.events) {
-          const content = event.content
-          if (content.kind === "turn-end" || ((content.kind === "model-end" || content.kind === "tool-use-start" || content.kind === "tool-use") && content.requestId === branch.progress?.requestId)) branch.progress = undefined
-        }
-        branch.queued = branch.queued.filter(event => event.sequence > through)
+        const facts: WindowFacts = { turnEnded: loaded.projection.lastTurnEnd !== undefined, active: loaded.projection.activeRequestId(), seen: seenRequests(loaded.events) }
+        const started = startedRequests(branch, channel, branchId, through)
+        if (branch.progress !== undefined && staleProgress(branch.progress, facts, started)) branch.progress = undefined
+        const queuedSettled = settledSnapshots(branch.queued, item => item.kind === "event" ? { event: item.event } : { progress: item.progress })
+        branch.queued = branch.queued.filter((item, index) => !queuedSettled.has(index)
+          && (item.kind === "event" ? item.event.sequence > through : !staleProgress(item.progress, facts, started)))
+        const notifiedSettled = settledSnapshots(channel.queued, notification =>
+          notification.method === "session.model.progress" && notification.progress.branchId === branchId ? { progress: notification.progress }
+            : (notification.method === "session.event" || notification.method === "session.display") && notification.branchId === branchId ? { event: notification.event }
+              : undefined)
+        channel.queued = channel.queued.filter((notification, index) => !notifiedSettled.has(index)
+          && (notification.method !== "session.model.progress" || notification.progress.branchId !== branchId || !staleProgress(notification.progress, facts, started)))
         branch.syncing = false
         await consumeLive(channel, branchId)
         branch.done = true
