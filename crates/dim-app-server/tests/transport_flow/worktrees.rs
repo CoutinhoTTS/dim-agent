@@ -1354,8 +1354,8 @@ async fn unregistered_removal_refuses_a_recorded_directory_before_the_callback()
 }
 
 /// A `.git` entry that appears after the content check refuses the removal:
-/// the store re-checks the unregistered facts under the ownership lock before
-/// it deletes anything.
+/// the removal re-checks the unregistered facts in its own task, after its
+/// path is registered as being deleted, before it deletes anything.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unregistered_remove_refuses_a_git_entry_added_after_the_content_check() {
     let work = Work::new();
@@ -1426,7 +1426,7 @@ async fn session_creation_after_an_unregistered_removal_fails_its_workspace_chec
     });
     tokio::time::timeout(Duration::from_secs(30), reached.notified())
         .await
-        .expect("the removal holds the ownership lock");
+        .expect("the removal reaches its deletion step");
     let config = SessionConfig {
         cwd: task.to_string_lossy().into_owned(),
         ..Default::default()
@@ -1594,7 +1594,7 @@ async fn dropping_the_caller_keeps_the_removal_until_the_deletion_finishes() {
     });
     tokio::time::timeout(Duration::from_secs(30), reached.notified())
         .await
-        .expect("the removal holds the ownership lock");
+        .expect("the removal reaches its deletion step");
     removal.abort();
     assert!(removal.await.unwrap_err().is_cancelled());
     let config = SessionConfig {

@@ -2,9 +2,12 @@
 //!
 //! One Process part owns the root, the task id, the Git calls and the
 //! list/remove/prune selection. The records stay with SessionStore: creation
-//! writes them in the Session's own transaction, and a removal runs under the
-//! store's ownership lock so a late association cannot slip in between the
-//! re-check and the record deletion. Git is the fact; a record is a candidate.
+//! writes them in the Session's own transaction, and a removal re-checks its
+//! path and registers it as being deleted under the store's ownership lock
+//! before it runs its deletion outside that lock, so a late association or
+//! creation meets the registration instead of slipping in. A creation compares
+//! its directory with that registration and moves to another task id. Git is
+//! the fact; a record is a candidate.
 use crate::methods::ManagementMethods;
 use crate::storage::{PreparedWorktree, Store, WorktreeDirectory, WorktreeDirectoryRecord};
 use dim_agent_capabilities::methods::{
@@ -1104,7 +1107,8 @@ async fn checked_subtree(root: &Path, relative: &Path) -> Result<PathBuf, Worktr
 
 /// The entry-level facts that make a task directory an unregistered
 /// candidate: a plain directory under the managed root without a `.git`
-/// entry. The removal re-reads them under the store's ownership lock.
+/// entry. The removal re-reads them in its own task once its path is
+/// registered as being deleted.
 async fn check_unregistered_entry(entry: &Path) -> Result<(), WorktreeError> {
     match tokio::fs::symlink_metadata(entry).await {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -1130,7 +1134,7 @@ async fn check_unregistered_entry(entry: &Path) -> Result<(), WorktreeError> {
 /// managed root without a `.git` entry, and without `force` none has content.
 /// Returns the empty children a non-force removal deletes. The unregistered
 /// condition is the absence of `.git`, so these are filesystem checks only and
-/// no Git subprocess runs under the ownership lock.
+/// the removal runs them without the ownership lock.
 async fn check_unregistered_children(
     entry: &Path,
     root: &Path,

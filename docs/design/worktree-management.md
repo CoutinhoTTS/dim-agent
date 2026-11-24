@@ -49,17 +49,17 @@ Git 创建；调用方停止等待不会撤回该任务，Session 与 worktree �
    映射路径必须留在新根内。
 2. ManagedWorktrees 分配 `<task-id>` 并执行 `git worktree add -b <branch> <root> <base>`。`base` 先经
    `git rev-parse --verify` 解析为 commit，`branch` 由 `-b` 消费且只新建，因此以 `-` 开头的值不会变成
-   Git 选项；默认分支或目标路径已存在时换一个 `<task-id>` 重试（最多三次），显式 `branch` 冲突直接返回
-   `worktree_branch_exists`，不重试。add 失败只删除本次创建的空任务目录：路径与分支可能是并发赢家创建的，
-   本调用不碰它们。
+   Git 选项；默认分支或目标路径已存在、或目标路径与正在删除的路径重叠时换一个 `<task-id>` 重试（最多三次），
+   显式 `branch` 冲突直接返回 `worktree_branch_exists`，不重试。add 失败只删除本次创建的空任务目录：路径与分支
+   可能是并发赢家创建的，本调用不碰它们。
 3. 以根下的映射子树作为新 Session 的 `cwd`（源工作区就是仓库根时即根本身），使
    [worktree-access §2.2](worktree-access.md#22-仓库身份与目录范围) 的范围映射成为实际工作区。映射前缀逐
    组件拒绝符号链接，解析后的路径必须仍在根内。目录记录与使用关联由 SessionStore 在新 Session 的同一事务
    里写入，记录的 subtree 等于这个 cwd；这一步失败即视为 Session 未创建。
 4. 第 2 步之后的任何失败，ManagedWorktrees 用未取消的清理路径删除本次创建的目录与分支；已准备目录的撤回
-   复用 SessionStore 的删除操作，在 ownership 排他区内重查关联与根/子树下的 Session cwd，持锁完成 Git 撤回
-   后才删除目录记录。其他 Session 已使用该根或子树、Git 拒绝删除或目录写入他人内容时保留它们（不带 `-f`）；
-   没有目录记录的残留由 `list` 列为未登记，入口始终返回原错误。
+   复用 SessionStore 的删除操作，在 ownership 排他区内重查关联与根/子树下的 Session cwd 并把根登记为“正在删除”，
+   放锁后完成 Git 撤回，删除成功后才删目录记录。其他 Session 已使用该根或子树、Git 拒绝删除或目录写入他人内容时
+   保留它们（不带 `-f`）；没有目录记录的残留由 `list` 列为未登记，入口始终返回原错误。
 
 创建成功后不写 Timeline 事件：worktree 是进程级事实，不是分支状态。映射子树进入本 Session 的工作区范围，
 根的其余部分按 worktree-access §2.2 仍需审批；文件工具与显式 `exec` cwd 不再对映射子树逐文件审批
@@ -111,7 +111,8 @@ agent 工具，不经过 Permission 批准，也从不服务给配对设备的�
   移出集合；外层请求被取消也不会提前移出，集合只在内存里，进程崩溃后半删的目录仍可按 task id 再删一次。
 - **正在删除**：集合只拦与登记路径相同、在其上或在其下的操作：`session.create` 与 `sessions.launch` 的 cwd、
   `store.fork` 配置里的 cwd、`associate_worktree` 的根、同一路径的再次删除，以及同一目录的记录删除
-  （`store.removeWorktreeDirectory`）都被拒绝（`worktree.remove` 报 `worktree_in_use`）；
+  （`store.removeWorktreeDirectory`）都被拒绝（`worktree.remove` 报 `worktree_in_use`）；`worktree.create` 在
+  同一把锁内拿选中的目录与集合比对，命中就换一个 `<task-id>`，所以登记期间不会在同一路径建出目录。
   父路径方向也拒绝，因为它的内容正在被删（例如任务目录下的仓库），这期间不在其上新建 Session。删除结束后被删的目录
   自然通不过创建与关联的目录检查。不相关路径的创建、分叉、删除与关联不再等删除；复核之后也不会出现指向已删根的
   新 Session 或关联。
