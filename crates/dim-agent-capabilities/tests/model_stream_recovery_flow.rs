@@ -1658,14 +1658,18 @@ async fn a_retry_that_shows_its_own_thought_names_that_block_on_the_terminal() {
                 Ok(ModelChunk::Thinking("second attempt".into())),
             ],
         );
-        let shown = progress
-            .wait_for(|progress| progress.thinking == "second attempt")
-            .await
-            .unwrap();
-        let part = shown
-            .thinking_part_id
-            .clone()
-            .expect("the shown thought names its block");
+        // The guard holds the progress cell; drop it before the request can
+        // clear the progress and finish the turn.
+        let part = {
+            let shown = progress
+                .wait_for(|progress| progress.thinking == "second attempt")
+                .await
+                .unwrap();
+            shown
+                .thinking_part_id
+                .clone()
+                .expect("the shown thought names its block")
+        };
         send(&retry, vec![Err(failure(ModelFailureKind::InvalidRequest, None))]);
         drop(retry);
         session.idle("main").await.unwrap();
