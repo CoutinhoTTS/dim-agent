@@ -753,8 +753,10 @@ export const useChatStore = defineStore("chat", () => {
   /**
    * The queued positions whose snapshot a later queued fact already answered.
    * One connection delivered them in this order, so the snapshot was produced
-   * before that fact: a turn end or a model end ends the request, and a tool
-   * step writes the output before it, so the snapshot holds nothing it missed.
+   * before that fact, and only two ends settle it: a turn end, or the request's
+   * own model end. A tool step leaves nothing a snapshot before it lacks, since
+   * the step commits the text there and the projection drops the thought it
+   * never committed.
    */
   function settledSnapshots<T>(items: readonly T[], fact: (item: T) => QueuedFact | undefined): Set<number> {
     const settled = new Set<number>()
@@ -766,7 +768,7 @@ export const useChatStore = defineStore("chat", () => {
       if ("event" in queued) {
         const content = queued.event.content
         if (content.kind === "turn-end") turnEnded = true
-        else if (content.kind === "model-end" || content.kind === "tool-use-start" || content.kind === "tool-use") ended.add(content.requestId)
+        else if (content.kind === "model-end") ended.add(content.requestId)
         continue
       }
       const requestId = queued.progress.requestId
