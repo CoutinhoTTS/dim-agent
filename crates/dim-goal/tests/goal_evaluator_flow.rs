@@ -124,6 +124,29 @@ async fn wait_evaluated(env: &Env, branch: &str, evaluation: u64) -> Block {
     .expect("an evaluated continuation")
 }
 
+/// The evaluated continuation of `evaluation` that appears on `main` within
+/// `window`, if one does.
+async fn evaluated_continuation_within(
+    env: &Env,
+    evaluation: u64,
+    window: Duration,
+) -> Option<Block> {
+    tokio::time::timeout(window, async {
+        loop {
+            let writes = writes_with(env, "main", &format!(r#"evaluation="{evaluation}""#)).await;
+            if let Some(block) = writes
+                .iter()
+                .find(|block| block.marker.contains(r#"kind="continuation""#))
+            {
+                return block.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .ok()
+}
+
 /// The pending inputs of `branch`, as string slices for a turn.
 async fn pending_refs(env: &Env, branch: &str) -> Vec<String> {
     env.pending_inputs(branch).await
@@ -1010,22 +1033,99 @@ async fn pursuit_5_a_turn_already_open_before_the_conclusion_holds_the_evaluated
     let consumed = env.consume("main", &queued.id);
     env.dispatched("main", consumed.sequence).await;
     continued.release();
-    let writes = env.settled("main").await;
-    let stale: Vec<String> = writes
-        .iter()
-        .filter(|block| {
-            block.marker.contains(r#"kind="continuation""#)
-                && block
-                    .marker
-                    .contains(&format!(r#"evaluation="{evaluation}""#))
-        })
-        .map(|block| format!("{} at {}", block.marker, block.sequence))
-        .collect();
+    let stale = evaluated_continuation_within(&env, evaluation, Duration::from_millis(750)).await;
     assert!(
-        stale.is_empty(),
-        "the continue conclusion writes no evaluated continuation after the Queue at {} opened a turn before its first capture, yet it wrote {stale:?}",
+        stale.is_none(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened a turn before its first capture, but it wrote {stale:?}",
         queued.sequence
     );
+    env.close().await;
+}
+
+/// A Queue whose turn starts, is consumed and ends before the `continue`
+/// conclusion takes its first capture, while the conclusion waits to read its
+/// settings: the conclusion names a turn end that is no longer the branch's
+/// latest, so it decides nothing and the newer turn end decides (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_turn_that_ended_before_the_conclusion_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let mut continued = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Continue,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    let held = tokio::time::timeout(Duration::from_secs(15), continued.arrived())
+        .await
+        .expect("the conclusion task reaches its settings read");
+    assert_eq!(
+        held, conclusion,
+        "the held step follows the conclusion at {conclusion}"
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    env.consume("main", &queued.id);
+    let mut turn_end = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let ended = env.end_turn("main", "next", "completed");
+    env.dispatched("main", ended.sequence).await;
+    assert!(
+        ended.sequence > evaluation,
+        "the newer turn end at {} follows the judged end at {evaluation}",
+        ended.sequence
+    );
+    let held_end = tokio::time::timeout(Duration::from_secs(15), turn_end.arrived())
+        .await
+        .expect("the newer turn end reaches its decision");
+    assert_eq!(
+        held_end, ended.sequence,
+        "the held decision follows the turn end at {}",
+        ended.sequence
+    );
+    continued.release();
+    let stale = evaluated_continuation_within(&env, evaluation, Duration::from_millis(750)).await;
+    assert!(
+        stale.is_none(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened and ended a turn before its first capture, but it wrote {stale:?}",
+        queued.sequence
+    );
+    turn_end.release();
+    let regular = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let writes = env.writes("main").await;
+            if let Some(block) = writes.iter().find(|block| {
+                block.marker.contains(r#"kind="continuation""#)
+                    && block
+                        .marker
+                        .contains(&format!(r#"after="{}""#, ended.sequence))
+            }) {
+                return block.sequence;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the newer turn end decides its own continuation");
+    env.dispatched("main", regular).await;
     env.close().await;
 }
 
