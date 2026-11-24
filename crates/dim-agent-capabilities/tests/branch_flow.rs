@@ -4577,9 +4577,8 @@ async fn a_configured_roster_closing_reaches_the_roster() {
 
 /// A note's `How you work here:` block is the factory member
 /// `BranchToolConfig::default_note`: a configured value reaches the note byte
-/// for byte in place of the built-in bullets, with the line ids its `{parent}`
-/// and `{other}` placeholders name, while the note's protocol sentences stay
-/// the code's (design §12.1, §12.4).
+/// for byte, with the line ids its `{parent}` and `{other}` placeholders name,
+/// while the note's protocol sentences stay the code's (design §12.1, §12.4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_configured_note_block_reaches_the_note() {
     let block = "- Configured guidance for {parent}, switched from {other}.";
@@ -4604,10 +4603,7 @@ async fn a_configured_note_block_reaches_the_note() {
         note.contains("How you work here:\n- Configured guidance for main, switched from main."),
         "{note}"
     );
-    assert!(
-        !note.contains("- The user switched here to continue directly"),
-        "the built-in bullets are replaced: {note}"
-    );
+    assert!(!note.contains('{'), "no placeholder is left: {note}");
     assert!(
         note.contains("you send no automatic idle notice to main"),
         "the note's protocol sentences stay: {note}"
@@ -4615,13 +4611,11 @@ async fn a_configured_note_block_reaches_the_note() {
     soon(agent.close()).await.unwrap();
 }
 
-/// The note `4560a5d67` wrote when a tool line became the default branch: its
-/// birth identity, then the sentences the move changes, with no `How you work
-/// here:` block, which that head's `status_note` had not grown yet. The
-/// branch-policy evaluation gives `default_note` an empty baseline so its
-/// current arm emits this text byte for byte. `{line}` and `{purpose}` stand
-/// where the code substitutes them.
-const PRE_POLICY_TOOL_NOTE: &str = r#"<dim-branch-line branch="{line}" parent="main" source="tool" default="true">
+/// The note a move writes on a tool line that becomes the default branch: its
+/// birth identity, then the sentences the move changes, and no `How you work
+/// here:` block, because `BranchToolConfig` sets no note member. `{line}` and
+/// `{purpose}` stand where the code substitutes them.
+const PROTOCOL_ONLY_TOOL_NOTE: &str = r#"<dim-branch-line branch="{line}" parent="main" source="tool" default="true">
 You are line {line} of this session. Line main opened you at this point of its history to work in parallel with it. You are the same agent as main: everything above is your own history, and you continue from here on your own line. main keeps working on its line; you can read its work after this point, and it can read yours. Messages above that were addressed to main, such as its list of open lines, are main's, not yours.
 
 Your purpose, as main wrote it:
@@ -4637,20 +4631,17 @@ How you work with main:
 This line is now the session's default branch, switched from line main. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to main; you cannot call end on yourself. Line main stays open and keeps the lines it opened.
 </dim-branch-line>"#;
 
-/// An empty `default_note` writes the note with no `How you work here:` block,
-/// byte for byte as `4560a5d67` wrote it: the branch-policy evaluation's
-/// current arm is that head's text, not this head's default block (timeline
-/// branches §12.4, model-prompts §8.1).
+/// The product configures no note member, so the note a move writes carries
+/// the protocol sentences and no `How you work here:` block, and the line's
+/// next request carries that note byte for byte (timeline branches §12.1,
+/// §12.4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_empty_note_block_writes_the_note_without_guidance() {
+async fn the_default_configuration_writes_no_guidance_block() {
     let purpose = "the purpose of B";
     let probe = Arc::new(Probe::default());
     let agent = MinimalHost::start(&builder_with_branch_config(
         &probe,
-        BranchToolConfig {
-            default_note: Some("".into()),
-            ..Default::default()
-        },
+        BranchToolConfig::default(),
     ))
     .await
     .unwrap();
@@ -4661,12 +4652,16 @@ async fn an_empty_note_block_writes_the_note_without_guidance() {
     switch(&session, &line).await;
     let notes = owed_notes(&session, &line, 1).await;
     let note = notes.last().expect("the line holds its note");
-    let expected = PRE_POLICY_TOOL_NOTE
+    let expected = PROTOCOL_ONLY_TOOL_NOTE
         .replace("{line}", &line)
         .replace("{purpose}", purpose);
     assert_eq!(
         note, &expected,
-        "an empty block emits the note the pre-policy head wrote"
+        "the default writes the note without a guidance block"
+    );
+    assert!(
+        !note.contains("How you work here:"),
+        "no guidance block without a configured one: {note}"
     );
     soon(session.submit("next request".into(), InputMode::Queue, &line))
         .await
@@ -4686,45 +4681,20 @@ async fn an_empty_note_block_writes_the_note_without_guidance() {
             .messages
             .iter()
             .any(|message| said(message).contains(&expected)),
-        "the rendered request carries the note the baseline wrote"
-    );
-    soon(agent.close()).await.unwrap();
-}
-
-/// The product's note blocks keep their `How you work here:` heading: the
-/// empty-block rule serves a candidate that replaces the block with nothing,
-/// not the shipped text.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_product_note_block_keeps_its_guidance_heading() {
-    let probe = Arc::new(Probe::default());
-    let agent = MinimalHost::start(&builder_with_branch_config(
-        &probe,
-        BranchToolConfig::default(),
-    ))
-    .await
-    .unwrap();
-    let session = soon(agent.create_session(SessionConfig::default()))
-        .await
-        .unwrap();
-    let line = open_line(&session, "the shipped line").await;
-    switch(&session, &line).await;
-    let notes = owed_notes(&session, &line, 1).await;
-    let note = notes.last().expect("the line holds its note");
-    assert!(
-        note.contains("\n\nHow you work here:\n- The user switched here to continue directly from this line's context and approach"),
-        "{note}"
+        "the rendered request carries the note the default writes"
     );
     soon(agent.close()).await.unwrap();
 }
 
 /// The note a move writes on a line the user opened is the factory member
-/// `BranchToolConfig::user_default_note`: an empty member writes the note with
-/// no `How you work here:` block, and the product default writes its bullets
-/// into the line's next model request, with `{other}` replaced by the line the
-/// move moved away from (design §12.1, §12.4).
+/// `BranchToolConfig::user_default_note`: the product sets no member, so the
+/// note carries no `How you work here:` block, and a configured value reaches
+/// the line's next model request with its `{parent}` and `{other}` placeholders
+/// replaced (design §12.1, §12.4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_user_lines_default_note_reaches_the_model_request() {
-    for (configured, heading) in [(Some(""), false), (None, true)] {
+    let block = "- Configured user guidance for {parent}, moved from {other}.";
+    for (configured, heading) in [(None, false), (Some(block), true)] {
         let probe = Arc::new(Probe::default());
         let agent = MinimalHost::start(&builder_with_branch_config(
             &probe,
@@ -4790,14 +4760,14 @@ async fn a_user_lines_default_note_reaches_the_model_request() {
         if heading {
             assert!(
                 note.contains(
-                    "\n\nHow you work here:\n- Carry this line's work forward yourself; open a new line only when the four conditions for opening one hold again. The user's request takes precedence over the prompt this line was opened with.\n- Line main stays open in the shared workspace and keeps coordinating any lines it already opened."
+                    "\n\nHow you work here:\n- Configured user guidance for main, moved from main."
                 ),
                 "{note}"
             );
         } else {
             assert!(
                 !note.contains("How you work here:"),
-                "an empty member writes no guidance block: {note}"
+                "no guidance block without a configured one: {note}"
             );
         }
         soon(agent.close()).await.unwrap();
@@ -4805,14 +4775,15 @@ async fn a_user_lines_default_note_reaches_the_model_request() {
 }
 
 /// The note a move writes on the former default branch is the factory member
-/// `BranchToolConfig::former_default_note`, for a tool line too: an empty
-/// member writes the note with no `How you work here:` block, and the product
-/// default writes its bullets into the line's next model request, with
-/// `{other}` replaced by the line that holds the default branch (design §12.1,
-/// §12.4).
+/// `BranchToolConfig::former_default_note`, for a tool line too: the product
+/// sets no member, so the note carries no `How you work here:` block, and a
+/// configured value reaches the line's next model request with its `{parent}`
+/// and `{other}` placeholders replaced by the line that holds the default
+/// branch (design §12.1, §12.4).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_former_default_tool_lines_note_reaches_the_model_request() {
-    for (configured, heading) in [(Some(""), false), (None, true)] {
+    let block = "- Configured former guidance for {parent}, moved to {other}.";
+    for (configured, heading) in [(None, false), (Some(block), true)] {
         let probe = Arc::new(Probe::default());
         let agent = MinimalHost::start(&builder_with_branch_config(
             &probe,
@@ -4880,15 +4851,15 @@ async fn a_former_default_tool_lines_note_reaches_the_model_request() {
         );
         if heading {
             assert!(
-                note.contains(
-                    "\n\nHow you work here:\n- Keep coordinating any open lines you already opened, and answer messages or user inputs addressed to this line.\n- You share the workspace with the other open lines; do not edit files outside your remaining scope unless asked, and if edit or write fails because the file was modified after it was last read, read the file again before continuing."
-                ),
+                note.contains(&format!(
+                    "\n\nHow you work here:\n- Configured former guidance for main, moved to {user}."
+                )),
                 "{note}"
             );
         } else {
             assert!(
                 !note.contains("How you work here:"),
-                "an empty member writes no guidance block: {note}"
+                "no guidance block without a configured one: {note}"
             );
         }
         soon(agent.close()).await.unwrap();

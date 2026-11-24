@@ -5053,16 +5053,13 @@ impl BranchLine {
                     format!(
                         "This line is now the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you send no automatic idle notice to {parent}; you cannot call end on yourself. Line {other} stays open and keeps the lines it opened."
                     ),
-                    self.config.default_note.as_deref().unwrap_or(DEFAULT_NOTE),
+                    self.config.default_note.as_deref().unwrap_or(""),
                 ),
                 _ => (
                     format!(
                         "The user has now made this line the session's default branch, switched from line {other}. While this block is your latest one: answer the user here; you can open lines with create; you cannot call end on yourself; the user ends this line. Line {other} stays open and keeps the lines it opened."
                     ),
-                    self.config
-                        .user_default_note
-                        .as_deref()
-                        .unwrap_or(USER_DEFAULT_NOTE),
+                    self.config.user_default_note.as_deref().unwrap_or(""),
                 ),
             }
         } else if kind == "tool" {
@@ -5070,20 +5067,14 @@ impl BranchLine {
                 format!(
                     "The session's default branch moved from this line to line {other}. This line stays open, reports to {parent} as before and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT} If end is refused when your purpose is done, message {parent} with what you found, did, changed and left undone and keep working."
                 ),
-                self.config
-                    .former_default_note
-                    .as_deref()
-                    .unwrap_or(FORMER_DEFAULT_NOTE),
+                self.config.former_default_note.as_deref().unwrap_or(""),
             )
         } else {
             (
                 format!(
                     "The session's default branch moved from this line to line {other}. This line stays open and keeps coordinating the lines it opened; it can no longer open lines with create, and the rest of the rules above hold again. {CANNOT_END_TEXT}"
                 ),
-                self.config
-                    .former_default_note
-                    .as_deref()
-                    .unwrap_or(FORMER_DEFAULT_NOTE),
+                self.config.former_default_note.as_deref().unwrap_or(""),
             )
         };
         let guidance = block.replace("{parent}", parent).replace("{other}", other);
@@ -6189,29 +6180,13 @@ const CANNOT_END_TEXT: &str = "Only a line opened with create can end itself, an
 const LIMIT_REACHED_TEXT: &str = "This Session holds its limit of open lines. Continue on this line, or end one of its open lines first.";
 
 /// The `branch` tool's description: its policy sentences are the coordination
-/// text for a line that opens lines ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
-/// replaceable at [`BranchToolConfig::description`].
-const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed by reading each other's work and messaging what the other must act on. On a line that opens lines you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it; read a line's work instead of waiting for a report.\n- create (the root and the current default branch only): open a line to work on prompt in parallel. Open a line only when all four of these hold: the work needs this conversation's context, or its approach is worth the user seeing and taking over; after opening it you have other work to do here right away rather than waiting for it; the part you hand over is multi-step work, not two or three quick actions; and the two lines will not write the same files at the same time. When the user asks for a line, open it. These are not line-shaped: a long command runs in the background instead of taking a line; work that needs none of this conversation's context, or needs different instructions, belongs to another member; one task pursued to completion stays here, or uses a goal; waiting for something outside the session uses an event subscription. Write prompt as a brief to yourself: the purpose in one line, what you decided in this response that the line needs, which files or area are its own (or that it is read-only), and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Send a decision, a blocker, or a conflict, not a progress report the receiver can read. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show a page of the activity of the line you were cut from, or of a line you opened, also after it ended. With no after, a read continues after your last read of that line: from your cut for the line you were cut from, and from its first event for a line you opened. Pass after to read from another point. Do not page through a whole line.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nA line messages and reads the line it was cut from and the lines it opened. The end action ends the calling line and every line below it.";
-
-/// The `How you work here:` bullets of the note a move writes on a tool line
-/// that becomes the default branch, after the note's protocol sentences
-/// ([timeline branches §12.1](../../../docs/design/timeline-branches.md#121-context-mapping)),
-/// replaceable at [`BranchToolConfig::default_note`]. `{parent}` and `{other}`
-/// stand for the line ids the note names.
-const DEFAULT_NOTE: &str = "- The user switched here to continue directly from this line's context and approach, so the user's request takes precedence over the purpose above, which still says what this line is for.\n- Carry this line's main work forward yourself; open a new line only when the four conditions for opening one hold again, not to hand off your current task.\n- When your purpose is done, or cannot be done, message {parent} with what you found, did, changed and left undone and keep working: while this line is the default branch you cannot call end on yourself.\n- You share the workspace with {parent} and its other lines. Avoid redoing work assigned to lines opened before your cut. If edit or write fails because the file was modified after it was last read, another line may have changed that file: read it again before editing.";
-
-/// The `How you work here:` bullets of the note a move writes on a line the
-/// user opened that becomes the default branch (design §12.1), replaceable at
-/// [`BranchToolConfig::user_default_note`].
-const USER_DEFAULT_NOTE: &str = "- Carry this line's work forward yourself; open a new line only when the four conditions for opening one hold again. The user's request takes precedence over the prompt this line was opened with.\n- Line {other} stays open in the shared workspace and keeps coordinating any lines it already opened. If edit or write fails because the file was modified after it was last read, another line may have changed that file: read it again before editing.";
-
-/// The `How you work here:` bullets of the note a move writes on the former
-/// default branch, either source (design §12.1), replaceable at
-/// [`BranchToolConfig::former_default_note`].
-const FORMER_DEFAULT_NOTE: &str = "- Keep coordinating any open lines you already opened, and answer messages or user inputs addressed to this line.\n- You share the workspace with the other open lines; do not edit files outside your remaining scope unless asked, and if edit or write fails because the file was modified after it was last read, read the file again before continuing.";
+/// text for `main` ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)),
+/// replaceable at [`BranchToolConfig`].
+const BRANCH_TOOL_DESCRIPTION: &str = "Work with the other lines of this session. A line is you: it starts from your history at the point it is opened, then works in parallel on its own line. It is not a helper with its own memory, and it owes you no result; you and it keep each other informed by reading each other's work and messaging what the other must act on. On main you coordinate: answer a line's steer and act on what it asks for; leave a line's part to that line instead of redoing it; read a line's work instead of waiting for a report.\n- create (the root and the current default branch only): open a line to work on prompt in parallel. Open one line per part that can go on at the same time as the rest — separate files, a separate question, or a second approach — instead of doing those parts one after another yourself; not for a single quick edit, nor when your next step needs its result. Write prompt as a brief to yourself: the purpose, what you already know that it needs, which files or area are its own, and when it should tell you or end. Returns the line's id.\n- message: send content to a line you opened, or to the line that opened you. Send a decision, a blocker, or a conflict, not a progress report the receiver can read. Mode \"append\" (default) reaches the receiver at its next step without interrupting it and does not wake an idle line. Use \"steer\" when the receiver must act now or is idle.\n- read: show a page of the activity of the line you were cut from, or of a line you opened, also after it ended. With no after, a read continues after your last read of that line: from your cut for the line you were cut from, and from its first event for a line you opened. Pass after to read from another point. Do not page through a whole line.\n- end: on a line opened with create, end your own line. content is your final message to the line that opened you: what you found, did, changed and left undone. It is your last action.\nA line messages and reads the line it was cut from and the lines it opened. The end action ends the calling line and every line below it.";
 
 /// Factory configuration of the branch tool ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
-/// The product sets none of it, so the built-in text is in force.
+/// The product sets none of it: the built-in description, roster closing and
+/// cap are in force, and a note member left unset writes no guidance block.
 #[derive(Clone, Default)]
 pub struct BranchToolConfig {
     /// The tool description in place of [`BRANCH_TOOL_DESCRIPTION`]. A
@@ -6222,17 +6197,16 @@ pub struct BranchToolConfig {
     /// BranchLine, the part that writes the roster
     /// ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
     pub roster_closing: Option<Arc<str>>,
-    /// The `How you work here:` bullets in place of [`DEFAULT_NOTE`], the
-    /// guidance of the note a move writes on a tool line it makes the default
-    /// branch ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
+    /// The `How you work here:` bullets of the note a move writes on a tool
+    /// line it makes the default branch ([timeline branches §12.4](../../../docs/design/timeline-branches.md#124-texts-and-their-classes)).
+    /// `{parent}` and `{other}` stand for the line ids the note names, and an
+    /// unset or empty value writes no block.
     pub default_note: Option<Arc<str>>,
-    /// The `How you work here:` bullets in place of [`USER_DEFAULT_NOTE`], the
-    /// guidance of the note a move writes on a line the user opened that it
-    /// makes the default branch (design §12.4).
+    /// The `How you work here:` bullets of the note a move writes on a line the
+    /// user opened that it makes the default branch (design §12.4).
     pub user_default_note: Option<Arc<str>>,
-    /// The `How you work here:` bullets in place of [`FORMER_DEFAULT_NOTE`],
-    /// the guidance of the note a move writes on the former default branch of
-    /// either source (design §12.4).
+    /// The `How you work here:` bullets of the note a move writes on the former
+    /// default branch of either source (design §12.4).
     pub former_default_note: Option<Arc<str>>,
     /// The Session's cap on open tool lines in place of the built-in four
     /// ([timeline branches §6.1](../../../docs/design/timeline-branches.md#61-resources-and-limits)).
