@@ -34,6 +34,8 @@ pub struct ManagedWorktrees {
     sessions: Arc<Store>,
     #[cfg(feature = "testing")]
     removal_hold: std::sync::Mutex<Option<Arc<crate::UnregisteredRemovalHold>>>,
+    #[cfg(feature = "testing")]
+    task_id_hold: std::sync::Mutex<Option<String>>,
 }
 
 /// A worktree this call created, with what it needs to be reported or
@@ -147,6 +149,8 @@ impl ManagedWorktrees {
             sessions,
             #[cfg(feature = "testing")]
             removal_hold: std::sync::Mutex::new(None),
+            #[cfg(feature = "testing")]
+            task_id_hold: std::sync::Mutex::new(None),
         }
     }
 
@@ -166,6 +170,18 @@ impl ManagedWorktrees {
             hold.reached.notify_one();
             hold.release.notified().await;
         }
+    }
+
+    /// Names the task id the next allocation tries first, so a test can make a
+    /// creation meet a path a removal registered. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub(crate) fn prefer_next_task_id(&self, task_id: &str) {
+        *self.task_id_hold.lock().expect("task id hold") = Some(task_id.to_owned());
+    }
+
+    #[cfg(feature = "testing")]
+    fn preferred_task_id(&self) -> Option<String> {
+        self.task_id_hold.lock().expect("task id hold").take()
     }
 
     /// Creates one worktree for `source` at `$HOME/worktrees/<task-id>/<repo>`
@@ -232,6 +248,9 @@ impl ManagedWorktrees {
 
         let mut last = None;
         for _ in 0..ALLOCATION_ATTEMPTS {
+            #[cfg(feature = "testing")]
+            let task_id = self.preferred_task_id().unwrap_or_else(task_id);
+            #[cfg(not(feature = "testing"))]
             let task_id = task_id();
             let directory = root.join(&task_id).join(&repo_name);
             if tokio::fs::try_exists(&directory)

@@ -364,6 +364,19 @@ impl RunningServer {
             .get::<worktrees::ManagedWorktrees>()
             .map(|managed| managed.hold_next_unregistered_removal())
     }
+    /// Names the task id the next managed worktree creation tries first, so a
+    /// test can make it meet a path a removal registered. Answers whether the
+    /// part is present. Feature `testing` only.
+    #[cfg(feature = "testing")]
+    pub fn prefer_next_worktree_task_id(&self, task_id: &str) -> bool {
+        match self.root.get::<worktrees::ManagedWorktrees>() {
+            Some(managed) => {
+                managed.prefer_next_task_id(task_id);
+                true
+            }
+            None => false,
+        }
+    }
     /// Holds the next subscription's `follow` task open until `release`, so a
     /// test can keep an attach or detach in flight at a known point. Feature
     /// `testing` only.

@@ -2143,6 +2143,95 @@ async fn a_fork_without_a_workspace_is_not_refused_by_an_unrelated_removal() {
     server.join().await.unwrap();
 }
 
+/// A creation that would pick the task id of a directory a removal registered
+/// moves to another id instead: it never builds at, under or above the path
+/// being deleted, so the removed path keeps no directory.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_creation_does_not_build_at_a_path_a_removal_is_deleting() {
+    let work = Work::new();
+    let server = host(&work).await;
+    let store = server.service::<SessionStore>().unwrap();
+    let mut client = Client::new_version(&server, false, 3).await;
+    let created = client
+        .rpc("session.create", json!({"cwd": work.repo, "worktree": {}}))
+        .await;
+    assert_ok(&created);
+    let session_id = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let task_id = created["result"]["worktree"]["taskId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let root = PathBuf::from(created["result"]["worktree"]["root"].as_str().unwrap());
+    let repository = PathBuf::from(
+        created["result"]["worktree"]["repository"]
+            .as_str()
+            .unwrap(),
+    );
+    assert_ok(
+        &client
+            .rpc("session.delete", json!({"sessionId": session_id}))
+            .await,
+    );
+    let removed = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let removal = tokio::spawn({
+        let store = store.clone();
+        let root = root.clone();
+        let removed = removed.clone();
+        let release = release.clone();
+        let removal_repository = repository.clone();
+        async move {
+            store
+                .remove_worktree(WorktreeDirectory { repository, root }, move |path| {
+                    Box::pin(async move {
+                        tokio::task::spawn_blocking(move || {
+                            git(
+                                &removal_repository,
+                                &["worktree", "remove", path.to_str().unwrap()],
+                            );
+                        })
+                        .await
+                        .map_err(|error| AgentError::Storage(error.to_string()))?;
+                        removed.notify_one();
+                        release.notified().await;
+                        Ok(())
+                    })
+                })
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(30), removed.notified())
+        .await
+        .expect("the removal deletes the directory");
+    assert!(
+        server.prefer_next_worktree_task_id(&task_id),
+        "the ManagedWorktrees part exists"
+    );
+
+    let created = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.rpc(
+            "session.create",
+            json!({"cwd": work.repo, "worktree": {"branch": "reused"}}),
+        ),
+    )
+    .await
+    .expect("a creation does not wait for the removal");
+    assert_ok(&created);
+    let replacement = PathBuf::from(created["result"]["worktree"]["root"].as_str().unwrap());
+    assert_ne!(
+        replacement, root,
+        "a creation must not build at the path a removal is deleting"
+    );
+    assert!(!root.exists(), "the removed path keeps no directory");
+
+    release.notify_one();
+    assert!(removal.await.unwrap().unwrap());
+    assert!(!root.exists());
+    server.shutdown();
+    server.join().await.unwrap();
+}
+
 /// Dropping the caller of a recorded removal keeps the spawned deletion
 /// running, the path refused and its record undeletable until it ends.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
