@@ -1609,31 +1609,35 @@ impl Connection {
                 if p.task_id.is_empty() {
                     return Err(RpcError::invalid("taskId must not be empty"));
                 }
-                let result =
-                    if let Some(stop) = session.service_opt::<dyn ExecStop>(&p.branch_id)? {
-                        stop.stop(p.task_id).await.map_err(|error| match error {
-                            exec_stop::TaskError::Unknown => RpcError::app(
+                let result = if let Some(stop) =
+                    session.service_opt::<dyn ExecStop>(&p.branch_id)?
+                {
+                    stop.stop(p.task_id).await.map_err(|error| match error {
+                        exec_stop::TaskError::Unknown => RpcError::app(
+                            -32000,
+                            "exec_task_unknown",
+                            "Command is not a task of this branch",
+                        ),
+                        exec_stop::TaskError::Closed => RpcError::reloading(),
+                        exec_stop::TaskError::Read => {
+                            RpcError::app(-32603, "exec_task_read", "Task facts could not be read")
+                        }
+                    })?
+                } else {
+                    session
+                        .service::<BackgroundExec>(&p.branch_id)?
+                        .stop(p.task_id)
+                        .await
+                        .map_err(|error| match error {
+                            TaskError::Unknown => RpcError::app(
                                 -32000,
                                 "exec_task_unknown",
                                 "Command is not a task of this branch",
                             ),
-                            exec_stop::TaskError::Closed => RpcError::reloading(),
+                            TaskError::Closed => RpcError::reloading(),
+                            TaskError::Read(error) => error.into(),
                         })?
-                    } else {
-                        session
-                            .service::<BackgroundExec>(&p.branch_id)?
-                            .stop(p.task_id)
-                            .await
-                            .map_err(|error| match error {
-                                TaskError::Unknown => RpcError::app(
-                                    -32000,
-                                    "exec_task_unknown",
-                                    "Command is not a task of this branch",
-                                ),
-                                TaskError::Closed => RpcError::reloading(),
-                                TaskError::Read(error) => error.into(),
-                            })?
-                    };
+                };
                 Reply::ExecEnded(result)
             }
             Call::SessionSkills(p) => {
