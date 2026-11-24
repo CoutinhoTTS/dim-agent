@@ -4249,6 +4249,52 @@ pub(crate) mod shell {
     }
 
     #[derive(Default)]
+    struct OutputFilter {
+        decoder: Decoder,
+        pending: String,
+    }
+
+    impl OutputFilter {
+        fn new() -> Self {
+            Self {
+                decoder: Decoder::default(),
+                pending: String::new(),
+            }
+        }
+
+        fn push(&mut self, bytes: &[u8]) -> String {
+            let text = self.decoder.write(bytes);
+            self.pending.push_str(&text);
+            let hold = incomplete_tail(&self.pending);
+            let emit = self.pending[..hold].to_owned();
+            self.pending = self.pending[hold..].to_owned();
+            crate::shell_session::regularize_output(emit.as_bytes())
+        }
+
+        fn finish(&mut self) -> String {
+            let tail = self.decoder.end();
+            self.pending.push_str(&tail);
+            let text = std::mem::take(&mut self.pending);
+            crate::shell_session::regularize_output(text.as_bytes())
+        }
+    }
+
+    fn incomplete_tail(text: &str) -> usize {
+        let mut hold = text.len();
+        if text.ends_with('\r') {
+            hold = hold.min(text.len() - 1);
+        }
+        if let Some(escape) = text.rfind('\x1b')
+            && !text[escape + 1..]
+                .chars()
+                .any(|ch| ch.is_ascii_alphabetic())
+        {
+            hold = hold.min(escape);
+        }
+        hold
+    }
+
+    #[derive(Default)]
     struct LineSplitter {
         pending: String,
         finished: bool,
@@ -4444,7 +4490,7 @@ pub(crate) mod shell {
             let (drained, reader_finished) = tokio::sync::oneshot::channel();
             std::thread::spawn(move || {
                 let mut bytes = [0; 4096];
-                let mut decoder = Decoder::default();
+                let mut filter = OutputFilter::new();
                 let mut written = 0usize;
                 let mut splitter = LineSplitter::default();
                 while let Ok(n) = reader.read(&mut bytes) {
@@ -4454,8 +4500,7 @@ pub(crate) mod shell {
                     let Some(pump) = pump.upgrade() else {
                         break;
                     };
-                    let decoded = decoder.write(&bytes[..n]);
-                    let chunk = crate::shell_session::regularize_output(decoded.as_bytes());
+                    let chunk = filter.push(&bytes[..n]);
                     for line in splitter.push(&chunk) {
                         classify_line(&line, &pump, &jobs);
                     }
@@ -4487,6 +4532,34 @@ pub(crate) mod shell {
                         }
                     }
                     pump.event_notify.notify_waiters();
+                }
+                let tail = filter.finish();
+                if !tail.is_empty() {
+                    for line in splitter.push(&tail) {
+                        if let Some(pump) = pump.upgrade() {
+                            classify_line(&line, &pump, &jobs);
+                        }
+                    }
+                    if let Some(pump) = pump.upgrade() {
+                        let mut capture = pump.capture.lock().unwrap();
+                        capture.total += tail.len() as u64;
+                        capture.text.push_str(&tail);
+                        if capture.text.len() > RETAINED {
+                            let dropped =
+                                capture.text.len() - tail_bytes(&capture.text, RETAINED).len();
+                            capture.text.drain(..dropped);
+                        }
+                        let room = (crate::host_platform::output::OUTPUT_FILE_BYTE_LIMIT as usize)
+                            .saturating_sub(written);
+                        if room > 0 {
+                            let take = tail.len().min(room);
+                            let _ = file.write_all(&tail.as_bytes()[..take]);
+                        }
+                        drop(capture);
+                        let mut events = pump.events.lock().unwrap();
+                        events.trim();
+                        events.push(tail);
+                    }
                 }
                 if let Some(pump) = pump.upgrade() {
                     if let Some(line) = splitter.finish() {
