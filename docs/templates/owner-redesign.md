@@ -2,9 +2,11 @@
 
 Use this shape when an existing owner's public surface is redesigned under
 [design rules §7](../architecture/rust-agent/principles.md#7-所有者与操作). It has two parts. The design
-part is durable and goes into the owner's design document, `docs/design/plugins/<Owner>.md`,
-created from the [design template](design.md) when it does not exist. A plugin with several owners
-has one document per owner; the plugin's row in `docs/design/plugins/README.md` links each of them. The delivery part is
+part is durable and goes into the owner's existing design document: under
+`docs/architecture/rust-agent/plugins/` for a plugin indexed in that tree's README, otherwise under
+`docs/design/plugins/`. An owner without a design document gets `docs/design/plugins/<Owner>.md`,
+created from the [design template](design.md). A plugin with several owners has one document per
+owner; the plugin's row in the index of the tree holding its design links each of them. The delivery part is
 temporary and goes into the owner's issue. A new owner uses the [design template](design.md) alone.
 
 Write conclusions first. Name things directly instead of referring back. Do not restate rules or

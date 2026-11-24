@@ -30,9 +30,10 @@ Decision status: Proposed.
 - 这是一个新机制，所有者是 dim 运行时。
 - 运行时维护从 `sessionId`、`(sessionId, branchId)` 到当前存活实例的索引，把调用路由到目标实例内的派发入口。
 - 调用方只给 id 和服务名，拿不到实例键。所以「实例键只在实例内部可读」的约定不变。
-- 解析失败时的错误：
-  - `NoInstance`：目标没有存活的实例。分支已结束或不属于该 Session 时，不重试。Session 未加载时，进程调用方按 D5 取得保持后再调用。
-  - `Closed`：目标实例正在关闭，这个实例不再服务。Session 作用域的调用方收到它，说明自己所在的 Session 正在关闭，结束本次工作。进程调用方需要继续时向 Agents 取保持：业务关闭的 Session 在本进程内不再加载，`acquire` 答 `session_closed`，到此为止；空闲卸载的 Session 由 `acquire` 加载下一代。
+- 运行时先解析 Session，再解析分支。解析失败时的错误：
+  - `NoSession`：Session 没有存活的实例，可能是空闲卸载、已关闭或不存在。只有进程调用方会收到。需要继续时按 D5 向 Agents 取保持：Agents 加载下一代后重新调用；Agents 答该 Session 已关闭或不存在，就到此为止。
+  - `SessionClosing`：Session 实例正在关闭。目标是该 Session 内的分支时也答这个错误。Session 作用域的调用方收到它，说明自己所在的 Session 正在关闭，结束本次工作。进程调用方按 `NoSession` 处理。
+  - `NoLine`：Session 存活，但分支没有存活的实例：分支实例正在关闭或已关闭、还没发布，或者不属于该 Session。对这个分支是最终结果，不取保持，不重试。分支写入 `branch/end` 之后、实例关闭之前，路由仍然到达分支的所有者，所有者按自己的契约回答。
 
 ### D3. 可解析的只有目标作用域的数据面
 
@@ -82,7 +83,7 @@ Decision status: Proposed.
 | --- | --- |
 | 被挡住的 | 设计规则 §7「不代查」：进程部件与 Session 部件要直接调用内层所有者，但 ADR 002 D3 禁止注入内层服务，Session 边界契约又规定实例键只能在实例内部读取。 |
 | 考虑过的现有机制 | 经 Agents 的 `sessions` 转发：违反 §7。Session facade 按名查找：附录 F 已经排除。把实例键交给调用方：违反 D2 中实例键不离开实例的约定。 |
-| 需要的通用能力 | 按 `sessionId`、`(sessionId, branchId)` 把对目标作用域某个数据面的调用路由到存活实例；失败时返回 `NoInstance` 或 `Closed`。不带业务含义，也不把实例键交给调用方。 |
+| 需要的通用能力 | 按 `sessionId`、`(sessionId, branchId)` 把对目标作用域某个数据面的调用路由到存活实例；先解析 Session 再解析分支，失败时返回 `NoSession`、`SessionClosing` 或 `NoLine`（D2）。验收覆盖每个错误：空闲卸载后取保持再调用成功；业务关闭后取保持被拒；Session 关闭期间按 `branchId` 调用答 `SessionClosing`；Session 存活时分支关闭答 `NoLine`，Session 不受影响。不带业务含义，也不把实例键交给调用方。 |
 | 对序号、批次、中断、重载的影响 | 无：路由不写事件，调用的语义由目标所有者的操作决定。目标重载后，索引指向新的一代。 |
 | 所有者与 issue | dim 运行时，两段都在 [#2127](https://github.com/arcships/dim/issues/2127) 跟踪。使用方：Session 到分支一段是 SessionScope 与 TimelineTree 契约中的 `line_owner`（[#2025](https://github.com/arcships/dim/issues/2025)、[#2024](https://github.com/arcships/dim/issues/2024)）；进程到 Session 一段是 Agents 契约（[#2020](https://github.com/arcships/dim/issues/2020)）。 |
 
