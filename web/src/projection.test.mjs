@@ -88,6 +88,36 @@ test("a tool start settles a thought before its arguments arrive", () => {
   assert.equal(projection.rows[0].elapsedMs, 1, "the completed call does not move the settled span")
 })
 
+test("an answer that continues after a tool call shows its new segment instead of an empty row", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "Write the file" }))
+  projection.apply(event(3, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " and run it", textOffset: 14, thinking: "", thinkingOffset: 0 })
+
+  const answers = () => projection.rows.filter((row) => row.kind === "assistant").map((row) => [row.text, row.streaming])
+  assert.deepEqual(answers(), [["Write the file", false], [" and run it", true]])
+
+  projection.apply(event(4, { kind: "text", requestId: "r1", delta: " and run it" }))
+  assert.deepEqual(answers(), [["Write the file", false], [" and run it", true]], "the committed segment settles its own progress once, without repeating the earlier segment")
+
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " now", textOffset: 25, thinking: "", thinkingOffset: 0 })
+  assert.deepEqual(answers(), [["Write the file", false], [" and run it now", true]], "progress offsets count from the request's start, across the tool call")
+
+  projection.apply(event(5, { kind: "text", requestId: "r1", delta: " now" }))
+  projection.apply(event(6, { kind: "model-end", requestId: "r1" }))
+  assert.deepEqual(answers(), [["Write the file", false], [" and run it now", false]])
+})
+
+test("a thought that continues after a tool call shows its new segment", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "thinking", requestId: "r1", delta: "weigh" }))
+  projection.apply(event(3, { kind: "tool-use-start", requestId: "r1", callId: "call", name: "exec" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: "", textOffset: 0, thinking: " the options", thinkingOffset: 5, thinkingStartedAt: 1_004 })
+
+  const thoughts = projection.rows.filter((row) => row.kind === "thinking").map((row) => [row.text, row.streaming])
+  assert.deepEqual(thoughts, [["weigh", false], [" the options", true]])
+})
+
 test("branch messages, ends and the last turn end become rows", () => {
   const projection = new Projection()
   projection.apply(event(1, {
