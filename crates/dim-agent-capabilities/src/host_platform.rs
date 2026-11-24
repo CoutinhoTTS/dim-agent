@@ -17,7 +17,7 @@ use std::{
     io,
     path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
-    sync::{Arc, atomic::AtomicBool},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tokio::{
@@ -1280,8 +1280,6 @@ impl HostPlatform {
                     .map_err(|error| HostPlatformError::Io(error.to_string()))
             }
             TaskKind::Job(job) => {
-                job.stop_requested
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 let mut pid = job.pid.subscribe();
                 let mut current = *pid.borrow_and_update();
                 if current.is_none() {
@@ -1294,14 +1292,19 @@ impl HostPlatform {
                 let Some(pid) = current else {
                     let record = task.clone();
                     let job = job.clone();
+                    let shutdown = self.command_shutdown.clone();
                     self.command_workers.spawn(async move {
                         let mut pid = job.pid.subscribe();
+                        let mut changed = record.changed.subscribe();
                         loop {
                             if record.is_terminal() {
                                 return;
                             }
                             let current = *pid.borrow_and_update();
                             if let Some(pid) = current {
+                                if record.is_terminal() {
+                                    return;
+                                }
                                 let failure = kill_job(pid).await.err().map(|error| {
                                     TaskFailure::TerminateFailed {
                                         message: error.to_string(),
@@ -1322,8 +1325,19 @@ impl HostPlatform {
                                 });
                                 return;
                             }
-                            if pid.changed().await.is_err() {
-                                return;
+                            tokio::select! {
+                                biased;
+                                _ = shutdown.cancelled() => return,
+                                changed = changed.changed() => {
+                                    if changed.is_err() {
+                                        return;
+                                    }
+                                }
+                                changed = pid.changed() => {
+                                    if changed.is_err() {
+                                        return;
+                                    }
+                                }
                             }
                         }
                     });
@@ -1543,6 +1557,11 @@ impl HostPlatform {
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf();
             let output_path = PathBuf::from(&start.output_path);
+            if output_path.parent().is_none_or(|parent| !parent.is_dir()) {
+                return Err(HostPlatformError::Invalid(
+                    "job outputPath parent must exist".into(),
+                ));
+            }
             if output_path.file_stem().and_then(|stem| stem.to_str())
                 != Some(start.task_id.as_str())
             {
@@ -1580,7 +1599,6 @@ impl HostPlatform {
                 end_marker: start.end_marker,
                 output_path,
                 completion,
-                stop_requested: AtomicBool::new(false),
             });
             let record = TaskRecord::new(start.task_id.clone(), TaskKind::Job(job.clone()));
             {
@@ -3865,7 +3883,7 @@ pub(crate) mod shell {
         collections::VecDeque,
         io::{self, Read, Write},
         path::{Path, PathBuf},
-        sync::{Arc, Condvar, Mutex, Weak, atomic::AtomicBool},
+        sync::{Arc, Condvar, Mutex, Weak},
         time::{Duration, Instant},
     };
     use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
@@ -4043,7 +4061,6 @@ pub(crate) mod shell {
         pub(crate) end_marker: String,
         pub(crate) output_path: PathBuf,
         pub(crate) completion: Option<(PathBuf, PathBuf)>,
-        pub(crate) stop_requested: AtomicBool,
     }
 
     impl ShellJob {

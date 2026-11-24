@@ -1596,6 +1596,7 @@ impl ShellSession {
                     ),
                 });
             }
+            let kill_failed = killed.is_err();
             let data = match killed {
                 Ok(()) => {
                     let reply = self
@@ -1641,6 +1642,47 @@ impl ShellSession {
                     }
                 }
             };
+            if kill_failed {
+                let watched = task.task_id.clone();
+                let output_path = task.output_path.clone();
+                self.inner
+                    .lock()
+                    .await
+                    .background
+                    .insert(watched.clone(), task);
+                let this = self.clone();
+                let host = self.host.clone();
+                self.tasks.lock().await.spawn(async move {
+                    let reply = host
+                        .wait(
+                            WaitRequest {
+                                task_id: watched.clone(),
+                                timeout_ms: None,
+                            },
+                            never_cancelled(),
+                        )
+                        .await;
+                    if let Ok(reply) = reply {
+                        if this
+                            .inner
+                            .lock()
+                            .await
+                            .background
+                            .remove(&watched)
+                            .is_none()
+                        {
+                            return;
+                        }
+                        let _ = host
+                            .settle(TaskRequest {
+                                task_id: watched.clone(),
+                            })
+                            .await;
+                        this.settle(ended_from_reply(&watched, &reply, &output_path));
+                    }
+                });
+                return Ok(data);
+            }
             self.settle(data.clone());
             return Ok(data);
         }

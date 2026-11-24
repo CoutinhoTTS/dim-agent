@@ -120,8 +120,9 @@ written bytes begin. The event API is deleted (§3.2).
 * `OutputWriteFailed{message}` is the log error and forces `status: failed`, keeping
   `exitCode` if the process exited; a job read error is `JobUnavailable{message}`. A
   running snapshot has no failure/exit/signal/note. `tail`/`output` read a job file with a
-  bounded seek/read; nothing loads it whole. A shell token is data: numeric →
-  `exited{code}`, `failed` → `CommandFailed`, other/empty → `UnknownExit`.
+  bounded seek/read; nothing loads it whole. A shell token is data: `0` →
+  `exited{0}`, another numeric → `failed{code}` with `CommandFailed`, `failed` →
+  `CommandFailed`, other/empty → `UnknownExit`.
 ### 2.3 Output page
 `OutputPage = {text, bytes, totalBytes, nextCursor?, truncated, retainedFrom, reset}`.
 

@@ -40,7 +40,7 @@ as exec tasks. A shell command ends from its marker; shell exit sweeps its comma
 children. A terminal shell answers `write`/`resize` with `task_ended`, and `settle` is
 idempotent. A shell `outputPath` is registered before the reply and survives settle until
 `removeOutputDirectory` or Session deletion; `retainOutput` is idempotent. `ShellJobStart.outputPath`
-is an absolute path inside the shell output directory; `childPath` takes UTF-8 data, while the
+is an absolute path inside the shell output directory and its file stem equals the task id; `childPath` takes UTF-8 data, while the
 native `child_path_process` accepts an `OsStr` base without replacement. The command/task and shell settlement rules are in
 [resource faces §3.2](../../../design/resource-faces.md#32-settlement-and-retained-task-records).
 
