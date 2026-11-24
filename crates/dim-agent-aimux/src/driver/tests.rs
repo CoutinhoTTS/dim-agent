@@ -428,6 +428,62 @@ async fn a_header_report_read_past_its_allowance_keeps_the_response_status() {
     assert_eq!(model.status, Some(401));
 }
 
+/// The stream allowance runs from the instant the transport reported the
+/// headers, not from the poll that read the report: headers reported at 299
+/// seconds and read at 301 end the wait at 599, not at 601.
+#[tokio::test(start_paused = true)]
+async fn a_header_report_starts_the_stream_allowance_at_its_instant() {
+    let (fetch, reply) = scripted();
+    let body = ScriptedBody::default();
+    let driver = driver(fetch);
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiChat),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT - Duration::from_secs(1)).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body,
+        })
+        .unwrap();
+    assert!(
+        poll_once(invoke.as_mut()).is_pending(),
+        "the exchange must stop after the headers"
+    );
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "a report written inside the header allowance must not be read as late"
+    );
+    tokio::time::advance(Duration::from_secs(298)).await;
+    let error = match poll_until_idle(invoke.as_mut()) {
+        Some(Err(error)) => error,
+        Some(Ok(_)) => panic!("a reply without a first event must fail"),
+        None => panic!("the stream allowance must end 300 seconds after the report"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("the response headers arrived, but no stream event followed within 300 seconds")
+    );
+}
+
 /// The OpenAI Responses startup scan decodes response metadata before it
 /// returns the stream. The wait after the headers ends when the stream
 /// starts, and its failure says so instead of reporting a missing event.
