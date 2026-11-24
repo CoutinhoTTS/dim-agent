@@ -30,7 +30,7 @@ use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis_bridge::session::{HostDispatch, host_key};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     ops::RangeInclusive,
     panic::{AssertUnwindSafe, catch_unwind},
     path::{Component, Path, PathBuf},
@@ -1276,7 +1276,34 @@ pub struct SessionStore {
     /// Serializes output ownership across Sessions: a delete's shared-owner
     /// check, removal and row deletion, and a fork's copy of the output rows,
     /// so a fork either copies before the removal or sees no rows (ADR 013 D4).
+    /// A worktree removal holds it for its checks and the registration of its
+    /// path, not for the deletion itself.
     ownership: Arc<tokio::sync::Mutex<()>>,
+    /// The normalized directories a worktree removal is deleting now. A
+    /// removal registers its path under the ownership lock and clears it when
+    /// the deletion returns, so the path stays refused for the whole deletion
+    /// while unrelated work proceeds. Only memory holds it: a process that dies
+    /// mid-removal leaves a partly deleted directory, which the same removal
+    /// removes again.
+    deleting: Arc<Mutex<HashSet<PathBuf>>>,
+}
+
+/// A path a removal registered as being deleted. The removal's own task owns
+/// this: dropping it is what clears the path, so dropping a caller that waits
+/// for the removal does not clear it early.
+struct Deleting {
+    store: SessionStore,
+    path: PathBuf,
+}
+
+impl Drop for Deleting {
+    fn drop(&mut self) {
+        self.store
+            .deleting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.path);
+    }
 }
 
 /// A Session's verified subtree in one recorded worktree. The association
@@ -1320,6 +1347,7 @@ impl SessionStore {
             files,
             titles,
             ownership: Arc::new(tokio::sync::Mutex::new(())),
+            deleting: Arc::new(Mutex::new(HashSet::new())),
         }
     }
     pub fn timeline_store(&self) -> Arc<TimelineStoreBinding> {
@@ -1588,7 +1616,8 @@ impl SessionStore {
     /// The prepare step of `session.fork`; the ownership lock keeps this copy
     /// and a delete's output removal apart. [`SqliteTimelineStore::fork_session`]
     /// copies the rows and writes `config`, the source record's text the
-    /// caller read, into the fork's record unchanged.
+    /// caller read, into the fork's record unchanged. A workspace the text
+    /// names that is being removed refuses the fork.
     pub async fn fork_session(
         &self,
         source: &str,
@@ -1599,6 +1628,9 @@ impl SessionStore {
         crate::protocol::check_session_id(source)?;
         crate::protocol::check_session_id(fork)?;
         let _ownership = self.ownership.lock().await;
+        if let Some(cwd) = config_cwd(config) {
+            self.reject_deletion(&cwd).await?;
+        }
         self.timeline.fork_session(source, fork, at, config).await
     }
     /// The source record's configuration text, for a caller that copies it
@@ -1626,6 +1658,7 @@ impl SessionStore {
         let agent = agent_id.to_owned();
         let leader = leader.map(str::to_owned);
         let _ownership = self.ownership.lock().await;
+        self.reject_deletion(Path::new(&config.cwd)).await?;
         if !tokio::fs::metadata(&config.cwd)
             .await
             .map(|metadata| metadata.is_dir())
@@ -1703,6 +1736,7 @@ impl SessionStore {
             ));
         }
         let _ownership = self.ownership.lock().await;
+        self.reject_deletion(&directory.root).await?;
         if !tokio::fs::metadata(&directory.root)
             .await
             .map(|metadata| metadata.is_dir())
@@ -1843,73 +1877,86 @@ impl SessionStore {
             .await
     }
 
-    /// Removes one worktree under the store's exclusion: the ownership lock
-    /// is held from the re-check through `remove` and the record deletion, so
-    /// a late association or Session row fails this call instead of slipping
-    /// in. The directory must have no association and no stored Session
-    /// workspace at or under it; `remove` performs the Git removal and
-    /// succeeds for a root already verified missing. Returns whether the
-    /// record was removed.
+    /// Removes one worktree: the ownership lock is held for the association
+    /// and Session-workspace checks and for registering `directory.root` as
+    /// being deleted, then released for `remove` and reacquired to delete the
+    /// record. A late association or Session creation fails the checks or
+    /// meets the registered path instead of slipping in, and an unrelated
+    /// operation proceeds while `remove` runs. The directory must have no
+    /// association and no stored Session workspace at or under it; `remove`
+    /// performs the Git removal and succeeds for a root already verified
+    /// missing. Returns whether the record was removed.
     pub async fn remove_worktree(
         &self,
         directory: WorktreeDirectory,
-        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>>,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
     ) -> Result<bool> {
         let repository = stored_worktree_path(&directory.repository)?.to_owned();
         let root = stored_worktree_path(&directory.root)?.to_owned();
         let checked = (repository.clone(), root.clone());
-        let _ownership = self.ownership.lock().await;
-        let used: bool = self
-            .timeline
-            .db
-            .run_read(move |connection| {
-                connection
-                    .query_row(
-                        "SELECT EXISTS(SELECT 1 FROM session_worktrees \
-                         WHERE repository=?1 AND root=?2)",
-                        params![checked.0, checked.1],
-                        |row| row.get(0),
-                    )
-                    .map_err(error)
-            })
-            .await?;
-        if used {
-            return Err(AgentError::InvalidInput(
-                "the worktree directory still has Session associations".into(),
-            ));
-        }
-        let sessions = self.sessions_under_workspace(&directory.root).await?;
-        if let Some(session) = sessions.first() {
-            return Err(AgentError::InvalidInput(format!(
-                "Session {session} uses this worktree"
-            )));
-        }
-        remove(directory.root.clone()).await?;
-        let removed = self
-            .timeline
-            .db
-            .run(move |connection| {
-                connection
-                    .execute(
-                        "DELETE FROM worktree_directories WHERE repository=?1 AND root=?2",
-                        params![repository, root],
-                    )
-                    .map_err(error)
-            })
-            .await?;
-        Ok(removed > 0)
+        let path = PathBuf::from(&root);
+        let store = self.clone();
+        tokio::spawn(async move {
+            let deleting = {
+                let _ownership = store.ownership.lock().await;
+                let used: bool = store
+                    .timeline
+                    .db
+                    .run_read(move |connection| {
+                        connection
+                            .query_row(
+                                "SELECT EXISTS(SELECT 1 FROM session_worktrees \
+                                 WHERE repository=?1 AND root=?2)",
+                                params![checked.0, checked.1],
+                                |row| row.get(0),
+                            )
+                            .map_err(error)
+                    })
+                    .await?;
+                if used {
+                    return Err(AgentError::InvalidInput(
+                        "the worktree directory still has Session associations".into(),
+                    ));
+                }
+                let sessions = store.sessions_under_workspace(&path).await?;
+                if let Some(session) = sessions.first() {
+                    return Err(AgentError::InvalidInput(format!(
+                        "Session {session} uses this worktree"
+                    )));
+                }
+                store.begin_deletion(&path).await?
+            };
+            remove(path).await?;
+            let _ownership = store.ownership.lock().await;
+            let removed = store
+                .timeline
+                .db
+                .run(move |connection| {
+                    connection
+                        .execute(
+                            "DELETE FROM worktree_directories WHERE repository=?1 AND root=?2",
+                            params![repository, root],
+                        )
+                        .map_err(error)
+                })
+                .await?;
+            drop(deleting);
+            Ok(removed > 0)
+        })
+        .await
+        .map_err(|error| AgentError::Storage(format!("the removal task failed: {error}")))?
     }
 
-    /// Removes an unregistered directory under the store's exclusion: the
-    /// ownership lock is held from the final record and workspace checks
-    /// through `remove`, so a Session created or a directory recorded after
-    /// the check fails this call and a creation after the removal re-checks
-    /// its missing workspace. The checks and the removal run in their own
-    /// task, so dropping the caller does not release the lock while the
-    /// removal is still running. The path is a store path, absolute without
-    /// relative components, and neither a recorded worktree directory nor a
-    /// stored Session workspace may be at or under it; `remove` re-checks the
-    /// unregistered facts and performs the deletion. Returns whether the
+    /// Removes an unregistered directory: the ownership lock is held for the
+    /// final record and workspace checks and for registering `path` as being
+    /// deleted, then released for `remove`. A Session created or a directory
+    /// recorded after the check fails the checks or meets the registered path,
+    /// and a creation after the removal re-checks its missing workspace. The
+    /// work runs in its own task, so dropping the caller neither releases the
+    /// registration nor stops the deletion. The path is a store path, absolute
+    /// without relative components, and neither a recorded worktree directory
+    /// nor a stored Session workspace may be at or under it; `remove` re-checks
+    /// the unregistered facts and performs the deletion. Returns whether the
     /// directory was still present when the lock was acquired; `false` means
     /// another removal already finished.
     pub async fn remove_unregistered_directory(
@@ -1920,34 +1967,84 @@ impl SessionStore {
         stored_worktree_path(&path)?;
         let store = self.clone();
         tokio::spawn(async move {
-            let _ownership = store.ownership.lock().await;
-            match tokio::fs::symlink_metadata(&path).await {
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-                Err(_) => {}
-            }
-            let directories = store.worktree_directories().await?;
-            if let Some(record) = directories
-                .iter()
-                .find(|record| record.directory.root.starts_with(&path))
-            {
-                return Err(AgentError::InvalidInput(format!(
-                    "{} is a recorded worktree directory; remove it by task id",
-                    record.directory.root.display()
-                )));
-            }
-            let sessions = store.sessions_under_workspace(&path).await?;
-            if let Some(session) = sessions.first() {
-                return Err(AgentError::InvalidInput(format!(
-                    "Session {session} uses {}",
-                    path.display()
-                )));
-            }
+            let deleting = {
+                let _ownership = store.ownership.lock().await;
+                match tokio::fs::symlink_metadata(&path).await {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+                    Err(_) => {}
+                }
+                let directories = store.worktree_directories().await?;
+                if let Some(record) = directories
+                    .iter()
+                    .find(|record| record.directory.root.starts_with(&path))
+                {
+                    return Err(AgentError::InvalidInput(format!(
+                        "{} is a recorded worktree directory; remove it by task id",
+                        record.directory.root.display()
+                    )));
+                }
+                let sessions = store.sessions_under_workspace(&path).await?;
+                if let Some(session) = sessions.first() {
+                    return Err(AgentError::InvalidInput(format!(
+                        "Session {session} uses {}",
+                        path.display()
+                    )));
+                }
+                store.begin_deletion(&path).await?
+            };
             remove(path).await?;
+            drop(deleting);
             Ok(true)
         })
         .await
         .map_err(|error| AgentError::Storage(format!("the removal task failed: {error}")))?
+    }
+
+    /// Registers `path` as being deleted until the returned guard drops. The
+    /// caller holds the ownership lock, so the checks that precede it and this
+    /// registration are one step for every operation that looks at the same
+    /// lock. A path that is itself, above or below a path already being
+    /// removed is refused, which also refuses a second removal of the same
+    /// worktree.
+    async fn begin_deletion(&self, path: &Path) -> Result<Deleting> {
+        let path = normalized(path).await;
+        let mut deleting = self
+            .deleting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(other) = deleting.iter().find(|other| overlaps(other, &path)) {
+            return Err(AgentError::InvalidInput(format!(
+                "{} is being removed",
+                other.display()
+            )));
+        }
+        deleting.insert(path.clone());
+        Ok(Deleting {
+            store: self.clone(),
+            path,
+        })
+    }
+
+    /// Refuses a workspace or root that a removal is deleting now. The caller
+    /// holds the ownership lock, which is the same lock a removal registers
+    /// under, so a path seen as free cannot be registered before this
+    /// operation records what it does with it. Call it before the caller's own
+    /// existence check: the end of a deletion clears the registration, and a
+    /// workspace that deletion removed then fails that check instead.
+    async fn reject_deletion(&self, path: &Path) -> Result<()> {
+        let path = normalized(path).await;
+        let deleting = self
+            .deleting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match deleting.iter().find(|other| overlaps(other, &path)) {
+            Some(other) => Err(AgentError::InvalidInput(format!(
+                "{} is being removed",
+                other.display()
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Lists the Session associations of a recorded directory. An unknown
@@ -1993,6 +2090,31 @@ fn stored_worktree_path(path: &Path) -> Result<&str> {
     }
     path.to_str()
         .ok_or_else(|| error("a worktree path must be UTF-8"))
+}
+
+/// A path in the form every deletion check compares: the resolved directory, so
+/// a route through a symlink and the directory it names overlap. A path that
+/// cannot be resolved, such as one already deleted, keeps its own form.
+async fn normalized(path: &Path) -> PathBuf {
+    tokio::fs::canonicalize(path)
+        .await
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether one path is at or under the other.
+fn overlaps(one: &Path, other: &Path) -> bool {
+    one.starts_with(other) || other.starts_with(one)
+}
+
+/// The workspace a stored Session configuration names, read from the same text
+/// `session_catalog` records it from. Text that does not carry one has no
+/// workspace to check.
+fn config_cwd(config: &str) -> Option<PathBuf> {
+    serde_json::from_str::<serde_json::Value>(config)
+        .ok()?
+        .get("cwd")?
+        .as_str()
+        .map(PathBuf::from)
 }
 
 /// The Session directory, the `sessionFiles` service and the

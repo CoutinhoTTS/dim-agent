@@ -150,7 +150,7 @@ impl Store {
     pub fn remove_worktree(
         &self,
         directory: WorktreeDirectory,
-        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>>,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
     ) -> impl Future<Output = Result<bool>> {
         self.0.remove_worktree(directory, remove)
     }
