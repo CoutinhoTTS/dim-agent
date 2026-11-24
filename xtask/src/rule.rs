@@ -8,7 +8,9 @@
 //! a family-wise α. The verdict is `fail` when any comparison is a regression,
 //! `inconclusive` when none is but the floor is unmet or a comparison has no
 //! counted run to compare, and `pass` otherwise. There is no absolute pass
-//! line.
+//! line. A family whose rates should rise is judged by the same test with the
+//! arms swapped: a gain at or under δ enters with p = 1, every comparison
+//! stays in the family, and at least one gain must reject.
 
 /// The smallest loss that is tested: a comparison whose loss is at most δ
 /// enters the family with p = 1 and never rejects.
@@ -120,10 +122,143 @@ impl Row {
             if self.rejected { "yes" } else { "no" },
         )
     }
+    /// The row's line in a gain table. A gain family's comparison carries its
+    /// arms swapped, so its `candidate` cell is the current arm's count and
+    /// its `loss` is the gain.
+    pub(crate) fn gain_line(&self) -> String {
+        let cell = |counts: Counts| match counts.rate() {
+            Some(rate) => format!("{}/{} ({rate:.3})", counts.outcome, counts.total),
+            None => "–".to_owned(),
+        };
+        let gain = self
+            .loss
+            .map_or_else(|| "–".to_owned(), |gain| format!("{gain:.3}"));
+        format!(
+            "| {} | {} | {} | {gain} | {} | {:.4} | {} |",
+            self.name,
+            cell(self.candidate),
+            cell(self.current),
+            probability(self.p),
+            self.threshold,
+            if self.rejected { "yes" } else { "no" },
+        )
+    }
 }
 
 /// The comparison table's header, one row per comparison.
 pub(crate) const COMPARISON_HEADER: &str = "| comparison | current | candidate | loss | p | Holm threshold | rejected |\n| --- | --- | --- | --- | --- | --- | --- |\n";
+
+/// A gain table's header, one row per comparison.
+pub(crate) const GAIN_HEADER: &str = "| gate 2 probe | current | candidate | gain | p | Holm threshold | rejected |\n| --- | --- | --- | --- | --- | --- | --- |\n";
+
+/// One comparison of a family whose rates should rise, fixed before any data:
+/// the report's name for it and both arms' counted pass rates.
+#[derive(Clone, Debug)]
+pub(crate) struct Gain {
+    pub name: String,
+    pub current: Counts,
+    pub candidate: Counts,
+}
+
+/// A gain family's verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GainVerdict {
+    Pass,
+    Fail,
+    Inconclusive,
+}
+
+/// One gain family's rows and verdict.
+#[derive(Clone, Debug)]
+pub(crate) struct GainRule {
+    pub rows: Vec<Row>,
+    pub verdict: GainVerdict,
+}
+
+/// Judges a family of gains fixed before any data with the same δ and Holm α
+/// as a loss family: `pass` when at least one comparison's gain rejects,
+/// `fail` when none does, and `inconclusive` when a comparison cannot be made
+/// or no comparison had room to gain more than δ. Every comparison stays in
+/// the family whatever its counts: one whose gain is at most δ enters with
+/// p = 1 and cannot reject, but still takes its rank, so a probe at its
+/// ceiling never shrinks the family or loosens another threshold.
+pub(crate) fn judge_gains(gains: &[Gain]) -> GainRule {
+    let mut rows: Vec<Row> = gains
+        .iter()
+        .map(|gain| {
+            Row::of(&Comparison {
+                name: gain.name.clone(),
+                worse: Worse::Lower,
+                current: gain.candidate,
+                candidate: gain.current,
+            })
+        })
+        .collect();
+    holm(&mut rows);
+    let incomplete = rows.iter().any(|row| row.loss.is_none());
+    let headroom = gains.iter().any(has_headroom);
+    let verdict = if incomplete || !headroom {
+        GainVerdict::Inconclusive
+    } else if rows.iter().any(|row| row.rejected) {
+        GainVerdict::Pass
+    } else {
+        GainVerdict::Fail
+    };
+    GainRule { rows, verdict }
+}
+
+/// Whether a perfect candidate arm could gain more than δ over the probe:
+/// `1 − current.outcome/current.total > 1/20`, decided in integers.
+fn has_headroom(gain: &Gain) -> bool {
+    20 * (gain.current.total - gain.current.outcome) > gain.current.total
+}
+
+/// The gain verdict as a report line: the comparisons that rejected, or why
+/// the gate cannot pass.
+pub(crate) fn gain_verdict_line(rule: &GainRule, subject: &str) -> String {
+    match rule.verdict {
+        GainVerdict::Pass => {
+            let rejected: Vec<String> = rule
+                .rows
+                .iter()
+                .filter(|row| row.rejected)
+                .map(|row| {
+                    format!(
+                        "{} gains from {:.3} to {:.3} (gain {}, p {}, Holm threshold {:.4})",
+                        row.name,
+                        row.candidate.rate().unwrap_or(0.),
+                        row.current.rate().unwrap_or(0.),
+                        row.loss
+                            .map_or_else(|| "–".to_owned(), |gain| format!("{gain:.3}")),
+                        probability(row.p),
+                        row.threshold,
+                    )
+                })
+                .collect();
+            format!("{subject} passes gate 2: {}.", rejected.join("; "))
+        }
+        GainVerdict::Fail => format!(
+            "{subject} fails gate 2: no probe gains more than {DELTA:.2} and rejects at Holm-adjusted {ALPHA:.2}."
+        ),
+        GainVerdict::Inconclusive => {
+            let mut reasons: Vec<String> = rule
+                .rows
+                .iter()
+                .filter(|row| row.loss.is_none())
+                .map(|row| format!("{} has no counted run in an arm", row.name))
+                .collect();
+            if reasons.is_empty() {
+                reasons.push(format!(
+                    "no probe could gain more than {DELTA:.2} over its current arm"
+                ));
+            }
+            format!(
+                "{subject} is inconclusive on gate 2: {}.",
+                reasons.join(", and ")
+            )
+        }
+    }
+}
 
 /// The three-valued verdict (`fail`, `pass` or `inconclusive`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -329,6 +464,14 @@ mod tests {
     fn close(left: f64, right: f64) -> bool {
         (left - right).abs() < 1e-9
     }
+    /// One gain comparison with both arms' counted passes and runs.
+    fn gain(name: &str, current: (u64, u64), candidate: (u64, u64)) -> Gain {
+        Gain {
+            name: name.into(),
+            current: Counts::new(current.0, current.1),
+            candidate: Counts::new(candidate.0, candidate.1),
+        }
+    }
 
     /// The mid-p values against references computed independently with exact
     /// rational arithmetic and stated here as the fractions they are: small
@@ -509,5 +652,61 @@ mod tests {
         );
         assert_eq!(rule.rows[0].loss, None);
         assert_eq!(rule.verdict, Verdict::Inconclusive);
+    }
+
+    /// A gain at or under δ enters the fixed family with p = 1 even where the
+    /// test alone would reject, and the comparison still takes its rank.
+    #[test]
+    fn a_gain_at_or_under_delta_enters_with_p_one() {
+        let rule = judge_gains(&[gain("probe", (900, 1000), (950, 1000))]);
+        assert_eq!(rule.rows[0].p, 1., "the gain is exactly δ");
+        assert!(!rule.rows[0].rejected);
+        assert_eq!(rule.verdict, GainVerdict::Fail);
+    }
+
+    /// The gain test uses each arm's own counted runs: a perfect candidate of
+    /// eight has p .050 against a current 5/8, and a perfect candidate of
+    /// three has .170, so unequal judge exclusions change the p-value, not the
+    /// family.
+    #[test]
+    fn a_gain_test_uses_each_arms_own_counted_runs() {
+        let rule = judge_gains(&[gain("probe", (5, 8), (8, 8))]);
+        assert!(close(rule.rows[0].p, 0.05), "{}", rule.rows[0].p);
+        let rule = judge_gains(&[gain("probe", (5, 8), (3, 3))]);
+        assert!(close(rule.rows[0].p, 28. / 165.), "{}", rule.rows[0].p);
+        let rule = judge_gains(&[gain("probe", (5, 8), (0, 0))]);
+        assert_eq!(rule.rows[0].loss, None);
+        assert_eq!(rule.verdict, GainVerdict::Inconclusive);
+    }
+
+    /// Every probe stays in the gain family: the family is the rows the caller
+    /// fixed before the data, and Holm's ordered thresholds and step-down
+    /// apply over all three even when a probe cannot reject.
+    #[test]
+    fn the_gain_family_keeps_every_probe_through_holm() {
+        let rule = judge_gains(&[
+            gain("a", (3, 56), (14, 56)),
+            gain("b", (5, 8), (5, 5)),
+            gain("c", (56, 56), (56, 56)),
+        ]);
+        assert_eq!(rule.rows.len(), 3);
+        assert_eq!(rule.rows[0].threshold, 0.1 / 3.);
+        assert_eq!(rule.rows[1].threshold, 0.1 / 2.);
+        assert_eq!(rule.rows[2].threshold, 0.1);
+        assert!(rule.rows[0].rejected, "p {} under 0.10/3", rule.rows[0].p);
+        assert!(!rule.rows[1].rejected, "p {} over 0.10/2", rule.rows[1].p);
+        assert!(!rule.rows[2].rejected, "the step-down already stopped");
+        assert_eq!(rule.verdict, GainVerdict::Pass);
+    }
+
+    /// A gate with no room to gain is inconclusive, not a fail: no probe can
+    /// show a gain over its current arm, so the round measured none.
+    #[test]
+    fn a_gain_family_without_headroom_is_inconclusive() {
+        let rule = judge_gains(&[gain("ceiling", (56, 56), (56, 56))]);
+        assert_eq!(rule.rows[0].p, 1.);
+        assert_eq!(rule.verdict, GainVerdict::Inconclusive);
+        let rule = judge_gains(&[gain("near-ceiling", (55, 56), (56, 56))]);
+        assert_eq!(rule.verdict, GainVerdict::Inconclusive);
     }
 }
