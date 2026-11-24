@@ -237,6 +237,61 @@ test("a retry starts a request's committed counts from nothing", () => {
   assert.deepEqual(answers, [["Write the file", false], [" and run it", true]], "the new attempt's tail is not swallowed by the replaced attempt's count")
 })
 
+test("a progress frame that arrives after its turn ended draws no row", () => {
+  const shown = (projection) => projection.rows.map((row) => [row.kind, row.text, row.streaming])
+
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "Write the file" }))
+  projection.apply(event(3, { kind: "tool-use", requestId: "r1", callId: "call", name: "exec", input: {} }))
+  projection.apply(event(4, { kind: "turn-end", outcome: "completed" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " and run it", textOffset: 14, thinking: " the options", thinkingOffset: 6, thinkingStartedAt: 1_004 })
+  assert.deepEqual(shown(projection), [
+    ["assistant", "Write the file", false],
+    ["tool", undefined, undefined],
+  ], "the rows the turn ended keep what they showed, and its late frame neither opens nor reopens one")
+
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r2", text: "next turn", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  assert.deepEqual(shown(projection).at(-1), ["assistant", "next turn", true], "the next turn's request is another id, so its own frame still opens a row")
+
+  const thought = new Projection()
+  thought.progress({ sessionId: "s", branchId: "main", requestId: "r3", text: "", textOffset: 0, thinking: "weigh", thinkingOffset: 0, thinkingStartedAt: 1_000 })
+  thought.apply(event(2, { kind: "turn-end", outcome: "completed" }))
+  thought.progress({ sessionId: "s", branchId: "main", requestId: "r3", text: "", textOffset: 0, thinking: " and more", thinkingOffset: 5 })
+  assert.equal(thought.rows.length, 1, "the late frame of a request only a frame showed opens no row")
+  assert.equal(thought.rows[0].streaming, false, "and the row its turn closed stays closed")
+
+  const read = new Projection()
+  read.activeOutput({ requestId: "r4", textCharacters: 21, thinkingCharacters: 5 })
+  read.apply(event(2, { kind: "turn-end", outcome: "completed" }))
+  read.progress({ sessionId: "s", branchId: "main", requestId: "r4", text: " and run it", textOffset: 21, thinking: "weigh", thinkingOffset: 5 })
+  read.activeOutput({ requestId: "r4", textCharacters: 21, thinkingCharacters: 5 })
+  assert.deepEqual(read.rows, [], "a window that opens inside its request and closes with its turn draws nothing for its late frame")
+  assert.equal(read.committed.size, 0, "and a read that still reports the request leaves no count behind")
+
+  const called = new Projection()
+  for (const item of [
+    event(2, { kind: "model-start", requestId: "r5" }),
+    event(3, { kind: "tool-use-start", requestId: "r5", callId: "call", name: "exec" }),
+    event(4, { kind: "tool-use", requestId: "r5", callId: "call", name: "exec", input: {} }),
+    event(5, { kind: "model-end", requestId: "r5" }),
+    event(6, { kind: "turn-end", outcome: "completed" }),
+  ]) called.apply(item)
+  called.progress({ sessionId: "s", branchId: "main", requestId: "r5", text: "late text", textOffset: 0, thinking: "", thinkingOffset: 0 })
+  assert.deepEqual(shown(called), [["tool", undefined, undefined]], "a request whose output was a call draws no answer for its late frame")
+})
+
+test("a progress frame that arrives after its request ended draws no row", () => {
+  const projection = new Projection()
+  projection.apply(event(2, { kind: "text", requestId: "r1", delta: "done" }))
+  projection.apply(event(3, { kind: "model-end", requestId: "r1" }))
+  projection.progress({ sessionId: "s", branchId: "main", requestId: "r1", text: " later", textOffset: 4, thinking: "", thinkingOffset: 0 })
+  assert.deepEqual(
+    projection.rows.map((row) => [row.kind, row.text, row.streaming]),
+    [["assistant", "done", false]],
+    "the request's own end closes its rows before its turn ends, and its late frame leaves them alone",
+  )
+})
+
 test("branch messages, ends and the last turn end become rows", () => {
   const projection = new Projection()
   projection.apply(event(1, {
