@@ -454,15 +454,6 @@ impl ShellEvent {
     }
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ShellState {
-    pub busy: bool,
-    pub ready: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_code: Option<String>,
-}
-
 /// A request to start a persistent PTY shell on this execution node.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -652,11 +643,6 @@ pub(crate) struct ShellEventRequest {
 pub(crate) struct ShellEventPage {
     pub events: Vec<ShellEvent>,
     pub next_cursor: u64,
-    #[allow(
-        dead_code,
-        reason = "step 4a keeps the private ShellSession state read"
-    )]
-    pub state: ShellState,
 }
 
 #[derive(serde::Serialize)]
@@ -1788,7 +1774,6 @@ impl HostPlatform {
         Ok(ShellEventPage {
             events: page.events,
             next_cursor: page.next_cursor,
-            state: page.state,
         })
     }
 
@@ -3883,7 +3868,7 @@ pub(crate) mod shell {
         collections::VecDeque,
         io::{self, Read, Write},
         path::{Path, PathBuf},
-        sync::{Arc, Condvar, Mutex, Weak},
+        sync::{Arc, Mutex, Weak},
         time::{Duration, Instant},
     };
     use tokio::sync::{Mutex as AsyncMutex, Notify, watch};
@@ -3903,7 +3888,6 @@ pub(crate) mod shell {
         events: Mutex<ShellEvents>,
         active_command: Mutex<Option<Weak<super::TaskRecord>>>,
         children: Mutex<Vec<Weak<super::TaskRecord>>>,
-        event_space: Condvar,
         event_notify: Arc<Notify>,
         kill: CancellationToken,
         path: PathBuf,
@@ -4164,7 +4148,6 @@ pub(crate) mod shell {
         base: u64,
         next: u64,
         chars: usize,
-        state: super::ShellState,
     }
 
     impl ShellEvents {
@@ -4175,18 +4158,7 @@ pub(crate) mod shell {
                 let cursor = self.next;
                 self.next += 1;
                 self.chars += line.len();
-                if let Some((prefix, tail)) = last_full_marker(&line) {
-                    if prefix == "__DIM_START_" {
-                        self.state.busy = true;
-                        self.state.ready = false;
-                    } else {
-                        self.state.busy = false;
-                        self.state.ready = true;
-                        let code = tail.trim();
-                        if !code.is_empty() && !code.contains(char::is_whitespace) {
-                            self.state.last_code = Some(code.to_owned());
-                        }
-                    }
+                if last_full_marker(&line).is_some() {
                     self.items
                         .push_back(super::ShellEvent::Marker { cursor, line });
                 } else {
@@ -4265,7 +4237,6 @@ pub(crate) mod shell {
             EventPage {
                 events,
                 next_cursor,
-                state: self.state.clone(),
                 reset,
             }
         }
@@ -4274,7 +4245,6 @@ pub(crate) mod shell {
     pub(crate) struct EventPage {
         pub(crate) events: Vec<super::ShellEvent>,
         pub(crate) next_cursor: u64,
-        pub(crate) state: super::ShellState,
         pub(crate) reset: bool,
     }
 
@@ -4444,7 +4414,6 @@ pub(crate) mod shell {
                     events: Mutex::default(),
                     active_command: Mutex::new(None),
                     children: Mutex::new(Vec::new()),
-                    event_space: Condvar::new(),
                     event_notify: Arc::new(Notify::new()),
                     kill: CancellationToken::new(),
                     path,
@@ -4719,7 +4688,6 @@ pub(crate) mod shell {
                     let mut events = self.events.lock().unwrap();
                     let page = events.page(cursor, limit);
                     drop(events);
-                    self.event_space.notify_all();
                     page
                 };
                 if !page.events.is_empty() || page.reset || wait == 0 || Instant::now() >= deadline
