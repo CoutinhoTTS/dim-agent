@@ -30,6 +30,14 @@ A timeout of the HTTP connection or of the stream reaches the bridge as a
 transport `ApiCall` and is `network`. `AiMuxError::Timeout` has no producer in a
 chat call; if it ever reaches the bridge it is `unknown` and is not retried.
 
+The bridge also bounds its own wait between stream parts: a stream that delivers
+nothing for five minutes is `network`, with the reason `the stream delivered
+nothing for 300 seconds`. The bound is per wait, not per request, so a reply
+that keeps streaming is never cut; an expired bound outranks a part that is
+ready at the same moment, and cancelling the request outranks both. The
+connection's optional total timeout is unchanged and is still separate from this
+idle bound.
+
 Codes are compared trimmed and ASCII-lowercased.
 
 ### The two roles of a provider string
