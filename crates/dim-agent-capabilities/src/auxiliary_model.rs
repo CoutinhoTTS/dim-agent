@@ -106,10 +106,12 @@ fn require_sendable_images(
     request: &ModelRequest,
     connection: &ModelConnection,
 ) -> Result<(), AuxiliaryError> {
-    let protocol = match connection {
-        ModelConnection::Http(connection) => Some(connection.protocol),
-        ModelConnection::Bedrock(_) => Some(ModelProtocol::Bedrock),
-        ModelConnection::Local => None,
+    let (protocol, preset) = match connection {
+        ModelConnection::Http(connection) => {
+            (Some(connection.protocol), connection.preset.as_deref())
+        }
+        ModelConnection::Bedrock(_) => (Some(ModelProtocol::Bedrock), None),
+        ModelConnection::Local => (None, None),
     };
     for message in &request.messages {
         let MessageContent::Parts(parts) = &message.content else {
@@ -118,7 +120,7 @@ fn require_sendable_images(
         for part in parts {
             match part {
                 MessagePart::Image { source } => {
-                    require_sendable_image(protocol, &source.media_type)?
+                    require_sendable_image(protocol, preset, &source.media_type)?
                 }
                 MessagePart::ToolResult {
                     content: ToolContent::Blocks(blocks),
@@ -126,7 +128,7 @@ fn require_sendable_images(
                 } => {
                     for block in blocks {
                         if let ContentBlock::Image { source } = block {
-                            require_sendable_image(protocol, &source.media_type)?;
+                            require_sendable_image(protocol, preset, &source.media_type)?;
                         }
                     }
                 }
@@ -141,12 +143,14 @@ fn require_sendable_images(
 /// standalone call has no conversation a content reference could resolve
 /// against, so it refuses the image instead of sending pixels the target does
 /// not take; an owner that reuses an answer calls this too, so a reused answer
-/// follows the format rule of the route that serves the target now.
+/// follows the format rule of the route that serves the target now. `preset` is
+/// the vendor package the route's compatible protocol builds, if any.
 pub fn require_sendable_image(
     protocol: Option<ModelProtocol>,
+    preset: Option<&str>,
     media_type: &str,
 ) -> Result<(), AuxiliaryError> {
-    if takes_image_format(protocol, media_type) {
+    if takes_image_format(protocol, preset, media_type) {
         return Ok(());
     }
     Err(AuxiliaryError {

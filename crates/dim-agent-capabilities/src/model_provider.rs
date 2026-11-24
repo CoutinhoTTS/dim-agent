@@ -495,13 +495,20 @@ impl ModelProvider {
                         recovery: None,
                     },
                 };
-                let protocol = match &resolved.connection {
-                    ModelConnection::Http(connection) => Some(connection.protocol),
-                    ModelConnection::Bedrock(_) => Some(ModelProtocol::Bedrock),
-                    ModelConnection::Local => None,
+                let destination = match &resolved.connection {
+                    ModelConnection::Http(connection) => images::ImageDestination {
+                        protocol: Some(connection.protocol),
+                        preset: connection.preset.as_deref(),
+                    },
+                    ModelConnection::Bedrock(_) => images::ImageDestination {
+                        protocol: Some(ModelProtocol::Bedrock),
+                        preset: None,
+                    },
+                    ModelConnection::Local => images::ImageDestination::default(),
                 };
                 let request =
-                    images::adapt(&call.request, self.files.as_deref(), protocol, &cancel).await?;
+                    images::adapt(&call.request, self.files.as_deref(), destination, &cancel)
+                        .await?;
                 self.context
                     .validate(&call.request_id, request.clone(), cancel.clone())
                     .await?;

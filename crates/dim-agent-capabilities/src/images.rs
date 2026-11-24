@@ -22,7 +22,7 @@ const GEMINI_IMAGE_FORMATS: [&str; 5] = [
     "image/heif",
 ];
 
-/// The image formats a native xAI route accepts as pixels: its Chat
+/// The image formats an xAI destination accepts as pixels: its Chat
 /// Completions and Responses image input limits list JPEG and PNG only.
 const XAI_IMAGE_FORMATS: [&str; 2] = ["image/png", "image/jpeg"];
 
@@ -33,11 +33,19 @@ pub(crate) const REQUEST_IMAGE_FORMATS: [&str; 4] =
 
 /// Whether a destination takes this image format as pixels: one whitelist per
 /// protocol, and the four a request may carry for a destination whose protocol
-/// is unknown or lists no narrower rule (Attachments A.1).
-pub fn takes_image_format(protocol: Option<ModelProtocol>, media_type: &str) -> bool {
-    match protocol {
-        Some(ModelProtocol::Gemini) => GEMINI_IMAGE_FORMATS.contains(&media_type),
-        Some(ModelProtocol::Xai | ModelProtocol::XaiResponses) => {
+/// is unknown or lists no narrower rule (Attachments A.1). `preset` names the
+/// vendor package a compatible destination builds, because the protocol alone
+/// does not say whose limit applies: the built-in xAI entries serve the xAI
+/// limits over that protocol.
+pub fn takes_image_format(
+    protocol: Option<ModelProtocol>,
+    preset: Option<&str>,
+    media_type: &str,
+) -> bool {
+    match (protocol, preset) {
+        (Some(ModelProtocol::Gemini), _) => GEMINI_IMAGE_FORMATS.contains(&media_type),
+        (Some(ModelProtocol::Xai | ModelProtocol::XaiResponses), _)
+        | (Some(ModelProtocol::OpenaiCompatible), Some("xai")) => {
             XAI_IMAGE_FORMATS.contains(&media_type)
         }
         _ => REQUEST_IMAGE_FORMATS.contains(&media_type),

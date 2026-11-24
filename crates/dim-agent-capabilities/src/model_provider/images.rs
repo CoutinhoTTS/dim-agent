@@ -25,16 +25,24 @@ enum Routed {
     Text(String),
 }
 
+/// The destination a request's images are judged by: the protocol it serves,
+/// and the vendor package a compatible destination builds by name.
+#[derive(Clone, Copy, Default)]
+pub(super) struct ImageDestination<'a> {
+    pub(super) protocol: Option<ModelProtocol>,
+    pub(super) preset: Option<&'a str>,
+}
+
 /// Returns the request to send: the same request when every image is sent as
 /// is, otherwise a copy whose images a model cannot take become references or
-/// placeholders. Messages without images stay shared. `protocol` is the
-/// resolved destination's protocol, `None` when it is not a provider protocol.
-/// Each image the copy sends as pixels joins the encoded-image budget, so a
-/// request over it fails before the rest of the images are read.
+/// placeholders. Messages without images stay shared. `destination` is the
+/// resolved destination, whose fields are `None` when it is not a provider
+/// protocol. Each image the copy sends as pixels joins the encoded-image
+/// budget, so a request over it fails before the rest of the images are read.
 pub(super) async fn adapt(
     request: &Arc<ModelRequest>,
     files: Option<&SessionFiles>,
-    protocol: Option<ModelProtocol>,
+    destination: ImageDestination<'_>,
     cancel: &CancellationToken,
 ) -> Result<Arc<ModelRequest>, HostError> {
     // Unknown capability: the image is sent and the provider decides (A4).
@@ -50,7 +58,7 @@ pub(super) async fn adapt(
             request,
             files,
             vision,
-            protocol,
+            destination,
             cancel,
             &mut encoded,
         )
@@ -81,7 +89,7 @@ async fn replace_images(
     request: &ModelRequest,
     files: Option<&SessionFiles>,
     vision: bool,
-    protocol: Option<ModelProtocol>,
+    destination: ImageDestination<'_>,
     cancel: &CancellationToken,
     encoded: &mut usize,
 ) -> Result<Option<Message>, HostError> {
@@ -92,7 +100,7 @@ async fn replace_images(
     for (index, part) in parts.iter().enumerate() {
         let replacement = match part {
             MessagePart::Image { source } => {
-                match route(source, request, files, vision, protocol, cancel, encoded).await? {
+                match route(source, request, files, vision, destination, cancel, encoded).await? {
                     Routed::Keep => None,
                     Routed::Resolved(source) => Some(MessagePart::Image { source }),
                     Routed::Text(text) => Some(MessagePart::Text {
@@ -114,7 +122,9 @@ async fn replace_images(
                     let ContentBlock::Image { source } = block else {
                         continue;
                     };
-                    match route(source, request, files, vision, protocol, cancel, encoded).await? {
+                    match route(source, request, files, vision, destination, cancel, encoded)
+                        .await?
+                    {
                         Routed::Keep => {}
                         Routed::Resolved(source) => {
                             replacements.push((index, ContentBlock::Image { source }));
@@ -168,14 +178,21 @@ async fn route(
     request: &ModelRequest,
     files: Option<&SessionFiles>,
     vision: bool,
-    protocol: Option<ModelProtocol>,
+    destination: ImageDestination<'_>,
     cancel: &CancellationToken,
     encoded: &mut usize,
 ) -> Result<Routed, HostError> {
     crate::context_policy::check_cancel(cancel)?;
     if source.source_type == ImageSourceType::File && sendable(source) {
         let resolved = crate::session_files::resolve(request, files, source, cancel).await?;
-        if vision && sendable(&resolved) && takes_image_format(protocol, &resolved.media_type) {
+        if vision
+            && sendable(&resolved)
+            && takes_image_format(
+                destination.protocol,
+                destination.preset,
+                &resolved.media_type,
+            )
+        {
             add_encoded_image(encoded, &resolved)?;
             return Ok(Routed::Resolved(resolved));
         }
@@ -185,7 +202,10 @@ async fn route(
             image_reference(&resolved).unwrap_or_else(|| NO_IMAGE_INPUT.into())
         }));
     }
-    if vision && sendable(source) && takes_image_format(protocol, &source.media_type) {
+    if vision
+        && sendable(source)
+        && takes_image_format(destination.protocol, destination.preset, &source.media_type)
+    {
         add_encoded_image(encoded, source)?;
         return Ok(Routed::Keep);
     }
@@ -329,7 +349,7 @@ mod tests {
         let error = adapt(
             &Arc::new(request),
             Some(&files),
-            None,
+            ImageDestination::default(),
             &CancellationToken::new(),
         )
         .await

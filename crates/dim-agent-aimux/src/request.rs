@@ -27,6 +27,14 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// The destination an image's format is judged by: the protocol the request
+/// goes out as, and the vendor package a compatible destination builds by name.
+#[derive(Clone, Copy)]
+struct ImageDestination<'a> {
+    kind: ProviderKind,
+    preset: Option<&'a str>,
+}
+
 pub(crate) struct PreparedRequest {
     pub options: CallOptions,
     pub tool_names: ToolNames,
@@ -122,6 +130,10 @@ pub(crate) fn convert(
     preset: Option<&str>,
 ) -> Result<PreparedRequest, HostError> {
     let chatgpt = preset == Some(crate::driver::OPENAI_CHATGPT_PRESET);
+    let destination = ImageDestination {
+        kind: *kind,
+        preset,
+    };
     let mut tool_names = ToolNames::default();
     let mut prompt = Vec::new();
     let mut cache_breakpoints = 0;
@@ -227,7 +239,7 @@ pub(crate) fn convert(
         }
         let path = format!("messages[{index}].content");
         let message = match source.role {
-            Role::User => user_message(request, kind, &path, &source.content)?,
+            Role::User => user_message(request, destination, &path, &source.content)?,
             Role::Assistant => assistant_message(
                 request,
                 kind,
@@ -238,7 +250,7 @@ pub(crate) fn convert(
             )?,
             Role::ToolResult => tool_message(
                 request,
-                kind,
+                destination,
                 &path,
                 &source.content,
                 &calls,
@@ -520,7 +532,7 @@ fn reasoning_model_rules(
 /// One user message, built as the user role's own part type.
 fn user_message(
     request: &ModelRequest,
-    kind: &ProviderKind,
+    destination: ImageDestination<'_>,
     path: &str,
     content: &MessageContent,
 ) -> Result<LanguageModelMessage, HostError> {
@@ -534,8 +546,14 @@ fn user_message(
             for (index, part) in parts.iter().enumerate() {
                 let path = format!("{path}[{index}]");
                 let mut provider_options = None;
-                let include =
-                    continuation(request, kind, &path, part, &mut provider_options, false)?;
+                let include = continuation(
+                    request,
+                    &destination.kind,
+                    &path,
+                    part,
+                    &mut provider_options,
+                    false,
+                )?;
                 match part {
                     MessagePart::Text { text, .. } if include => {
                         content.push(UserPart::Text(TextPart {
@@ -544,7 +562,7 @@ fn user_message(
                         }));
                     }
                     MessagePart::Image { source } if include => {
-                        content.push(image_part(request, kind, &path, source)?);
+                        content.push(image_part(request, destination, &path, source)?);
                     }
                     MessagePart::Text { .. } | MessagePart::Image { .. } => {}
                     _ => {
@@ -648,7 +666,7 @@ fn assistant_message<'a>(
 /// to name a tool call an earlier assistant message registered.
 fn tool_message<'a>(
     request: &ModelRequest,
-    kind: &ProviderKind,
+    destination: ImageDestination<'_>,
     path: &str,
     content: &'a MessageContent,
     calls: &HashMap<&'a str, String>,
@@ -684,7 +702,7 @@ fn tool_message<'a>(
                 })?;
                 let output = tool_result(
                     request,
-                    kind,
+                    destination,
                     &path,
                     tool_use_id,
                     tool_content,
@@ -692,7 +710,14 @@ fn tool_message<'a>(
                     following,
                 )?;
                 let mut provider_options = None;
-                if continuation(request, kind, &path, part, &mut provider_options, false)? {
+                if continuation(
+                    request,
+                    &destination.kind,
+                    &path,
+                    part,
+                    &mut provider_options,
+                    false,
+                )? {
                     content.push(ToolPart::ToolResult(ToolResultPart {
                         tool_call_id: tool_use_id.clone(),
                         tool_name: name.clone(),
@@ -713,11 +738,15 @@ fn tool_message<'a>(
 /// An image part as the protocols' user messages carry it.
 fn image_part(
     request: &ModelRequest,
-    kind: &ProviderKind,
+    destination: ImageDestination<'_>,
     path: &str,
     source: &ImageSource,
 ) -> Result<UserPart, HostError> {
-    if !takes_image_format(Some(*kind), &source.media_type) {
+    if !takes_image_format(
+        Some(destination.kind),
+        destination.preset,
+        &source.media_type,
+    ) {
         return Ok(UserPart::Text(TextPart {
             text: image_reference_or_placeholder(source),
             provider_options: None,
@@ -779,7 +808,7 @@ fn failure_text(kind: &ProviderKind, model_id: &str, text: String) -> String {
 /// image in `following` (one user message after the step's tools).
 fn tool_result(
     request: &ModelRequest,
-    kind: &ProviderKind,
+    destination: ImageDestination<'_>,
     path: &str,
     tool_use_id: &str,
     content: &ToolContent,
@@ -790,7 +819,7 @@ fn tool_result(
         ToolContent::Text(text) => {
             return Ok(if is_error {
                 ToolResultOutput::ErrorText {
-                    value: failure_text(kind, &request.model_id, text.clone()),
+                    value: failure_text(&destination.kind, &request.model_id, text.clone()),
                     provider_options: None,
                 }
             } else {
@@ -815,7 +844,7 @@ fn tool_result(
         }
         return Ok(if is_error {
             ToolResultOutput::ErrorText {
-                value: failure_text(kind, &request.model_id, text),
+                value: failure_text(&destination.kind, &request.model_id, text),
                 provider_options: None,
             }
         } else {
@@ -825,7 +854,7 @@ fn tool_result(
             }
         });
     }
-    let inside = tool_result_images(kind, &request.model_id);
+    let inside = tool_result_images(&destination.kind, &request.model_id);
     let mut result = Vec::with_capacity(blocks.len());
     let mut text = String::new();
     for block in blocks {
@@ -842,7 +871,11 @@ fn tool_result(
                 continue;
             }
             ContentBlock::Image { source } => {
-                if !takes_image_format(Some(*kind), &source.media_type) {
+                if !takes_image_format(
+                    Some(destination.kind),
+                    destination.preset,
+                    &source.media_type,
+                ) {
                     text.push_str(&image_reference_or_placeholder(source));
                     continue;
                 }
@@ -858,7 +891,7 @@ fn tool_result(
                             ),
                             provider_options: None,
                         }));
-                        following.push(image_part(request, kind, path, source)?);
+                        following.push(image_part(request, destination, path, source)?);
                         TOOL_IMAGE_MARKER
                     }
                 }
@@ -880,7 +913,7 @@ fn tool_result(
         })
     } else if is_error {
         Ok(ToolResultOutput::ErrorText {
-            value: failure_text(kind, &request.model_id, text),
+            value: failure_text(&destination.kind, &request.model_id, text),
             provider_options: None,
         })
     } else {

@@ -271,7 +271,9 @@ impl ImageUnderstanding {
     }
 
     /// The failure a route that does not take the image's format gives, or
-    /// `None` when it does. A cancelled read is the caller's cancellation.
+    /// `None` when it does. A cancelled read is the caller's cancellation. The
+    /// built-in xAI entries serve xAI over the compatible protocol, so their
+    /// provider ids name the vendor package the protocol alone does not.
     async fn route_format_failure(
         &self,
         target: &ModelId,
@@ -279,7 +281,12 @@ impl ImageUnderstanding {
         cancel: &CancellationToken,
     ) -> Result<Option<ToolResult>, HostError> {
         let protocol = self.route_protocol(target, cancel).await?;
-        Ok(require_sendable_image(protocol, media_type)
+        let preset = matches!(
+            (protocol, target.provider_id.as_str()),
+            (Some(ModelProtocol::OpenaiCompatible), "xai" | "grok-build")
+        )
+        .then_some("xai");
+        Ok(require_sendable_image(protocol, preset, media_type)
             .err()
             .map(|error| failed("image_understand_failed", error)))
     }
