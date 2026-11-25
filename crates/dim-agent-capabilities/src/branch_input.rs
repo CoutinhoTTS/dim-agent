@@ -57,27 +57,21 @@ pub(crate) async fn append_own_dispatched(
 ///
 /// The answer is this branch's own opening fact, the last `branch/start` or
 /// `branch/resume` in its Timeline, so a receipt reads it when it writes and
-/// does not depend on subscribing before the event was dispatched. A resumed
-/// line has no identity input to wait for; only a start that names a parent
-/// opens with one. A read that fails is logged and answered with `true`: the
-/// receipt leaves its input to the published branch rather than failing the
-/// opening on a fact it cannot read.
-pub(crate) async fn opens_with_identity_input(timeline: &Timeline) -> bool {
-    match last_opening(timeline).await {
-        Ok(opens) => opens,
-        Err(error) => {
-            tracing::warn!(%error, "the line's opening was not read");
-            true
-        }
-    }
-}
-
-async fn last_opening(timeline: &Timeline) -> Result<bool> {
+/// does not depend on subscribing before the event was dispatched. The read
+/// stops at the published head: an opening receipt runs once its branch
+/// dispatched the opening fact, and dispatch advances only over published
+/// events, so that fact is published then; a later batch that is committed
+/// but not yet published does not turn the read into an error. A resumed line
+/// has no identity input to wait for; only a start that names a parent opens
+/// with one. `Err` is the caller's to handle: a receipt leaves its input to
+/// the published branch rather than deciding on a fact it cannot read, and
+/// the error must not fail the opening.
+pub(crate) async fn opens_with_identity_input(timeline: &Timeline) -> Result<bool> {
     let reply = timeline
         .query(TimelineQuery {
             scope: TimelineQueryScope::Branch,
             from: None,
-            through: Some(timeline.committed()),
+            through: None,
             include_publishing: false,
             query: QuerySpec {
                 filter: Some(QueryFilter::In {

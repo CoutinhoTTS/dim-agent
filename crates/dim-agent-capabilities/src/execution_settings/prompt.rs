@@ -279,8 +279,19 @@ impl DynPlugin for SettingsSnapshotBranch {
                         // opening still collects receipts, so it checks its own
                         // generation before reading and again before the
                         // append.
-                        if lifecycle.is_cancelled() || opens_with_identity_input(&timeline).await {
+                        if lifecycle.is_cancelled() {
                             return Ok(());
+                        }
+                        match opens_with_identity_input(&timeline).await {
+                            Ok(true) => return Ok(()),
+                            Ok(false) => {}
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "the line's opening was not read; the published line appends the execution settings"
+                                );
+                                return Ok(());
+                            }
                         }
                         // An opening fails after its inactivity budget passes
                         // without progress; half of it leaves the receipt room
