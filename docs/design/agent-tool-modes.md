@@ -128,17 +128,16 @@ hands Goal the pending mode and Goal checks that it would be effective.
   runs `normal` and does not resume a paused goal.
 - **Settle.** The Goal Session part fans out to every branch with an active goal: it writes
   `paused` with reason `mode`, a pause input text carrying that reason (Goal state alone does not
-  enter the model context), and withdraws the continuation it queued when the InputQueue has not
-  applied it. An applied continuation belongs to a turn that started earlier, which pinned the old
-  mode and finishes under it.
-- **Order.** The update runs, under the Session's mode gate: Goal settles, the record is written,
-  the live mode is replaced. A failure before the record write leaves the mode pair unchanged and a
-  committed Goal pause in place, and the operator resumes it; a Goal failure stops the update before
-  the mode changes.
+  enter the model context), and withdraws the input it queued — the `set`/`resume` trigger and any
+  automatic continuation — when the InputQueue has not applied it. An applied input belongs to a
+  turn that started earlier, which pinned the old mode and finishes under it.
+- **Order.** The update runs under the Session's mode gate with Goal's settle first; its order and
+  failure rule are §5's. A Goal failure stops the update before the mode changes.
 - **Activation.** `session.goal.set` and `resume` take the same mode gate and check the effective
   mode at their commit boundary. A `resume` that arrives after the settle and before the publish
   waits on the gate and is refused once `shell` is effective; one that commits before the settle is
-  paused, and its unapplied continuation is withdrawn, by the settle. Either interleaving is safe.
+  paused, and its unapplied trigger and continuation are withdrawn, by the settle. Either
+  interleaving is safe.
 - **Guarantee.** A turn that starts in `shell` after the pause is committed carries the pause text
   in its history, and its requests declare no `goal_update`. A failed update leaves the old mode in
   force, as above, so a `normal` turn still declares `goal_update` while the goal is paused.
@@ -436,8 +435,8 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
 - Flow: restore a record without the field, and fork a Session; both keep `normal` and the source
   mode respectively, except that the minimal-execution host restores its Sessions as `shell`.
 - Flow: a `resume` arriving after the update's settle and before the live publish waits on the mode
-  gate and is refused because `shell` is effective; one arriving before the settle commits and the
-  settle pauses it and withdraws its unapplied continuation.
+  gate and is refused because `shell` is effective; one that commits before the settle is paused by
+  the settle, which withdraws its unapplied trigger and continuation.
 - Flow: a goal with a queued continuation, switched to an effective `shell` before it is applied:
   the continuation is withdrawn, the goal pauses (`mode`) with its pause text, and no turn carrying
   the `goal_update` instruction starts in `shell`. Switched after it is applied, that turn pinned
@@ -469,8 +468,9 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   registry that applies them, not to core infrastructure.
 - §4 rule 5: no batches.
 - §4 rule 6: the visible set is exactly what the request declares; no new context path.
-- §4 rule 7: parts coordinate through the Session configuration, the registry's read, and the Goal
-  owner's settle operation (§2), which the App Server calls and the registry signals.
+- §4 rule 7: parts coordinate through the Session configuration, the registry's read, the Goal
+  owner's settle operation (§2), and the Session's mode gate, which is a synchronization primitive,
+  not business state.
 - §4 rule 8: no infrastructure change; the product profile's tool wiring changes (§6), while
   Timeline, Dispatcher, the event envelope, rutis assembly and the Session facades are untouched.
 - §4 rule 9: the mode is Session configuration, not a Timeline fact, and follows
@@ -481,7 +481,8 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   pause already committed stays. After the record write, the new value stays stored and in force.
   Both report the effective mode rather than refusing one.
 - §7.2: no object or resource handle crosses an owner; no new service, and the mode methods join
-  the existing Session method face; the parameters are data.
+  the existing Session method face; the parameters are data. The mode gate is a synchronization
+  primitive, not a service or a value.
 - [ADR 002](../adr/002-plugin-scope.md) D1: the mode is Session configuration and the pinned mode is
   branch state. D2: no wiring module. D3: ToolRegistry keeps no hard dependency on Code Mode; an
   absent or excluded `codemode` falls back to `normal`. D4: business configuration, read at creation
@@ -497,9 +498,10 @@ Requirements go to other owners:
   every transition to an effective `shell`: on an update, before the record write; on a
   registration, on the registry's published effective mode. Fan out from the Goal Session part to
   every branch with an active goal: write `paused` (`mode`), a pause text carrying the reason, and
-  withdraw a continuation the InputQueue has not applied. While `shell` is in force, pause new
-  continuations and refuse `session.goal.set` and `resume`; leave resumption to the operator after
-  `shell` leaves. Its owner carries this into [Goal](plugins/Goal.md).
+  withdraw the `set`/`resume` trigger and any continuation the InputQueue has not applied. While
+  `shell` is in force, pause new continuations and refuse `session.goal.set` and `resume`; leave
+  resumption to the operator after `shell` leaves. Its owner carries this into
+  [Goal](plugins/Goal.md).
 - **ToolRegistry.** Publish the effective mode to its readers so Goal settles on a registration
   transition, and provide the Session's mode gate the update holds and Goal's `set`/`resume` take;
   the one-turn window in §2 stands.
