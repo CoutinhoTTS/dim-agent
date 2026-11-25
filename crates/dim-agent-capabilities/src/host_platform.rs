@@ -252,6 +252,7 @@ pub struct HostPlatform {
     pub(crate) commands: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<TaskRecord>>>>,
     pub(crate) command_shutdown: CancellationToken,
     pub(crate) command_workers: tokio_util::task::TaskTracker,
+    observing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
     pub(crate) execution: Option<Arc<ExecutionSettingsHost>>,
@@ -754,6 +755,7 @@ impl HostPlatform {
             commands: Arc::default(),
             command_shutdown: CancellationToken::new(),
             command_workers: tokio_util::task::TaskTracker::new(),
+            observing: Arc::default(),
             execution: None,
             toolchain: None,
         })
@@ -1234,6 +1236,9 @@ impl HostPlatform {
         if !task.is_running() {
             return Err(HostPlatformError::TaskRunning);
         }
+        if self.observing.lock().unwrap().contains(&task.id) {
+            return Err(HostPlatformError::TaskRunning);
+        }
         match &task.kind {
             TaskKind::Command(command) => {
                 command.kill.cancel();
@@ -1280,6 +1285,7 @@ impl HostPlatform {
                     let job = job.clone();
                     let shutdown = self.command_shutdown.clone();
                     let workers = self.command_workers.clone();
+                    let observing = self.observing.clone();
                     self.command_workers.spawn(async move {
                         let mut pid = job.pid.subscribe();
                         let mut changed = record.changed.subscribe();
@@ -1294,9 +1300,14 @@ impl HostPlatform {
                                 }
                                 if kill_job(pid).await.is_err() {
                                     let shutdown = shutdown.clone();
-                                    workers.spawn(async move {
-                                        observe_job_release(record, job, pid, shutdown).await;
-                                    });
+                                    let id = record.id.clone();
+                                    if observing.lock().unwrap().insert(id.clone()) {
+                                        let observing = observing.clone();
+                                        workers.spawn(async move {
+                                            observe_job_release(record, job, pid, shutdown).await;
+                                            observing.lock().unwrap().remove(&id);
+                                        });
+                                    }
                                     return;
                                 }
                                 record.finish(Terminal {
@@ -1329,12 +1340,18 @@ impl HostPlatform {
                     return Err(HostPlatformError::TaskRunning);
                 };
                 if let Err(error) = kill_job(pid).await {
-                    let record = task.clone();
-                    let job = job.clone();
-                    let shutdown = self.command_shutdown.clone();
-                    self.command_workers.spawn(async move {
-                        observe_job_release(record, job, pid, shutdown).await;
-                    });
+                    let observing = self.observing.lock().unwrap().insert(task.id.clone());
+                    if observing {
+                        let record = task.clone();
+                        let job = job.clone();
+                        let shutdown = self.command_shutdown.clone();
+                        let observing = self.observing.clone();
+                        let id = task.id.clone();
+                        self.command_workers.spawn(async move {
+                            observe_job_release(record, job, pid, shutdown).await;
+                            observing.lock().unwrap().remove(&id);
+                        });
+                    }
                     return Err(HostPlatformError::Failed(error.to_string()));
                 }
                 task.finish(Terminal {
@@ -2826,7 +2843,7 @@ mod windows {
     use super::*;
     use std::{os::windows::ffi::OsStringExt, time::Duration};
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
+        Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE},
         System::{
             Com::CoTaskMemFree,
             Diagnostics::ToolHelp::{
@@ -2840,8 +2857,9 @@ mod windows {
                 QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
             },
             Threading::{
-                CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenProcess, OpenThread, PROCESS_SET_QUOTA,
-                PROCESS_TERMINATE, ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess,
+                CREATE_NO_WINDOW, CREATE_SUSPENDED, GetExitCodeProcess, OpenProcess, OpenThread,
+                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+                ResumeThread, THREAD_SUSPEND_RESUME, TerminateProcess,
             },
         },
         UI::Shell::{FOLDERID_Profile, SHGetKnownFolderPath},
@@ -2849,6 +2867,20 @@ mod windows {
 
     pub fn kill_tree(pid: u32) {
         let _ = terminate_tree(pid);
+    }
+
+    pub fn process_alive(pid: u32) -> bool {
+        // SAFETY: the process handle is closed below.
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(process, &mut code);
+            CloseHandle(process);
+            ok != 0 && code == STILL_ACTIVE
+        }
     }
 
     const SHELL_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
@@ -3580,8 +3612,7 @@ async fn job_released(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        let _ = pid;
-        false
+        !native::process_alive(pid)
     }
 }
 
