@@ -21,7 +21,7 @@ use rutis::Ctx;
 use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde::{Deserialize, Deserializer};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     num::NonZeroU64,
     sync::{Arc, Mutex, Weak},
     time::Duration,
@@ -434,8 +434,9 @@ struct State {
     /// The state records a settlement refused to admit while it held task
     /// admission: their facts committed before the record of the change that
     /// follows, so it states them first (#2158). One a record leaves undecided
-    /// stays for a later change, which states it or refuses it as superseded.
-    deferred: Vec<DeferredRecord>,
+    /// stays for a later change, which states it or refuses it as superseded;
+    /// one whose append failed keeps its place for that later change too.
+    deferred: VecDeque<DeferredRecord>,
 }
 
 /// A state record a settlement refused to admit, with the fact it answers.
@@ -1731,13 +1732,26 @@ impl Owner {
     async fn write_deferred(self: &Arc<Self>) -> Result<u64, AgentError> {
         loop {
             let through = self.await_dispatched().await?;
-            let deferred = std::mem::take(&mut self.state.lock().unwrap().deferred);
+            let mut deferred = std::mem::take(&mut self.state.lock().unwrap().deferred);
             if deferred.is_empty() {
                 return Ok(through);
             }
-            for record in deferred {
-                self.write_record(record.after, Some(record.status), record.answers)
-                    .await?;
+            while let Some(record) = deferred.pop_front() {
+                let status = record.status.clone();
+                if let Err(error) = self
+                    .write_record(record.after, Some(status), record.answers)
+                    .await
+                {
+                    // A record whose append failed writes nothing, so it and
+                    // the ones not attempted after it stay for a later change,
+                    // which states them or refuses them as superseded (#2158).
+                    // The records admitted meanwhile name later facts.
+                    let mut state = self.state.lock().unwrap();
+                    deferred.push_front(record);
+                    deferred.append(&mut state.deferred);
+                    state.deferred = deferred;
+                    return Err(error);
+                }
             }
         }
     }
@@ -2350,24 +2364,30 @@ impl Owner {
 
     /// The state record the conclusion at `sequence` states, if it still
     /// decides one: a `continue` conclusion states no record of its own, and
-    /// a superseded one decides nothing (#2158).
+    /// a superseded one decides nothing (#2158). A `done` or `blocked`
+    /// conclusion states the fact it decides: the background wait holds a
+    /// `continue`, not a terminal conclusion (Pursuit §5), so its record is
+    /// written while a task is open exactly as when it took admission.
     fn report_record(&self, sequence: u64, conclusion: &Conclusion) -> Option<DeferredRecord> {
         let state = self.state.lock().unwrap();
-        let status = match fold::decide_conclusion(&state.fold, sequence, conclusion)? {
-            ConclusionAction::Completed(text) => text::State::Completed(text),
-            ConclusionAction::Blocked(text) => text::State::Blocked(text),
-            ConclusionAction::Failed => text::State::Paused("evaluation_failed".to_owned()),
+        let (status, answers) = match fold::decide_conclusion(&state.fold, sequence, conclusion)? {
+            ConclusionAction::Completed(text) => (text::State::Completed(text), Answers::Fact),
+            ConclusionAction::Blocked(text) => (text::State::Blocked(text), Answers::Fact),
+            ConclusionAction::Failed => (
+                text::State::Paused("evaluation_failed".to_owned()),
+                Answers::Conclusion(conclusion.evaluation),
+            ),
             ConclusionAction::Continue => return None,
         };
         Some(DeferredRecord {
             after: sequence,
             status,
-            answers: Answers::Conclusion(conclusion.evaluation),
+            answers,
         })
     }
 
     fn keep_deferred(&self, record: DeferredRecord) {
-        self.state.lock().unwrap().deferred.push(record);
+        self.state.lock().unwrap().deferred.push_back(record);
     }
 
     async fn run_conclusion(
