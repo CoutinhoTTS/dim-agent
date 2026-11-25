@@ -307,110 +307,12 @@ async fn local_events(session: &Session) -> Vec<Arc<AgentEvent>> {
     branch_events(session, "main", ..).await.unwrap()
 }
 
-/// Ceiling on [`until_settled`] polls, twice the old 30 s bound.
+/// Ceiling on [`until_settled`] polls, twice the old 30 s bound: at the 20 ms
+/// poll, a minute without a settlement.
 const MAX_SETTLE_POLLS: u32 = 3000;
-/// Consecutive polls without a single new output byte before
-/// [`until_settled`] gives up: 10 s of a shell that writes nothing.
+/// Consecutive polls without a single new output byte before [`until_settled`]
+/// gives up: 10 s of a shell that writes nothing.
 const SETTLE_IDLE_POLLS: u32 = 500;
-/// The seconds [`SETTLE_IDLE_POLLS`] and [`MAX_SETTLE_POLLS`] stand for, for
-/// the two failure messages: at 20 ms a poll they must stay in step with the
-/// poll counts above, because each message states what its exit observed.
-const SETTLE_IDLE_SECS: u32 = SETTLE_IDLE_POLLS / 50;
-const SETTLE_CEILING_SECS: u32 = MAX_SETTLE_POLLS / 50;
-
-/// Where [`SettleWait`]'s per-poll bookkeeping says the wait stands.
-#[derive(Debug, PartialEq, Eq)]
-enum SettleDecision {
-    KeepWaiting,
-    /// No new byte for [`SETTLE_IDLE_POLLS`] polls.
-    Idle,
-    /// [`MAX_SETTLE_POLLS`] polls without a settlement.
-    Ceiling,
-}
-
-/// What a wait observed, decided once per poll.
-///
-/// The two exits must not share a reading. Reaching the ceiling does not mean
-/// output was still arriving: a stall can begin inside the final idle window,
-/// leaving too few unchanged polls to reach [`SETTLE_IDLE_POLLS`]. So the
-/// bookkeeping keeps the poll of the last growth and reports it, rather than
-/// inferring anything from which exit fired.
-struct SettleWait {
-    /// The highest total observed so far.
-    seen: u64,
-    /// The one-based poll at which `seen` last grew; `None` if it never did.
-    grown_at: Option<u32>,
-    /// Polls completed, including the current one.
-    polls: u32,
-}
-
-impl SettleWait {
-    fn new() -> Self {
-        Self {
-            seen: 0,
-            grown_at: None,
-            polls: 0,
-        }
-    }
-
-    /// Records one observed total and says what the wait should do next.
-    ///
-    /// The two exits are checked in a fixed order on every poll, including one
-    /// that grew. The idle exit wins a tie: if a poll is both one idle window
-    /// after the last growth and the last poll allowed, the shell has been
-    /// silent for that window, which is what the idle exit reports.
-    fn observe(&mut self, written: u64) -> SettleDecision {
-        self.polls += 1;
-        if written > self.seen {
-            self.seen = written;
-            self.grown_at = Some(self.polls);
-        }
-        if self.since_growth() >= SETTLE_IDLE_POLLS {
-            return SettleDecision::Idle;
-        }
-        if self.polls >= MAX_SETTLE_POLLS {
-            return SettleDecision::Ceiling;
-        }
-        SettleDecision::KeepWaiting
-    }
-
-    /// Polls since the last growth, counting the current one; every poll when
-    /// nothing ever grew.
-    fn since_growth(&self) -> u32 {
-        self.polls - self.grown_at.unwrap_or(0)
-    }
-}
-
-fn settle_timeout(what: &str, decision: SettleDecision, wait: &SettleWait) -> String {
-    match decision {
-        SettleDecision::Idle => format!(
-            "timed out waiting for {what}: no new shell output for \
-             {SETTLE_IDLE_SECS} s"
-        ),
-        SettleDecision::Ceiling => {
-            let growth = match (wait.seen, wait.since_growth()) {
-                (0, _) => "nothing was ever written".to_owned(),
-                (_, 0) => "the last growth was this same poll".to_owned(),
-                (_, since) => format!(
-                    "the last growth {} polls ({} s) before it",
-                    since,
-                    seconds(since)
-                ),
-            };
-            format!(
-                "timed out waiting for {what}: settlement did not arrive by the \
-                 {SETTLE_CEILING_SECS} s ceiling; {} bytes written, {growth}",
-                wait.seen
-            )
-        }
-        SettleDecision::KeepWaiting => unreachable!("a wait does not time out while waiting"),
-    }
-}
-
-/// Polls as seconds at the wait's 20 ms poll, to two decimals.
-fn seconds(polls: u32) -> String {
-    format!("{}.{:02}", polls / 50, (polls % 50) * 2)
-}
 
 async fn until(
     session: &Session,
@@ -438,28 +340,41 @@ async fn until(
 /// down only while no task log grows: a consumer that has stopped reading
 /// writes nothing and exhausts it, while one that is merely slow keeps
 /// refreshing it. The bound is therefore about progress, not about how fast
-/// the machine reads 2.7 MB.
-///
-/// It gives up two ways, and [`settle_timeout`] says which one and what was
-/// observed. Reaching the ceiling is not evidence of ongoing output, so the
-/// ceiling text reports the bytes and the last growth instead.
+/// the machine reads 2.7 MB. Giving up reports only what the wait observed:
+/// the bytes written and the polls since the last growth, not a claim about
+/// whether output was arriving.
 async fn until_settled(
     session: &Session,
     what: &str,
     done: impl Fn(&[Arc<AgentEvent>]) -> bool,
 ) -> Vec<Arc<AgentEvent>> {
-    let mut wait = SettleWait::new();
-    loop {
-        let events = local_events(session).await;
+    let mut events: Vec<Arc<AgentEvent>> = Vec::new();
+    let (mut seen, mut idle) = (0u64, 0u32);
+    for _ in 0..MAX_SETTLE_POLLS {
+        events = local_events(session).await;
         if done(&events) {
             return events;
         }
-        match wait.observe(exec_output_bytes(&events)) {
-            SettleDecision::KeepWaiting => {}
-            decision => panic!("{}: {:#?}", settle_timeout(what, decision, &wait), events),
+        let written = exec_output_bytes(&events);
+        if written > seen {
+            seen = written;
+            idle = 0;
+        } else {
+            idle += 1;
+        }
+        if idle >= SETTLE_IDLE_POLLS {
+            panic!(
+                "timed out waiting for {what}: no new shell output in \
+                 {SETTLE_IDLE_POLLS} polls, {seen} bytes written: {events:#?}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    panic!(
+        "timed out waiting for {what}: no settlement in {MAX_SETTLE_POLLS} \
+         polls, {seen} bytes written, {idle} polls since the last growth: \
+         {events:#?}"
+    );
 }
 
 /// Bytes written so far across every task log the branch started.
@@ -1361,36 +1276,6 @@ async fn execute_declares_the_command_it_ran_in_the_digest() {
     );
     session.close().await.unwrap();
     harness.shutdown().await;
-}
-
-/// Drives [`SettleWait`] with synthetic totals: the poll at index `k`
-/// (zero-based) grows while `k <= grows_through`, and reports `k + 1` bytes;
-/// otherwise it reports zero, which never grows.
-fn drive(grows_through: Option<u32>) -> (SettleDecision, SettleWait) {
-    let mut wait = SettleWait::new();
-    loop {
-        let poll = wait.polls;
-        let grows = grows_through.is_some_and(|last| poll <= last);
-        let total = if grows { u64::from(poll) + 1 } else { 0 };
-        match wait.observe(total) {
-            SettleDecision::KeepWaiting => {}
-            decision => return (decision, wait),
-        }
-    }
-}
-
-/// A stall inside the last idle window: growth through zero-based poll 2501,
-/// then flat for good. Only 498 unchanged polls follow, short of the 500 the
-/// idle exit needs, so it reaches the ceiling — and the ceiling text must
-/// report the 9.96 s of silence rather than claim the shell was still writing.
-#[test]
-fn a_stall_inside_the_last_idle_window_still_exits_at_the_ceiling() {
-    let (decision, wait) = drive(Some(2501));
-    assert_eq!(decision, SettleDecision::Ceiling);
-    assert_eq!(wait.since_growth(), 498);
-    let text = settle_timeout("exec wake", decision, &wait);
-    assert!(text.contains("last growth 498 polls (9.96 s)"), "{text}");
-    assert!(!text.contains("still writing"), "{text}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
