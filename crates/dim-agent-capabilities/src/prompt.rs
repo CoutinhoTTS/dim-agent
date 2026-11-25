@@ -1104,7 +1104,10 @@ impl Prompt {
     }
 
     /// Delivers what the Session's sources hold now, compared with what this
-    /// branch already has. A new Session also adopts its model.
+    /// branch already has. A new Session also adopts its model; a line whose
+    /// chain holds no adopted configuration adopts the initial model and
+    /// System when the initial configuration carries a model, which covers a
+    /// line cut before its parent adopted and a line stored before this rule.
     async fn open(&self, event: &AgentEvent, mut current: PromptSnapshot) -> Result<()> {
         let Some(initial) = self.initial.get() else {
             return Ok(());
@@ -1113,7 +1116,9 @@ impl Prompt {
             &event.kind,
             EventKind::BranchStart(BranchStartData { parent: None, .. })
         );
-        let update = if new_session {
+        let adopt_initial =
+            new_session || (current.configuration.is_none() && initial.model.is_some());
+        let update = if adopt_initial {
             initial
         } else {
             ConfigureUpdate {
@@ -1165,7 +1170,7 @@ impl Prompt {
             .filter_map(|(target, value)| {
                 let key = (target.source, target.scope);
                 let old = current.entries.get(&key);
-                if !new_session && (system(old) || system(value.as_ref())) {
+                if !adopt_initial && (system(old) || system(value.as_ref())) {
                     return None;
                 }
                 match value {

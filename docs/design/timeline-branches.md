@@ -297,7 +297,7 @@ The `branch:line` key means every line's baseline holds exactly one answer to "w
 
 Lines differ only in their tails:
 
-- The root adopts system and model, and so does a line that is the default branch when it has its own inherited prefix. A line inherits its configuration from its cut ([prompt](../architecture/rust-agent/prompt.md)).
+- A line whose chain holds no adopted configuration adopts the Session's initial system and model when it opens: the root, a resumed root line, and a line cut before its parent adopted. Every other line inherits its configuration from its cut ([prompt](../architecture/rust-agent/prompt.md)).
 - Prompt sources load with the root's scope and are inherited ([PromptSources](../architecture/rust-agent/plugins/PromptSources.md)).
 - One ToolRegistry per Session gives every line the same tool list. That is why `create` on a line that may not open one is refused through the tool result instead of by removing the tool.
 - The request marks that prefix for cache where the protocol caches only what it is told to: up to two breakpoints, at the end of the System and on the last block of the last user or tool-result message, each placed only when its conditions hold ([Anthropic cache breakpoints](../../crates/dim-agent-aimux/README.md#anthropic-提示缓存断点)).
