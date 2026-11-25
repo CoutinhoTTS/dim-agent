@@ -1201,12 +1201,23 @@ impl ShellSession {
                     never_cancelled(),
                 )
                 .await;
-            let Ok(reply) = reply else {
-                return;
+            let (result, status, preview, exit) = match reply {
+                Ok(reply) => {
+                    let code = wait_code(&reply);
+                    (
+                        ended_result(&id, &path, &reply.preview, &code),
+                        exit_status(&code),
+                        reply.preview.clone(),
+                        exit_line(&code),
+                    )
+                }
+                Err(_) => (
+                    reset_result(&id, &path, ""),
+                    ExecStatus::Failed,
+                    String::new(),
+                    "[Task failed: shell was reset]".to_owned(),
+                ),
             };
-            let code = wait_code(&reply);
-            let preview = reply.preview.clone();
-            let result = ended_result(&id, &path, &preview, &code);
             let published = {
                 let mut inner = this.inner.lock().await;
                 if inner
@@ -1215,7 +1226,7 @@ impl ShellSession {
                     .is_some_and(|task| task.task_id == id)
                 {
                     inner.occupy_tail = Some(preview);
-                    inner.occupy_exit = Some(exit_line(&code));
+                    inner.occupy_exit = Some(exit);
                     inner.occupying = None;
                     true
                 } else {
@@ -1227,7 +1238,7 @@ impl ShellSession {
             }
             this.settle(ExecEndedData {
                 task_id: id.clone(),
-                status: exit_status(&code),
+                status,
                 result,
             });
             let _ = this.host.settle(TaskRequest { task_id: id }).await;

@@ -1292,6 +1292,10 @@ impl HostPlatform {
                                     return;
                                 }
                                 if kill_job(pid).await.is_err() {
+                                    let shutdown = shutdown.clone();
+                                    tokio::spawn(async move {
+                                        observe_job_release(record, job, pid, shutdown).await;
+                                    });
                                     return;
                                 }
                                 record.finish(Terminal {
@@ -1324,6 +1328,12 @@ impl HostPlatform {
                     return Err(HostPlatformError::TaskRunning);
                 };
                 if let Err(error) = kill_job(pid).await {
+                    let record = task.clone();
+                    let job = job.clone();
+                    let shutdown = self.command_shutdown.clone();
+                    tokio::spawn(async move {
+                        observe_job_release(record, job, pid, shutdown).await;
+                    });
                     return Err(HostPlatformError::Failed(error.to_string()));
                 }
                 task.finish(Terminal {
@@ -3519,6 +3529,37 @@ pub fn terminate_job(pid: u32) -> io::Result<()> {
     }
     #[cfg(windows)]
     native::terminate_tree(pid)
+}
+
+async fn observe_job_release(
+    record: Arc<TaskRecord>,
+    job: Arc<shell::ShellJob>,
+    pid: u32,
+    shutdown: CancellationToken,
+) {
+    loop {
+        if record.is_terminal() {
+            return;
+        }
+        if kill_job(pid).await.is_ok() {
+            record.finish(Terminal {
+                status: TaskStatus::Failed,
+                exit_code: None,
+                signal: None,
+                duration_ms: record.started.elapsed().as_millis() as u64,
+                failure: Some(TaskFailure::TerminateFailed {
+                    message: "job release was not confirmed at stop; it ended later".into(),
+                }),
+                output: job.output_record().0,
+                note: None,
+            });
+            return;
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => return,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+        }
+    }
 }
 
 /// Kills a background job that outlived its shell and confirms it is gone:
