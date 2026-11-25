@@ -2131,7 +2131,7 @@ mod tests {
             (true, vec![create.clone()]),
             (false, vec![create.clone(), create_failed_page(3, "b-7d")]),
         ] {
-            let (mut worker, _receiver, _sent) =
+            let (mut worker, mut receiver, _sent) =
                 crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
             worker.session_id = "s1".into();
             worker.focus = "main".into();
@@ -2165,9 +2165,45 @@ mod tests {
                 json!({"events": page, "through": 300, "nextBefore": 1, "nextAfter": 300}),
             )
             .await;
+            assert!(
+                !worker.task_history_queue.contains(&"b-7d".to_owned()),
+                "{page:?}: the page queued the failed child"
+            );
             worker.methods.insert("session.input.pending".into());
             worker.methods.insert("session.turn.get".into());
             worker.poll_task_history().await.unwrap();
+            assert!(
+                matches!(
+                    worker.task_history_request.as_ref(),
+                    Some(read) if read.branch_id == "b-7c"
+                        && matches!(read.stage, ReadStage::Inventory("session.input.pending"))
+                ),
+                "{page:?}: the parent's inventory is still pending"
+            );
+            worker.publish();
+            let snapshot = published(&mut receiver);
+            let child = snapshot
+                .lines
+                .iter()
+                .find(|line| line.id == "b-7d")
+                .expect("the page published the child");
+            assert_eq!(
+                child.state,
+                LineState::CreationFailed,
+                "{page:?}: the first published child row is already terminal"
+            );
+            worker
+                .command(Command::FocusLine("b-7d".into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                worker.focus, "b-7c",
+                "{page:?}: the child is refused while the parent inventory is pending"
+            );
+            assert!(
+                !worker.lines.contains_key("b-7d"),
+                "{page:?}: the refused child has no transcript"
+            );
             answer(
                 &mut worker,
                 json!({"branchId":"b-7c","through":300,"inputs":[],"next":null}),

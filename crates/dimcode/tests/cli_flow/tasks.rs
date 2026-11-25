@@ -3518,11 +3518,13 @@ fn tui_resume_restores_settled_delegations_outside_the_window_in_dispatch_order(
 /// The shown line's first window can fail on its own. Reopening `/tasks`
 /// retries that window on the same line, and the retry is a first window
 /// again: the page that lands draws the newest messages and leaves the rest
-/// behind the load-more row `/earlier` reads.
+/// behind the load-more row `/earlier` reads. A retry that fails too leaves
+/// the line failed; opening it again in `/lines` reads its window again.
 #[test]
 fn tui_reopening_tasks_rearms_a_failed_line_window() {
     let home = Home::new();
-    let daemon = home.daemon(|wire| {
+    let (ready, readiness) = std::sync::mpsc::channel();
+    let daemon = home.daemon(move |wire| {
         wire.hello(&["session.methods"]);
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
@@ -3554,15 +3556,21 @@ fn tui_reopening_tasks_rearms_a_failed_line_window() {
             let request = wire.read_any();
             if request["method"] == "session.history" && request["params"]["branchId"] == "b-7c" {
                 reads += 1;
-                if reads == 1 {
-                    wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                        "code":-32000,"message":"line window unreadable"}}));
-                } else {
-                    let events: Vec<_> = (2..=102).flat_map(page).collect();
-                    wire.reply(
-                        &request,
-                        json!({"events":events,"through":308,"nextBefore":6,"nextAfter":308,"done":false}),
-                    );
+                match reads {
+                    1 => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32000,"message":"line window unreadable"}})),
+                    2 => {
+                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                            "code":-32000,"message":"the retried window is unreadable"}}));
+                        ready.send(()).unwrap();
+                    }
+                    _ => {
+                        let events: Vec<_> = (2..=102).flat_map(page).collect();
+                        wire.reply(
+                            &request,
+                            json!({"events":events,"through":308,"nextBefore":6,"nextAfter":308,"done":false}),
+                        );
+                    }
                 }
                 continue;
             }
@@ -3586,7 +3594,11 @@ fn tui_reopening_tasks_rearms_a_failed_line_window() {
     terminal.write(b"\x1b[B\r");
     terminal.until("Branch history failed; reopen to retry");
     terminal.write(b"/tasks\r");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     terminal.write(b"\x1b[27u");
+    terminal.write(b"/lines\r");
+    terminal.until("reopen the parser");
+    terminal.write(b"\x1b[B\r");
     terminal.until("page-message-102");
     terminal.until_anywhere("1 earlier messages");
     home.kill(&terminal);
@@ -3594,17 +3606,17 @@ fn tui_reopening_tasks_rearms_a_failed_line_window() {
     daemon.join().unwrap();
 }
 
-/// A branch whose creation fails before its first read settles is terminal
-/// for the transcript: the shown line returns to the line it was cut from,
-/// `/lines` lists the branch as failed, and opening it again is refused. The
-/// read that was in flight cannot bring the line back.
+/// A branch whose creation fails while its first transcript read is in
+/// flight is terminal for the transcript: the shown line returns to the line
+/// it was cut from, the read that was in flight cannot bring the line back,
+/// and `/lines` refuses to open it again.
 #[test]
 fn tui_a_branch_creation_failure_settles_the_line_before_its_first_read() {
     let home = Home::new();
     let (ready, readiness) = std::sync::mpsc::channel();
     let (proceed, control) = std::sync::mpsc::channel();
     let daemon = home.daemon(move |wire| {
-        wire.hello(&["session.methods"]);
+        wire.hello(&["session.methods", "session.branch.get"]);
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let methods = wire.read("session.methods");
@@ -3640,6 +3652,25 @@ fn tui_a_branch_creation_failure_settles_the_line_before_its_first_read() {
         }
         event(wire, "main", child_created("b-7c", 2, "reopen the parser"));
         let cut = owner_request(wire, "session.turn.get", "b-7c");
+        wire.reply(
+            &cut,
+            json!({"branchId":"b-7c","through":4,"turn":null,"output":null}),
+        );
+        let inventory = owner_request(wire, "session.input.pending", "b-7c");
+        ready.send(()).unwrap();
+        let details = wire.read("session.branch.get");
+        assert_eq!(details["params"]["branchId"], "b-7c", "the child is shown");
+        wire.reply(
+            &details,
+            json!({"purpose":"reopen the parser","cutMessages":null,"end":null,
+                "branchId":"b-7c","parentBranchId":"main","branchPoint":null,
+                "state":"waiting","head":4}),
+        );
+        wire.reply(
+            &inventory,
+            json!({"branchId":"b-7c","through":4,"inputs":[],"next":null}),
+        );
+        let read = owner_request(wire, "session.history", "b-7c");
         ready.send(()).unwrap();
         control.recv_timeout(Duration::from_secs(10)).unwrap();
         event(
@@ -3657,10 +3688,17 @@ fn tui_a_branch_creation_failure_settles_the_line_before_its_first_read() {
             ),
         );
         wire.reply(
-            &cut,
-            json!({"branchId":"b-7c","through":4,"turn":null,"output":null}),
+            &read,
+            json!({"events":[fact("b-7c",5,5000,"step","text",json!({
+                "turn_id":"turn","request_id":"request","delta":"late child transcript"
+            }))],"through":5,"nextBefore":1,"nextAfter":5}),
         );
-        wire.hold();
+        wire.quiet(Duration::from_millis(200));
+        assert_eq!(
+            wire.trailing_request(),
+            None,
+            "the failed line was read after the refusal"
+        );
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
@@ -3668,9 +3706,10 @@ fn tui_a_branch_creation_failure_settles_the_line_before_its_first_read() {
     terminal.write(b"/lines\r");
     terminal.until("reopen the parser");
     terminal.write(b"\x1b[B\r");
+    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
     proceed.send(()).unwrap();
     terminal.until("Branch b-7c: creation refused");
-    terminal.until("main transcript");
+    terminal.until_visible("main transcript");
     terminal.write(b"/lines\r");
     terminal.until("creation failed");
     terminal.write(b"\x1b[B\r");
