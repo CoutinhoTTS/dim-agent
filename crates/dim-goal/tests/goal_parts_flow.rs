@@ -1344,6 +1344,105 @@ async fn a_queued_record_takes_up_no_interrupt_a_failed_change_deferred() {
     env.close().await;
 }
 
+/// A record whose fact a newer change already answered reports that answer
+/// instead of deciding again: the turn end the edit moved states no pause, the
+/// continuation count the edit kept still stands, and the next turn end pauses
+/// at the limit (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turn_end_answered_by_a_newer_change_states_no_pause() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    // The second turn end decides the limit pause, and its record waits for the
+    // writer before it takes the write guard.
+    let mut writer = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Writer,
+        0,
+        None,
+    );
+    let end = env.tool_turn("main", &[&first]);
+    assert_eq!(
+        writer.arrived().await,
+        end.sequence,
+        "the turn end at {} writes its record",
+        end.sequence
+    );
+
+    // The edit commits while the record waits: the goal stays active with the
+    // new objective, and the count the limit pause read still stands.
+    env.goal("edit", json!({"objective": "ship the fix"}))
+        .await
+        .expect("the edit writes");
+    let edit = env.wait_for("main", r#"op="edit""#).await;
+    let mut released = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Released,
+        end.sequence,
+        Some(end.sequence),
+    );
+    writer.release();
+    assert_eq!(
+        released.arrived().await,
+        end.sequence,
+        "the record at {} answers its caller instead of deciding again",
+        end.sequence
+    );
+    released.release();
+
+    // The edit's state is the newest one, and the answered record wrote no
+    // pause over it.
+    let writes = env.writes("main").await;
+    let states: Vec<String> = writes
+        .iter()
+        .filter(|block| block.marker.contains(r#"kind="state""#))
+        .map(|block| block.text.clone())
+        .collect();
+    assert!(
+        states
+            .iter()
+            .all(|state| !state.contains(r#"status="paused""#)),
+        "the answered record states no pause, yet the states are {states:?}"
+    );
+    assert_eq!(
+        states.last(),
+        Some(&texts::edit_state(
+            "main",
+            "ship the fix",
+            &texts::trigger(&edit),
+            false
+        )),
+        "the edit states the newest goal"
+    );
+
+    // The count still stands at the limit the edit did not reset: the next turn
+    // end pauses there instead of continuing.
+    let next = env.tool_turn("main", &[]);
+    let pause = env
+        .wait_for("main", r#"kind="state" status="paused""#)
+        .await;
+    assert_eq!(
+        pause.text,
+        texts::automatic_pause(
+            "main",
+            "ship the fix",
+            "limit",
+            "the automatic continuation limit was reached",
+            next.sequence
+        ),
+        "the turn end at {} still pauses at the limit",
+        next.sequence
+    );
+    env.close().await;
+}
+
 /// An ordinary Append that commits between the turn-end decision and the
 /// record's own cutoff leaves the pause unwritten, and the turn end the caller
 /// still owns states its continuation (#2119).
