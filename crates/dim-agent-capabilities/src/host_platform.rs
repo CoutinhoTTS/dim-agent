@@ -1278,6 +1278,7 @@ impl HostPlatform {
                     current = *pid.borrow_and_update();
                 }
                 if task.is_terminal() {
+                    self.stopping.lock().unwrap().remove(&task.id);
                     return Ok(());
                 }
                 let Some(pid) = current else {
@@ -1324,14 +1325,19 @@ impl HostPlatform {
                             }
                             tokio::select! {
                                 biased;
-                                _ = shutdown.cancelled() => return,
+                                _ = shutdown.cancelled() => {
+                                    stopping.lock().unwrap().remove(&record.id);
+                                    return;
+                                }
                                 changed = changed.changed() => {
                                     if changed.is_err() {
+                                        stopping.lock().unwrap().remove(&record.id);
                                         return;
                                     }
                                 }
                                 changed = pid.changed() => {
                                     if changed.is_err() {
+                                        stopping.lock().unwrap().remove(&record.id);
                                         return;
                                     }
                                 }
@@ -2842,7 +2848,10 @@ mod windows {
     use super::*;
     use std::{os::windows::ffi::OsStringExt, time::Duration};
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, STILL_ACTIVE},
+        Foundation::{
+            CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
+            STILL_ACTIVE,
+        },
         System::{
             Com::CoTaskMemFree,
             Diagnostics::ToolHelp::{
@@ -2873,21 +2882,21 @@ mod windows {
         unsafe {
             let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
             if process.is_null() {
-                return false;
+                return GetLastError() != ERROR_INVALID_PARAMETER;
             }
             let mut code = 0u32;
             let ok = GetExitCodeProcess(process, &mut code);
             CloseHandle(process);
-            ok != 0 && code == STILL_ACTIVE as u32
+            ok == 0 || code == STILL_ACTIVE as u32
         }
     }
 
-    pub fn tree_alive(pid: u32) -> bool {
+    pub fn tree_pids(pid: u32) -> Vec<u32> {
         // SAFETY: snapshot handle is closed below; entries are sized.
         let parents = unsafe {
             let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snapshot == INVALID_HANDLE_VALUE {
-                return process_alive(pid);
+                return vec![pid];
             }
             let mut entry: PROCESSENTRY32W = std::mem::zeroed();
             entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -2913,7 +2922,11 @@ mod windows {
             );
             index += 1;
         }
-        tree.into_iter().any(process_alive)
+        tree
+    }
+
+    pub fn tree_alive(pid: u32) -> bool {
+        tree_pids(pid).into_iter().any(process_alive)
     }
 
     const SHELL_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
@@ -3636,9 +3649,10 @@ pub async fn kill_job(pid: u32) -> io::Result<()> {
     }
     #[cfg(windows)]
     {
+        let tree = native::tree_pids(pid);
         native::terminate_tree(pid)?;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while native::tree_alive(pid) {
+        while tree.iter().copied().any(native::process_alive) {
             if tokio::time::Instant::now() >= deadline {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
