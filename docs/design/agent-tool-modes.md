@@ -129,16 +129,18 @@ hands Goal the pending mode and Goal checks that it would be effective.
 - **Registration.** When the entry tool registers and makes `shell` effective without an update,
   `ToolRegistry` holds the Session's mode gate from before `settle(shell, registration)` through
   the publish. The handler takes the mode and cause as data; it does not read the published value.
-  The InputQueue's application read takes the same gate, so no input pins `shell` before the pause
-  text and the withdrawals are committed; a `set`/`resume` that waits on the gate is refused after
-  the publish. A failure leaves the projection at `normal` and records a fault. A withdrawal that
-  removes the entry tool runs `normal` and does not resume a paused goal.
+  While the switch runs, an application that is pending does not block the withdrawal or the
+  pause: both are still delivered, the switch completes, and the first new `shell` request is
+  prepared only after the pause is applied. An application that completes after the switch pins
+  `shell`; a `set`/`resume` that waits on the gate is refused after the publish. A failure leaves
+  the projection at `normal` and records a fault. A withdrawal that removes the entry tool runs
+  `normal` and does not resume a paused goal.
 - **Settle.** The Goal Session part fans out to every branch with an active goal: it writes
   `paused` with reason `mode`, a pause input text with a `mode` phrase as an `Append` input, so it
   precedes the next turn (Goal state alone does not enter the model context), and withdraws the
   input it queued — the `set`/`resume` trigger and any automatic continuation — when the InputQueue
   has not applied it. An applied input was already handed over; the settle does not withdraw it.
-  Its turn pins the mode in force when it starts (§4).
+  The applied record carries the mode and the turn keeps it (§4).
 - **Order.** The update runs under the Session's mode gate with Goal's settle first; its order and
   failure rule are §5's. A Goal failure stops the update before the mode changes.
 - **Activation.** `session.goal.set` and `resume` take the same mode gate and check the effective
@@ -219,9 +221,10 @@ owns this projection. Three terms:
   `tools.describe` project it, and `tools.call` admits inside it. `codemode` itself is never
   delegated, so a program cannot nest one.
 - The Loop holds the turn's mode. The InputQueue records the effective mode when it applies an
-  input, under the mode gate, and the turn — even one deferred for compaction or recovered after a
-  restart — uses that recorded mode; the applied record carries it, so a rebuild recovers it. Every
-  request of the turn uses the pin, together with the callable set ToolBinding pins today. A switch
+  input, at its serial position on the Dispatcher, and the turn — even one deferred for compaction
+  or recovered after a restart — uses that recorded mode; the applied record carries it, so a
+  rebuild recovers it. Every request of the turn uses the pin, together with the callable set
+  ToolBinding pins today. A switch
   takes effect with the next applied input, not with the next request, and needs no re-adoption:
   the branch's configuration, the version pins and the source sets stay as they are. A request
   retried through its own source (an in-process budget recovery) keeps the pin; a process restart
@@ -461,14 +464,14 @@ force (the `effective` value) and shows the named refusal otherwise.
   the gate is refused after the publish. A settle failure keeps the projection at `normal`.
 - Flow: a goal with a queued continuation, switched to an effective `shell` before it is applied:
   the continuation is withdrawn, the goal pauses (`mode`) with its pause text, and no turn carrying
-  the `goal_update` instruction starts in `shell`. Switched after it is applied, a turn that already
-  started keeps the old pin and finishes under it; one that was applied but starts after the switch
-  pins `shell` and carries the pause text. The same settle runs when `execute` registers and makes
-  `shell` effective without an update: the registry holds the gate from before the settle through
-  the publish, and an input application waits; it pins `shell` only after the pause text and the
-  withdrawals are committed. The pause is committed before the record write and the live mode, so a
-  turn that starts in `shell` has the pause text in history; a cancelled update
-  after the pause and before the record write leaves the goal paused and the mode unchanged.
+  the `goal_update` instruction starts in `shell`. An input applied before the switch keeps its pin;
+  one applied after the switch pins `shell` and waits for the pause text before its first request.
+  A turn that already started finishes under its pin. The same settle runs when `execute` registers
+  and makes `shell` effective without an update: the registry holds the gate from before the settle
+  through the publish; a pending application does not block the withdrawal or the pause, and after
+  the switch it pins `shell` with the pause in its history. The pause is committed before the record
+  write and the live mode, so a turn that pins `shell` has the pause text in history; a cancelled
+  update after the pause and before the record write leaves the goal paused and the mode unchanged.
   `set`/`resume` are refused while `shell` is in force; a chosen `shell` that runs `normal` (no
   `execute`) neither pauses nor refuses; after leaving, the operator resumes the goal.
 - Flow: stop a shell task with `session.exec.stop` after switching the Session to `normal`; the
@@ -528,18 +531,20 @@ Requirements go to other owners:
   the Session's mode gate around `set` and `resume` to re-check the effective mode at their commit
   boundary. While `shell` is in force, pause new continuations and refuse `session.goal.set` and
   `resume`; leave resumption to the operator after `shell` leaves. The pause text is an `Append`
-  input committed before the publish, so a turn that starts in `shell` has it before its first
-  request's history cutoff. Its owner carries this into [Goal](plugins/Goal.md).
+  input committed before the publish, so a turn that pins `shell` has it before its first request's
+  history cutoff. Its owner carries this into [Goal](plugins/Goal.md).
 - **ToolRegistry.** Provide the `ToolModeTransition` service and the Session's mode gate; on a
   registration, hold the gate from before `settle(shell, registration)` through the publish, and
-  keep the projection at `normal` on a failure. Turn-start reads take the gate, so no turn pins
-  `shell` before the settle commits.
+  keep the projection at `normal` on a failure. While the switch runs, a pending application does
+  not block the withdrawal or the pause; it is ordered after the switch, so the first new `shell`
+  request includes the pause.
 - **PromptSources.** The environment block follows the surface: while `shell` is in force (the
   `effective` value) it drops the Windows file-encoding guidance about `read`/`edit`/`write`. Its
   owner carries this into [PromptSources](plugins/PromptSources.md).
-- **Loop.** Record the effective mode when the input is applied, under the mode gate, and recover
-  it from the applied record on a rebuild; hold it for the turn. Adopt a committed pause text
-  before starting a turn that pins `shell`, and keep the Dispatcher running while the turn waits.
+- **Loop.** Record the effective mode when the input is applied, at its serial position, and
+  recover it from the applied record on a rebuild; hold it for the turn. Adopt a committed pause
+  text before starting a turn that pins `shell`, and keep the Dispatcher running while the turn
+  waits.
   Its page gains the turn's mode pin. Its owner carries this into
   [Loop](../architecture/rust-agent/plugins/Loop.md).
 
