@@ -10647,6 +10647,228 @@ mod tests {
         assert!(unseen.contains("never reached the model"), "{unseen}");
     }
 
+    /// The export of a line that ended itself while a switch follow-up was
+    /// still queued: the close releases the input and starts a request it
+    /// cancels before the model call (Timeline branches §10). `start` adds the
+    /// cancelled request, and `end_after` moves the line's end past it.
+    fn ended_line_export(start: bool, end_after: bool) -> String {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"false\">\nmoved from this line to line main.\n</dim-branch-line>";
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let mut records = vec![
+            event(
+                1,
+                ["input", "message"],
+                json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+            ),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                             "data": {}}})
+            .to_string(),
+        ];
+        if !end_after {
+            records.push(event(3, ["branch", "end"], json!({})));
+        }
+        records.push(event(4, ["input", "applied"], json!({"input_id": "f1"})));
+        records.push(event(5, ["turn", "start"], json!({"turn_id": "t1"})));
+        records.push(event(6, ["input", "consumed"], json!({"input_id": "f1"})));
+        if start {
+            records.push(event(
+                7,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ));
+            records.push(event(
+                8,
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                       "reason": "timeline closed"}),
+            ));
+        }
+        if end_after {
+            records.push(event(9, ["branch", "end"], json!({})));
+        }
+        records.join("\n")
+    }
+
+    /// A line can end itself while a switch follow-up is still queued, and its
+    /// close then releases the input and cancels the request before the model
+    /// call. The line cannot answer the input, so its note is not a missing
+    /// note: the probes judge the answer the line did not give (Timeline
+    /// branches §10, §12.4; issue #2140).
+    #[test]
+    fn a_note_on_a_line_that_ended_before_its_request_reached_the_model_is_not_missing() {
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: false,
+            other: "main".into(),
+        }];
+        for start in [false, true] {
+            assert_eq!(
+                switch_notes_unseen(&ended_line_export(start, false), &notes, None),
+                None,
+                "the line ended before its request reached the model (start: {start})"
+            );
+        }
+    }
+
+    /// A line that ended before it consumed the input is still checked when a
+    /// request of the line reached the model after the consumption: the model
+    /// read a request that did not carry the note being evaluated (Timeline
+    /// branches §12.4, issue #2140).
+    #[test]
+    fn a_line_that_ended_before_its_input_is_still_checked_when_a_request_reached_the_model() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"false\">\nmoved from this line to line main.\n</dim-branch-line>";
+        let export = [
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                             "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                    "text": note}]}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                             "data": {}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "d1", "sequence": 3, "type": "branch", "name": "end",
+                             "data": {}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "c1", "sequence": 4, "type": "input", "name": "consumed",
+                             "data": {"input_id": "f1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "s1", "sequence": 5, "type": "step", "name": "model-start",
+                             "data": {"turn_id": "t1", "request_id": "r1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "m1", "sequence": 6, "type": "model", "name": "call",
+                             "data": {"request_id": "r1",
+                                      "request": {"messages": [{"role": "user",
+                                                                  "content": "the follow-up"}]}}}}),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: false,
+            other: "main".into(),
+        }];
+        let unseen = switch_notes_unseen(&export, &notes, None)
+            .expect("the request the model read after the consumption is checked");
+        assert!(unseen.contains("does not carry the note"), "{unseen}");
+    }
+
+    /// A line that ended after it consumed the input was able to answer it:
+    /// the request its own close cancelled is a missing note, as any other
+    /// request that never reached the model (Timeline branches §12.4, issue
+    /// #2140).
+    #[test]
+    fn a_line_that_ended_after_the_consumption_still_answers_for_its_note() {
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: false,
+            other: "main".into(),
+        }];
+        let unseen = switch_notes_unseen(&ended_line_export(true, true), &notes, None)
+            .expect("the line consumed the input before it ended");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// The input a move sent to the line it left is not checked when that line
+    /// ended before the input's request reached the model: the line cannot
+    /// answer it (Timeline branches §10, issue #2140).
+    #[test]
+    fn a_receipt_on_a_line_that_ended_before_its_request_reached_the_model_is_not_unseen() {
+        let driven = Driven {
+            session: "s".into(),
+            stop: "idle",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs: vec![FixtureInput {
+                    what: FORMER_INPUT,
+                    line: "2".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        assert!(
+            matches!(
+                switch_note_check(&driven, &ended_line_export(true, false)),
+                NotesCheck::Observed
+            ),
+            "the line ended before its request reached the model"
+        );
+    }
+
+    /// A run that reached its wall clock keeps that stop: the wall clock ended
+    /// the requests in flight on every line, so a consumed input whose request
+    /// did not reach the model says nothing about the text the input carried
+    /// (model-prompts §8.1, issue #2140).
+    #[test]
+    fn a_run_that_reached_its_wall_clock_keeps_its_stop_over_a_missing_note() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(1, ["input", "message"], json!({})),
+            event(2, ["input", "consumed"], json!({"input_id": "f1"})),
+            event(
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                4,
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                       "reason": "timeline closed"}),
+            ),
+        ]
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "seconds",
+            timed_out: true,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs: vec![FixtureInput {
+                    what: FORMER_INPUT,
+                    line: "main".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        assert!(
+            matches!(switch_note_check(&driven, &export), NotesCheck::Observed),
+            "a run that reached its wall clock keeps its own stop"
+        );
+    }
+
     /// A run that stopped on its turn budget ended the request before its
     /// model call: the note is not a missing note, but the run has no request
     /// for its probe to read, so it is an incomplete fixture. The same export
