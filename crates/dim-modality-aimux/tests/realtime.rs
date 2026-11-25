@@ -280,6 +280,44 @@ async fn the_relay_refuses_control_frames_and_unknown_channels() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_provider_socket_failure_reports_an_error_end() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let stub = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio_tungstenite::accept_hdr_async(stream, accepted)
+            .await
+            .unwrap();
+        // The provider's socket dies without a close frame.
+    });
+
+    let adapter = MediaAdapter::new();
+    let (events, mut received) = mpsc::channel(16);
+    adapter
+        .realtime_open(
+            connection(address),
+            json!({}),
+            events,
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    match next_event(&mut received).await {
+        RealtimeEvent::Ended(RealtimeEnd::Error(message)) => assert!(
+            message.starts_with("The realtime socket failed"),
+            "the end reports our socket failure: {message}"
+        ),
+        RealtimeEvent::Ended(end) => {
+            panic!("a provider socket failure ends the session with an error, not {end:?}")
+        }
+        RealtimeEvent::Event(event) => {
+            panic!("a provider socket failure reports an end, not {event}")
+        }
+    }
+    stub.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_relay_delivers_a_provider_message_over_one_mebibyte_intact() {
     let transcript = "a".repeat(2 * 1024 * 1024);
     let text = json!({
