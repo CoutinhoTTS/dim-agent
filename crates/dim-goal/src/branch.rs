@@ -441,7 +441,7 @@ struct State {
 /// A state record a settlement refused to admit, with the fact it answers.
 struct DeferredRecord {
     after: u64,
-    status: Option<text::State>,
+    status: text::State,
     answers: Answers,
 }
 
@@ -1731,7 +1731,7 @@ impl Owner {
                 return Ok(());
             }
             for record in deferred {
-                self.write_record(record.after, record.status, record.answers)
+                self.write_record(record.after, Some(record.status), record.answers)
                     .await?;
             }
         }
@@ -2307,7 +2307,7 @@ impl Owner {
         if admission == Admission::Held {
             self.keep_deferred(DeferredRecord {
                 after: at,
-                status: Some(kept),
+                status: kept,
                 answers: Answers::EvaluationFailed(evaluation),
             });
         }
@@ -2356,7 +2356,7 @@ impl Owner {
         };
         Some(DeferredRecord {
             after: sequence,
-            status: Some(status),
+            status,
             answers: Answers::Conclusion(conclusion.evaluation),
         })
     }
