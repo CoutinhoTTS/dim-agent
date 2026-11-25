@@ -25,7 +25,7 @@ Decision status: Proposed.
 - Session 作用域的调用方：用 `branchId` 到达本 Session 分支组的数据面。`branchId` 就是分支线的 id（line id）。
 - 调用方直接调用目标所有者自己的操作。中间不为某个操作单独开转发方法（例如 `sessions` 现在的 `withdraw`、`pending`），不改写请求或回复，也不转述目标所有者的错误。
 - D2 中按 id 选目标的调用不算转发：它不带业务含义，对每个操作都一样，请求、回复和目标所有者的错误原样传递；只有选不中时，才由持有者回答 D2 的三种错误。错误的形状在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
-- 调用里表示分支的字段名由绑定决定，在 #2127 定义。
+- 调用里表示分支的字段名由绑定决定，在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
 
 ### D2. 由持有实例的一方按 id 选目标，实例键不离开实例
 
@@ -60,7 +60,7 @@ Decision status: Proposed.
 
 ### D5. 加载与保持属于 Agents
 
-- 进程调用方经 `sessions` 的一次调用，由 Agents 在调用期间保持目标 Session 加载：Session 未加载时先加载，调用结束后释放。所以只有 Session 不存在，或已经关闭、不能再加载时，才是「Session 不在」（加载失败见 D2）。这与现在的 `sessions` 方法和 Rpc 相同。
+- 进程调用方经 `sessions` 的一次调用，由 Agents 在调用期间保持目标 Session 加载：Session 未加载时先加载，调用结束后释放。所以只有 Session 不存在，或已经关闭、不能再加载时，才是「Session 不在」（加载失败见 D2）。这与现在会取得 Session 的 `sessions` 方法和 Rpc 的 Session 方法相同；`exists` 这类只读是否存在的操作不加载 Session，也不走这条路径。
 - Session 部件只调用本 Session，它在调用时一定已加载。
 - 这一条只规定这条调用路径上的保持。现有的长期保持不变：Collaboration 发出的请求在结果写回之前保持成员 Session 加载，客户端 attach 之后在 detach 之前保持 Session 加载。改变它们是另外的产品决定。
 - 保持只决定 Session 是否加载，选目标与调用仍按 D2。
