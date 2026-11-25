@@ -2733,7 +2733,7 @@ async fn an_evaluation_request_writes_one_adjacent_pair() {
 /// trigger, even while the ending line's Timeline is still open (#2172 review).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_end_that_wins_the_evaluation_request_admission_writes_no_input() {
-    let env = Env::start().await;
+    let env = Env::start_controllable().await;
     let line = env
         .open_branch(
             "main",
@@ -2753,7 +2753,7 @@ async fn an_end_that_wins_the_evaluation_request_admission_writes_no_input() {
     // A Tool end of a running line commits its `branch/end` and is parked
     // until the line's turn ends: the branch has ended while its Timeline is
     // still open.
-    env.set_running(&line, true);
+    env.probe.set_running(&line, true);
     let head = env.timeline(&line).committed();
     env.dispatched(&line, head).await;
 
@@ -2810,7 +2810,7 @@ async fn an_end_that_wins_the_evaluation_request_admission_writes_no_input() {
         "the refused request writes neither its record nor its trigger, and the branch takes no\
          other input after its end; writes after {end}: {after:#?}"
     );
-    env.set_running(&line, false);
+    env.probe.set_running(&line, false);
     env.close().await;
 }
 
