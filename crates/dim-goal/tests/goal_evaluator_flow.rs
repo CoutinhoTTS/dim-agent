@@ -2205,3 +2205,93 @@ async fn pursuit_5_a_failed_or_cancelled_evaluator_turn_reports_failed() {
         env.close().await;
     }
 }
+
+/// A conclusion or an evaluator failure that folds while a change holds task
+/// admission is decided before that change states its own record (#2158).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_folded_in_the_settlement_window_is_taken() {
+    for case in ["done", "blocked", "evaluation_failed"] {
+        let env = Env::start().await;
+        let (evaluation, create) = completion_requested(&env).await;
+        let head = env.timeline("main").committed();
+        env.dispatched("main", head).await;
+
+        // The operator pause settles the decisions and stops before it
+        // composes its record and trigger.
+        let mut change = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Change,
+            head,
+            Some(head),
+        );
+        let pause = env.goal("pause", json!({}));
+        let (pause, fact) = tokio::join!(pause, async {
+            assert_eq!(
+                change.arrived().await,
+                head,
+                "{case}: the pause's writer is held at the cutoff it read"
+            );
+            let fact = match case {
+                "done" => {
+                    write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified")
+                }
+                "blocked" => write_conclusion(
+                    &env,
+                    &create.branch,
+                    evaluation,
+                    "blocked",
+                    "BLOCKED: a deploy key",
+                ),
+                _ => env
+                    .emit(
+                        "main",
+                        EventKind::BranchEnded(BranchEndedData {
+                            branch: create.branch.clone(),
+                            end_event: 0,
+                            source: BranchSource::Host {
+                                operation_id: "user".into(),
+                            },
+                            ancestor: None,
+                        }),
+                    )
+                    .sequence,
+            };
+            env.dispatched("main", fact).await;
+            change.release();
+            fact
+        });
+        pause.expect("the pause writes");
+        let (needle, expected) = match case {
+            "done" => (
+                r#"status="completed""#,
+                texts::evaluated("main", "ship it", "completed", "verified", fact),
+            ),
+            "blocked" => (
+                r#"status="blocked""#,
+                texts::evaluated("main", "ship it", "blocked", "a deploy key", fact),
+            ),
+            _ => (
+                r#"reason="evaluation_failed""#,
+                texts::evaluated_pause(
+                    "main",
+                    "ship it",
+                    "evaluation_failed",
+                    "the evaluator could not check the result",
+                    fact,
+                ),
+            ),
+        };
+        let record = env
+            .writes("main")
+            .await
+            .into_iter()
+            .find(|block| block.text.contains(needle));
+        assert_eq!(
+            record.map(|block| block.text),
+            Some(expected),
+            "{case}: the fact folded at {fact} inside the settlement window is decided"
+        );
+        env.close().await;
+    }
+}
