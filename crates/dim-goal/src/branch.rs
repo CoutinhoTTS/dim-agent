@@ -355,6 +355,17 @@ enum Retry {
     Settle,
 }
 
+/// What a settlement's task admission did with the work a caller asked for
+/// (#2158).
+#[derive(PartialEq, Eq)]
+enum Admission {
+    /// The work runs in this generation, now or through its retry.
+    Taken,
+    /// A settlement holds admission: the caller keeps the decision it was
+    /// about to state, for that settlement to state before its own record.
+    Held,
+}
+
 /// The fact a state record answers, and the check that fact still makes at the
 /// fold the record is composed from (D3, C4, C5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -420,6 +431,18 @@ struct State {
     last_write: u64,
     /// The closing pause already gave its delivery the grace.
     closing_grace: bool,
+    /// The state records a settlement refused to admit while it held task
+    /// admission: their facts committed before the record of the change that
+    /// follows, so it states them first (#2158). One a record leaves undecided
+    /// stays for a later change, which states it or refuses it as superseded.
+    deferred: Vec<DeferredRecord>,
+}
+
+/// A state record a settlement refused to admit, with the fact it answers.
+struct DeferredRecord {
+    after: u64,
+    status: Option<text::State>,
+    answers: Answers,
 }
 
 impl State {
@@ -615,6 +638,10 @@ impl Owner {
                 self.timeline.committed(),
             )
             .await;
+            // The settlement refused the decisions that folded into it: this
+            // record answers a trigger newer than their facts, so it states
+            // them first (#2158).
+            self.write_deferred().await?;
             if matches!(change, Change::Set { .. } | Change::Resume) {
                 self.load_current_work().await?;
             }
@@ -717,12 +744,14 @@ impl Owner {
     /// Runs `work` once under `key` while the branch is active, and records a
     /// failed write without letting it stop the branch. A request that arrives
     /// while the work runs is answered once more when it finishes, as `retry`.
-    fn task<F>(self: &Arc<Self>, key: String, retry: Option<Retry>, work: F)
+    /// A settlement that holds admission takes no work: the caller keeps the
+    /// decision and states it before that settlement's own record (#2158).
+    fn task<F>(self: &Arc<Self>, key: String, retry: Option<Retry>, work: F) -> Admission
     where
         F: FnOnce(Arc<Self>) -> BoxFuture<'static, Result<(), AgentError>> + Send + 'static,
     {
         if self.stopped() {
-            return;
+            return Admission::Taken;
         }
         // The tracker token and the cancellation token are one generation: a
         // settlement that swaps them between two reads would admit this task
@@ -731,13 +760,13 @@ impl Owner {
         let (decision_task, decisions) = {
             let mut state = self.state.lock().unwrap();
             if state.terminating {
-                return;
+                return Admission::Held;
             }
             if !state.in_flight.insert(key.clone()) {
                 if let Some(retry) = retry {
                     state.retry.insert(key, retry);
                 }
-                return;
+                return Admission::Taken;
             }
             (state.decision_tasks.token(), state.decisions.clone())
         };
@@ -776,6 +805,7 @@ impl Owner {
                 None => {}
             }
         });
+        Admission::Taken
     }
 
     /// The continuation limit, `Ok(None)` when no limit is set. A refused or
@@ -1689,6 +1719,24 @@ impl Owner {
         self.await_fold().await
     }
 
+    /// States the decisions a settlement refused to admit while it held task
+    /// admission, before the record of a change that supersedes their facts:
+    /// each names a fact older than that record, so the fold takes it only if
+    /// its own record lands first (#2158).
+    async fn write_deferred(self: &Arc<Self>) -> Result<(), AgentError> {
+        loop {
+            self.await_dispatched().await?;
+            let deferred = std::mem::take(&mut self.state.lock().unwrap().deferred);
+            if deferred.is_empty() {
+                return Ok(());
+            }
+            for record in deferred {
+                self.write_record(record.after, record.status, record.answers)
+                    .await?;
+            }
+        }
+    }
+
     /// States the newest change trigger, once (D3): the record names the
     /// trigger in `after`, so the fold and every client read the same state.
     fn answer_change(self: &Arc<Self>) {
@@ -2242,29 +2290,35 @@ impl Owner {
     }
 
     fn evaluation_failed(self: &Arc<Self>, evaluation: u64, at: u64) {
-        self.task(format!("failed:{evaluation}"), None, move |owner| {
+        let paused = text::State::Paused("evaluation_failed".to_owned());
+        let kept = paused.clone();
+        let admission = self.task(format!("failed:{evaluation}"), None, move |owner| {
             Box::pin(async move {
                 let current = owner.state.lock().unwrap().fold.is_current(evaluation);
                 if !current {
                     return Ok(());
                 }
                 owner
-                    .record(
-                        at,
-                        Some(text::State::Paused("evaluation_failed".to_owned())),
-                        Answers::EvaluationFailed(evaluation),
-                    )
+                    .record(at, Some(paused), Answers::EvaluationFailed(evaluation))
                     .await
                     .map(|_| ())
             })
         });
+        if admission == Admission::Held {
+            self.keep_deferred(DeferredRecord {
+                after: at,
+                status: Some(kept),
+                answers: Answers::EvaluationFailed(evaluation),
+            });
+        }
     }
 
     /// The conclusion the evaluator wrote decides the evaluation it names
     /// (Pursuit §4.1). A conclusion the background wait deferred is taken
     /// again through here when the branch settles (Pursuit §5).
     fn conclude(self: &Arc<Self>, sequence: u64, conclusion: Conclusion) {
-        self.task(
+        let kept = conclusion.clone();
+        let admission = self.task(
             format!("conclusion:{sequence}"),
             Some(Retry::Settle),
             move |owner| {
@@ -2282,6 +2336,33 @@ impl Owner {
                 })
             },
         );
+        if admission == Admission::Held
+            && let Some(record) = self.report_record(sequence, &kept)
+        {
+            self.keep_deferred(record);
+        }
+    }
+
+    /// The state record the conclusion at `sequence` states, if it still
+    /// decides one: a `continue` conclusion states no record of its own, and
+    /// a superseded one decides nothing (#2158).
+    fn report_record(&self, sequence: u64, conclusion: &Conclusion) -> Option<DeferredRecord> {
+        let state = self.state.lock().unwrap();
+        let status = match fold::decide_conclusion(&state.fold, sequence, conclusion)? {
+            ConclusionAction::Completed(text) => text::State::Completed(text),
+            ConclusionAction::Blocked(text) => text::State::Blocked(text),
+            ConclusionAction::Failed => text::State::Paused("evaluation_failed".to_owned()),
+            ConclusionAction::Continue => return None,
+        };
+        Some(DeferredRecord {
+            after: sequence,
+            status: Some(status),
+            answers: Answers::Conclusion(conclusion.evaluation),
+        })
+    }
+
+    fn keep_deferred(&self, record: DeferredRecord) {
+        self.state.lock().unwrap().deferred.push(record);
     }
 
     async fn run_conclusion(
