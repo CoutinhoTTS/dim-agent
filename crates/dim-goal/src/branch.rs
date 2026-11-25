@@ -689,17 +689,10 @@ impl Owner {
                         completed: false, ..
                     } => "blocked",
                 };
-                let business = recovery::BusinessState::new(
-                    operation,
-                    objective.clone(),
-                    state.clone(),
-                    judge,
-                    None,
-                );
                 let record = text::state(
                     &self.branch_id,
                     objective.as_deref(),
-                    state,
+                    state.clone(),
                     judge,
                     text::Answered::Trigger(&trigger_id),
                     live,
@@ -716,7 +709,10 @@ impl Owner {
                     head,
                 )
                 .await;
-                if matches!(
+                // The evaluation request states no change of its own (A16):
+                // its record keeps the running goal, so the batch carries no
+                // business event.
+                let business = if matches!(
                     &change,
                     Change::Report {
                         completed: true,
@@ -724,14 +720,12 @@ impl Owner {
                     }
                 ) && judge == text::Judge::Evaluator
                 {
-                    let events = self
-                        .tree
-                        .inputs(self.branch_id.clone(), vec![record, trigger])
-                        .await?;
-                    self.state.lock().unwrap().last_write =
-                        events.last().expect("evaluation request").sequence;
-                    break events;
-                }
+                    None
+                } else {
+                    Some(recovery::BusinessState::new(
+                        operation, objective, state, judge, None,
+                    ))
+                };
                 let Some(events) =
                     self.append_business_if_head(vec![record, trigger], business, Some(1), head)?
                 else {
@@ -972,13 +966,14 @@ impl Owner {
     /// Writes the batch only while the branch's last assigned sequence is
     /// still `head` when it commits: a fact that committed behind it leaves
     /// nothing written, and the caller decides again (D3, C4, C5). A record is
-    /// a batch — the model's state input and the recovery event — and
-    /// `input_if_head` takes one input, so the condition rides the batch's own
-    /// registration under the commit lock instead.
+    /// a batch — the model's state input, the recovery event when `business`
+    /// states a change (the evaluation request states none, A16), and the
+    /// trigger — and `input_if_head` takes one input, so the condition rides
+    /// the batch's own registration under the commit lock instead.
     fn append_business_if_head(
         &self,
         inputs: Vec<InputMessageData>,
-        mut business: recovery::BusinessState,
+        mut business: Option<recovery::BusinessState>,
         trigger: Option<usize>,
         head: u64,
     ) -> Result<Option<Vec<Arc<AgentEvent>>>, AgentError> {
@@ -992,10 +987,12 @@ impl Owner {
                     .with_id(uuid::Uuid::new_v4().to_string()),
             );
         }
-        if let Some(index) = trigger {
-            business.input_id = drafts[index].id.clone();
+        if let Some(business) = business.as_mut() {
+            if let Some(index) = trigger {
+                business.input_id = drafts[index].id.clone();
+            }
+            drafts.push(business.draft()?);
         }
-        drafts.push(business.draft()?);
         // The sentinel error only cancels the batch; `moved` answers the
         // caller, which decides again from the fold that moved.
         let moved = std::cell::Cell::new(false);
@@ -1004,74 +1001,77 @@ impl Owner {
                 moved.set(true);
                 return Err(AgentError::Cancelled("Goal record superseded".into()));
             }
-            for event in &events[..events.len() - 1] {
+            let inputs_end = events.len() - usize::from(business.is_some());
+            for event in &events[..inputs_end] {
                 let EventKind::InputMessage(data) = &event.kind else {
                     unreachable!("before preserves input kind")
                 };
                 data.validate()
                     .map_err(|error| AgentError::InvalidInput(error.into()))?;
             }
-            let EventKind::Extension(actual) = &events.last().expect("business state").kind else {
-                unreachable!("before preserves extension kind")
-            };
-            if actual.key() != recovery::KEY
-                || recovery::BusinessState::decode(actual.data().clone())? != business
-            {
-                return Err(AgentError::InvalidInput(
-                    "before changed Goal business state".into(),
-                ));
-            }
-            if let EventKind::InputMessage(input) = &events[0].kind {
-                let expected = Statement {
-                    objective: business.objective.clone(),
-                    state: business.state.clone(),
-                    judge: business.judge,
-                    retired: business.objective.is_none(),
+            if let Some(business) = &business {
+                let EventKind::Extension(actual) = &events[inputs_end].kind else {
+                    unreachable!("before preserves extension kind")
                 };
-                let actual = input.blocks.iter().find_map(|block| {
-                    let InputBlock::Raw { text, key, retire } = block;
-                    (key.as_deref() == Some(text::STATE_KEY))
-                        .then(|| published_statement(text, *retire))
-                        .flatten()
-                });
-                if actual.as_ref() != Some(&expected) {
-                    return Err(AgentError::InvalidInput(
-                        "before changed Goal model state without its business state".into(),
-                    ));
-                }
-            }
-            if let Some(index) = trigger {
-                let EventKind::InputMessage(data) = &events[index].kind else {
-                    unreachable!("trigger kind")
-                };
-                let (attrs, operation) = fold::change_of(&data.blocks).ok_or_else(|| {
-                    AgentError::InvalidInput("before removed Goal command".into())
-                })?;
-                let state = self.state.lock().unwrap();
-                let (objective, mut status, mut judge) = state.fold.after_change(operation, &attrs);
-                if objective.is_none() {
-                    status = text::State::None;
-                    judge = text::Judge::Model;
-                }
-                if (objective, status, judge)
-                    != (
-                        business.objective.clone(),
-                        business.state.clone(),
-                        business.judge,
-                    )
+                if actual.key() != recovery::KEY
+                    || recovery::BusinessState::decode(actual.data().clone())? != *business
                 {
                     return Err(AgentError::InvalidInput(
-                        "before changed Goal command without its state".into(),
+                        "before changed Goal business state".into(),
                     ));
                 }
-                if business.input_id.as_deref() != Some(events[index].id.as_str()) {
-                    return Err(AgentError::InvalidInput(
-                        "before changed Goal trigger identity".into(),
-                    ));
+                if let EventKind::InputMessage(input) = &events[0].kind {
+                    let expected = Statement {
+                        objective: business.objective.clone(),
+                        state: business.state.clone(),
+                        judge: business.judge,
+                        retired: business.objective.is_none(),
+                    };
+                    let actual = input.blocks.iter().find_map(|block| {
+                        let InputBlock::Raw { text, key, retire } = block;
+                        (key.as_deref() == Some(text::STATE_KEY))
+                            .then(|| published_statement(text, *retire))
+                            .flatten()
+                    });
+                    if actual.as_ref() != Some(&expected) {
+                        return Err(AgentError::InvalidInput(
+                            "before changed Goal model state without its business state".into(),
+                        ));
+                    }
+                }
+                if let Some(index) = trigger {
+                    let EventKind::InputMessage(data) = &events[index].kind else {
+                        unreachable!("trigger kind")
+                    };
+                    let (attrs, operation) = fold::change_of(&data.blocks).ok_or_else(|| {
+                        AgentError::InvalidInput("before removed Goal command".into())
+                    })?;
+                    let state = self.state.lock().unwrap();
+                    let (objective, mut status, mut judge) =
+                        state.fold.after_change(operation, &attrs);
+                    if objective.is_none() {
+                        status = text::State::None;
+                        judge = text::Judge::Model;
+                    }
+                    if (objective, status, judge)
+                        != (
+                            business.objective.clone(),
+                            business.state.clone(),
+                            business.judge,
+                        )
+                    {
+                        return Err(AgentError::InvalidInput(
+                            "before changed Goal command without its state".into(),
+                        ));
+                    }
+                    if business.input_id.as_deref() != Some(events[index].id.as_str()) {
+                        return Err(AgentError::InvalidInput(
+                            "before changed Goal trigger identity".into(),
+                        ));
+                    }
                 }
             }
-            self.state.lock().unwrap().last_write =
-                events.last().expect("business result").sequence;
+            self.state.lock().unwrap().last_write = events.last().expect("batch").sequence;
             Ok(())
         });
         match events {
@@ -1125,7 +1125,13 @@ impl Owner {
         );
         let Some(events) = self.append_business_if_head(
             vec![input],
-            recovery::BusinessState::new("pause", objective, status.clone(), judge, None),
+            Some(recovery::BusinessState::new(
+                "pause",
+                objective,
+                status.clone(),
+                judge,
+                None,
+            )),
             None,
             head,
         )?
@@ -1668,7 +1674,7 @@ impl Owner {
             )
             .await;
             if self
-                .append_business_if_head(vec![input], business, None, through)?
+                .append_business_if_head(vec![input], Some(business), None, through)?
                 .is_none()
             {
                 continue;
