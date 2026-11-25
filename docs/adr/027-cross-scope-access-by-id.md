@@ -24,14 +24,15 @@ Decision status: Proposed.
 - 进程作用域的调用方：用 `sessionId` 到达 Session 组的数据面，用 `(sessionId, branchId)` 到达分支组的数据面。
 - Session 作用域的调用方：用 `branchId` 到达本 Session 分支组的数据面。`branchId` 就是分支线的 id（line id）。
 - 调用方直接调用目标所有者自己的操作。中间不为某个操作单独开转发方法（例如 `sessions` 现在的 `withdraw`、`pending`），不改写请求或回复，也不转述目标所有者的错误。
-- D2 中按 id 选目标的调用不算转发：它不带业务含义，对每个操作都一样，请求和回复原样传递。
+- D2 中按 id 选目标的调用不算转发：它不带业务含义，对每个操作都一样，请求、回复和目标所有者的错误原样传递；只有选不中时，才由持有者回答 D2 的三种错误。错误的形状在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
+- 调用里表示分支的字段名由绑定决定，在 #2127 定义。
 
 ### D2. 由持有实例的一方按 id 选目标，实例键不离开实例
 
 跨语言的调用只能传数据，不能传对象：rutis 不能把 Rust 的服务对象交给其他语言，也拒绝实例外的实例键，而 rutis 是外部依赖，不向它提需求（[设计规则 §4 规则 8](../architecture/rust-agent/principles.md)）。部件只能注入本实例和外层实例的服务（ADR 002 D3），所以往里一层，只能由持有子实例的一方按 id 选出目标。
 
 - Session 由 Agents 持有：进程调用方经 Agents 的 `sessions`，按 `sessionId` 选 Session，可选再带 `branchId`。
-- 分支由它所在的 Session 持有：Session 部件经本 Session 自己的数据面，按 `branchId` 选本 Session 的分支。它不能指定别的 Session。
+- 分支由它所在的 Session 持有：Session 部件经本 Session 自己的数据面，按 `branchId` 选本 Session 的分支。它不能指定别的 Session。这个数据面是 Session 这个持有者自己的操作，不是只做路由的对象；Session 自己的读取也由它提供（[#2025](https://github.com/arcships/dim/issues/2025)）。
 - 每一层查的是持有者已有的表：Agents 的 Session 表、Session 的分支表。不新建路由对象，也不另建索引。
 - 选中目标之后，调用的是目标所有者在 catalog 中的操作本身。所有者不为此登记，也不写代码。
 - 调用方只给 id、服务名、方法名和参数，拿不到实例键，也拿不到对象。所以「实例键只在实例内部可读」的约定不变。
@@ -56,7 +57,7 @@ Decision status: Proposed.
 
 ### D5. 加载与保持属于 Agents
 
-- 进程调用方经 `sessions` 的一次调用，由 Agents 在调用期间保持目标 Session 加载：Session 未加载时先加载，调用结束后释放。所以只有 Session 不存在时才是「Session 不在」。这与现在的 `sessions` 方法和 Rpc 相同。
+- 进程调用方经 `sessions` 的一次调用，由 Agents 在调用期间保持目标 Session 加载：Session 未加载时先加载，调用结束后释放。所以只有 Session 不存在，或已经关闭、不能再加载时，才是「Session 不在」。这与现在的 `sessions` 方法和 Rpc 相同。
 - Session 部件只调用本 Session，它在调用时一定已加载。
 - 在多次调用之间一直保持加载，现在没有调用方需要，不提供；出现这种需求时由 Agents 契约定义。
 - 保持只决定 Session 是否加载，选目标与调用仍按 D2。
