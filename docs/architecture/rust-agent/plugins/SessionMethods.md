@@ -46,12 +46,3 @@ namespace inside a management namespace, dispatch through the Session, a
 provider reload answering `service_reloading`, and `session.methods`;
 [session_typescript.rs](../../../../crates/dim-app-server/tests/transport_flow/session_typescript.rs)
 registers from TypeScript rows, including a namespace registered already.
-
-<!-- generated:plugin SessionMethods — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | — |
-| 提供 | `S:SessionMethods`、`S:dyn HostDispatch#sessionMethods` |
-| 被注入于 | `Attachments`、`InputMethods`、`LoopMethods`、`PromptSuggestion`、`Questions`、`ShellInput`、`ToolMethods`、`WorkspaceTools` |
-<!-- /generated -->

@@ -8,35 +8,33 @@
 
 候选来自依赖 Timeline / Dispatcher 的机械扫描，而 [Capability 契约](../../design/plugin-contract.md#6-capability)
 按折叠状态或写自身领域事实的行为定义。依赖存在不等于行为分类已经核实；只写输入或提供服务
-的部件不能仅凭依赖被认定为 Capability。产品的 20 个标记项取自[生成目录](generated/catalog.md#capabilities)；
-另补[本地装配](generated/local/services.json)的 HooksBranch 和源码中的可选 ShellSession。
-这 22 个候选都是 **branch** 作用域；Session 中的 Wait 工具等同名业务部件不因此自动算 Capability。
+的部件不能仅凭依赖被认定为 Capability。这里列出 branch 作用域的候选部件，包括本地装配的 HooksBranch 和可选插件 ShellSession。
 这里只列主要事件关联，不把订阅列表当成全部读取依赖。
 
-| 候选部件 | 主要职责 | 主要事件关联 | 装配范围 | 实现 / 所属说明 |
-| --- | --- | --- | --- | --- |
-| Approval | 审批请求、响应与未完成请求结算 | approval/*；读取权限状态 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/approval.rs) / [说明](plugins/Permission.md) |
-| BackgroundExec | 后台执行任务及完成通知 | exec/*、input/message；中断与回合边界 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) / [说明](plugins/WorkspaceTools.md) |
-| BranchLine | 父子分支工作的跟踪、输入交接与结果通知 | branch/*、input/*、turn/*、step/tool-* | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) / [说明](plugins/BranchTool.md) |
-| CollaborationTimeline | 跨 Session 协作交接与结算 | collaboration/*、input/*、turn/*、step/* | 产品生成目录 | [实现](../../../crates/dim-app-server/src/collaboration.rs) |
-| ContextPreparation | 准备模型请求与上下文压缩工作 | context/prepare、compaction-*、model/call；失败输出终态 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/context_preparation.rs) / [说明](plugins/ContextPreparation.md) |
-| ContextUsage | 上下文使用量计算与派生结果恢复 | context/*、model/*、input/consumed、step/*、context-usage/* | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/context_usage.rs) / [说明](plugins/ContextUsage.md) |
-| EnvironmentClientsBranch | 把连接客户端环境作为上下文输入发布 | input/message（环境块） | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/environment_clients.rs) |
-| FileReads | 文件读写绑定及其是否仍在模型上下文内 | 查询 context/compaction 与切点位置；不直接写事实 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs) / [说明](plugins/WorkspaceTools.md) |
-| GoalBranch | 目标状态、调度判断与恢复 | goal/state；input、turn、exec、branch 相关事实 | 产品生成目录 | [实现](../../../crates/dim-goal/src/branch.rs) |
-| InputQueue | 输入排队、采用、撤回和删除 | input/*、turn/*、stop/interrupt | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/input_queue.rs) / [说明](plugins/InputQueue.md) |
-| Loop | 回合、模型步骤、工具交接和终态协调 | turn/*、input/consumed、step/*、context/prepare、context/compact | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/agent_loop.rs) / [说明](plugins/Loop.md) |
-| ModelProvider | 模型调用、流式输出和失败结算 | model/call、model/usage、step/*；中断与回合边界 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/model_provider.rs) / [说明](plugins/ModelProvider.md) |
-| Permission | 分支权限策略更新与读取 | permission/changed | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/permission.rs) / [说明](plugins/Permission.md) |
-| Prompt | 提示词配置采用、作用域与业务状态恢复 | prompt/*、context/configured、context/scope、input/message、prompt-state/recovered | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/prompt.rs) / [说明](plugins/Prompt.md) |
-| SessionBroadcast | 把已派发事实转成 Session 对外通知 | Dispatcher 通知；不直接写 Timeline 事实 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/session_broadcast.rs) |
-| SettingsSnapshotBranch | 把执行设置快照作为上下文输入发布 | input/message（设置块） | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/execution_settings/prompt.rs) |
-| ToolBinding | 采用当前工具绑定 | branch/start、branch/resume；查询配置事实 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/tool_binding.rs) / [说明](plugins/ToolExecution.md) |
-| ToolExecutor | 工具调用、资源清理和执行终态 | step/tool-call → tool-start/completed/result；中断与回合边界 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/tool_executor.rs) / [说明](plugins/ToolExecution.md) |
-| TreeTimeline | 执行分支创建、结束命令及结算 | branch/create、branch/end、turn/end；branch 结果事实 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) / [说明](plugins/TimelineTree.md) |
-| WaitBranch | 当前回合内的等待通知与单次等待 | input/message、turn/start、turn/end；不直接写事实 | 产品生成目录 | [实现](../../../crates/dim-agent-capabilities/src/wait.rs) / [说明](plugins/Wait.md) |
-| HooksBranch | 按已消费事实运行 Hooks，采用有效输出 | input/message；读取 input、turn、approval、tool 等触发事实 | 本地装配 | [实现](../../../crates/dim-agent-capabilities/src/hooks/runner.rs) / [说明](plugins/Hooks.md) |
-| ShellSession | 持续 shell 执行、后台任务和完成通知 | exec/*、input/message；读取中断与回合事实 | 可选 shell 插件 | [实现](../../../crates/dim-agent-capabilities/src/shell_session.rs) |
+| 候选部件 | 主要职责 | 主要事件关联 | 实现 / 所属说明 |
+| --- | --- | --- | --- |
+| Approval | 审批请求、响应与未完成请求结算 | approval/*；读取权限状态 | [实现](../../../crates/dim-agent-capabilities/src/approval.rs) / [说明](plugins/Permission.md) |
+| BackgroundExec | 后台执行任务及完成通知 | exec/*、input/message；中断与回合边界 | [实现](../../../crates/dim-agent-capabilities/src/workspace_tools/background.rs) / [说明](plugins/WorkspaceTools.md) |
+| BranchLine | 父子分支工作的跟踪、输入交接与结果通知 | branch/*、input/*、turn/*、step/tool-* | [实现](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) / [说明](plugins/BranchTool.md) |
+| CollaborationTimeline | 跨 Session 协作交接与结算 | collaboration/*、input/*、turn/*、step/* | [实现](../../../crates/dim-app-server/src/collaboration.rs) |
+| ContextPreparation | 准备模型请求与上下文压缩工作 | context/prepare、compaction-*、model/call；失败输出终态 | [实现](../../../crates/dim-agent-capabilities/src/context_preparation.rs) / [说明](plugins/ContextPreparation.md) |
+| ContextUsage | 上下文使用量计算与派生结果恢复 | context/*、model/*、input/consumed、step/*、context-usage/* | [实现](../../../crates/dim-agent-capabilities/src/context_usage.rs) / [说明](plugins/ContextUsage.md) |
+| EnvironmentClientsBranch | 把连接客户端环境作为上下文输入发布 | input/message（环境块） | [实现](../../../crates/dim-agent-capabilities/src/environment_clients.rs) |
+| FileReads | 文件读写绑定及其是否仍在模型上下文内 | 查询 context/compaction 与切点位置；不直接写事实 | [实现](../../../crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs) / [说明](plugins/WorkspaceTools.md) |
+| GoalBranch | 目标状态、调度判断与恢复 | goal/state；input、turn、exec、branch 相关事实 | [实现](../../../crates/dim-goal/src/branch.rs) |
+| InputQueue | 输入排队、采用、撤回和删除 | input/*、turn/*、stop/interrupt | [实现](../../../crates/dim-agent-capabilities/src/input_queue.rs) / [说明](plugins/InputQueue.md) |
+| Loop | 回合、模型步骤、工具交接和终态协调 | turn/*、input/consumed、step/*、context/prepare、context/compact | [实现](../../../crates/dim-agent-capabilities/src/agent_loop.rs) / [说明](plugins/Loop.md) |
+| ModelProvider | 模型调用、流式输出和失败结算 | model/call、model/usage、step/*；中断与回合边界 | [实现](../../../crates/dim-agent-capabilities/src/model_provider.rs) / [说明](plugins/ModelProvider.md) |
+| Permission | 分支权限策略更新与读取 | permission/changed | [实现](../../../crates/dim-agent-capabilities/src/permission.rs) / [说明](plugins/Permission.md) |
+| Prompt | 提示词配置采用、作用域与业务状态恢复 | prompt/*、context/configured、context/scope、input/message、prompt-state/recovered | [实现](../../../crates/dim-agent-capabilities/src/prompt.rs) / [说明](plugins/Prompt.md) |
+| SessionBroadcast | 把已派发事实转成 Session 对外通知 | Dispatcher 通知；不直接写 Timeline 事实 | [实现](../../../crates/dim-agent-capabilities/src/session_broadcast.rs) |
+| SettingsSnapshotBranch | 把执行设置快照作为上下文输入发布 | input/message（设置块） | [实现](../../../crates/dim-agent-capabilities/src/execution_settings/prompt.rs) |
+| ToolBinding | 采用当前工具绑定 | branch/start、branch/resume；查询配置事实 | [实现](../../../crates/dim-agent-capabilities/src/tool_binding.rs) / [说明](plugins/ToolExecution.md) |
+| ToolExecutor | 工具调用、资源清理和执行终态 | step/tool-call → tool-start/completed/result；中断与回合边界 | [实现](../../../crates/dim-agent-capabilities/src/tool_executor.rs) / [说明](plugins/ToolExecution.md) |
+| TreeTimeline | 执行分支创建、结束命令及结算 | branch/create、branch/end、turn/end；branch 结果事实 | [实现](../../../crates/dim-agent-capabilities/src/timeline_tree.rs) / [说明](plugins/TimelineTree.md) |
+| WaitBranch | 当前回合内的等待通知与单次等待 | input/message、turn/start、turn/end；不直接写事实 | [实现](../../../crates/dim-agent-capabilities/src/wait.rs) / [说明](plugins/Wait.md) |
+| HooksBranch | 按已消费事实运行 Hooks，采用有效输出 | input/message；读取 input、turn、approval、tool 等触发事实 | [实现](../../../crates/dim-agent-capabilities/src/hooks/runner.rs) / [说明](plugins/Hooks.md) |
+| ShellSession | 持续 shell 执行、后台任务和完成通知 | exec/*、input/message；读取中断与回合事实 | [实现](../../../crates/dim-agent-capabilities/src/shell_session.rs) |
 
 ## 核心 Timeline 事件（50 个具体 key）
 

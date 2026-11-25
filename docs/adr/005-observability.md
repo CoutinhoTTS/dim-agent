@@ -153,8 +153,7 @@ subscription lifecycle records are not replaced: a failed assembly is returned t
    group, `AgentHost`, the shutdown drain, the compatibility row), prompt (the Trace row, the diagnostics paragraph,
    verification), event-driven flows and interrupt (facts "kept in the Timeline and trace"), ShellInput A11,
    ContextCompaction, auxiliary model item 6, the Trace rows of the design overview, request-delta storage (its
-   citation of trace.md for the final request), the App Server README (shutdown and the test home), their `docs/zh`
-   translations, and the generated graphs.
+   citation of trace.md for the final request), the App Server README (shutdown and the test home), and their `docs/zh` translations.
 3. The Timeline export (D3): design document, then implementation. Evaluation depends on this step, not on step 2.
 
 Step 2 does not wait for step 3. No client in this repository enables the archive, but the public

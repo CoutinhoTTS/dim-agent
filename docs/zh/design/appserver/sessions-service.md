@@ -552,8 +552,7 @@ S1 合入后在 [#98](https://github.com/arcships/dim/pull/98) 上实现，`sess
 1. 完成。在 Agents 负责线中实现类型与七个 `AgentIndex` 方法（附录 A）。
 2. 完成。目录部分提供 `sessions`；App Server `lib.rs` 注册 `register_shared("sessions")`（装配负责线中的一行）。
 3. 完成。查找属于分支（`Session::lookup`，§6.3）；`sessions.lookup` 与 Rpc 的 `session.input_lookup` 都调用它。
-4. 完成。`xtask graph` 记录了新模块与 `sessions` 绑定；`xtask check` 通过。
-5. 完成。`sessions.delete` 转交给 S5c 的 `AgentIndex::delete`（[#97](https://github.com/arcships/dim/pull/97)），A.1 中有它的行（§6.8）。
+4. 完成。`sessions.delete` 转交给 S5c 的 `AgentIndex::delete`（[#97](https://github.com/arcships/dim/pull/97)），A.1 中有它的行（§6.8）。
 
 流程测试在 [transport_flow/sessions.rs](../../../../crates/dim-app-server/tests/transport_flow/sessions.rs)。`serve` 不接受额外的进程行，因此由一个测试 Session 部分按名称注入 `sessions`（`Keyed<dyn HostDispatch>`，与 `plugin_files_flow` 相同），测试再调用它，从而走语言中立路径。计划中的用例对应如下：
 

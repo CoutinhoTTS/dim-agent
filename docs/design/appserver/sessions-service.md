@@ -795,8 +795,7 @@ was stubbed (roadmap §3.6).
    in the assembly lane).
 3. Done. Lookup is the branch's (`Session::lookup`, §6.3); `sessions.lookup` and Rpc's `session.input_lookup` both
    call it.
-4. Done. `xtask graph` records the new module and the `sessions` binding; `xtask check` passes.
-5. Done. `sessions.delete` forwards to S5c's `AgentIndex::delete` ([#97](https://github.com/arcships/dim/pull/97))
+4. Done. `sessions.delete` forwards to S5c's `AgentIndex::delete` ([#97](https://github.com/arcships/dim/pull/97))
    and has its row in A.1 (§6.8).
 
 The flow tests are in

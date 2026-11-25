@@ -88,15 +88,6 @@ task, mutex, lifecycle phase or protocol field is needed.
 `custom_preparation_keeps_none_empty_and_filtered_declarations`,
 `tool_updates_wait_for_branch_activation_and_do_not_run_after_failed_assembly`.
 
-<!-- generated:plugin ToolBinding — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:Prompt`、`B:Timeline`、`S:ToolRegistry` |
-| 提供 | `B:ToolBinding` |
-| 被注入于 | `Loop`、`ToolExecutor` |
-<!-- /generated -->
-
 ## ToolExecutor
 
 Owner: [tool_executor.rs](../../../../crates/dim-agent-capabilities/src/tool_executor.rs).
@@ -212,14 +203,6 @@ effect before it retries, and reports the work neither as done nor as never run.
 [review_flows.rs](../../../../crates/dim-agent-capabilities/tests/review_flows.rs):
 `one_tool_panic_does_not_abandon_other_native_cleanup_or_reorder_actual_results`.
 
-<!-- generated:plugin ToolExecutor — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Approval`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`B:ToolBinding` |
-| 提供 | `B:ToolExecutor` |
-| 被注入于 | — |
-<!-- /generated -->
 
 ToolBinding reads the latest `context/configured` settings at a fixed chain head
 when adopting tools; it does not project the conversation to find that configuration.

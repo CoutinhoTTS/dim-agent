@@ -309,7 +309,7 @@ do not claim isolation from the hung module-load residual in §2.1.
    Rpc; verify admitted `report` and `drain` calls settle on original-owner and
    Rpc reload before the foreign cleanup finishes, including client disconnect.
 
-Use disposable homes. Run `xtask check` / `graph` when assembly implementation
+Use disposable homes. Run `xtask check` when assembly implementation
 changes, the affected strict TypeScript and native Node flows, and the repository
 merge checks for the implementation. Executable acceptance lives in the
 [process transport flows](../../crates/dim-app-server/tests/transport_flow/process_typescript.rs);

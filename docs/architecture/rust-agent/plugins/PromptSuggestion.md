@@ -51,12 +51,3 @@ generation memory, never rebuilt.
 
 Logs carry the turn id, the reason code and counts, never the text or the
 conversation.
-
-<!-- generated:plugin PromptSuggestion — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:ModelHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:SessionMethods`、`S:TreeCommands` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->

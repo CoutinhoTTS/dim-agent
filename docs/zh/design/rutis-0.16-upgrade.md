@@ -236,8 +236,7 @@ tokio::select! {
 1. `./dev check`
 2. `cargo clippy --workspace --all-targets --locked -- -D warnings`
 3. `cargo test --workspace --locked`
-4. `cargo run --locked -p xtask -- check` 与 `graph`。装配与 crate 依赖不变，因此快照不应变动；
-   出现 diff 说明这次升级改到了不该改的地方
+4. `cargo run --locked -p xtask -- check`。本次升级保留装配和 crate 依赖边界。
 5. `node --test scripts/*.test.mjs`
 6. 按 CI 的方式运行 Node 绑定，包括 `runtime/plugin-sdk.test.mjs`、插件测试、`tsc` 检查与
    `git diff --exit-code -- npm/branch-services.d.ts`

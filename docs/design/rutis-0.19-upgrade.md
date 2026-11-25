@@ -336,8 +336,6 @@ rutis-loader, so its key cannot be isolated, and a second loader in one host fai
     `RecoveryHosts`, `AimuxPlugin`, `ConfiguredModelsPlugin` and others. In `xtask` they are
     `AimuxPlugin` and `ConfiguredModelsPlugin` for `--model-config`, and `FileStoragePlugin` and
     `GraphPlatform` for the local graph.
-  - `xtask`'s graphs keep their scopes. The plugins that move become rows of the host's loader, so the
-    local graph's process subgraph lists them as such (§6).
   - Host plugins that a test mounts or unloads while the Agent runs (`EnableContributor` in
     `tests/integration/tests/tool_binding.rs`) become rows it adds to and removes from the minimal
     host's loader.
@@ -441,22 +439,14 @@ daemon root (LocalId dim-daemon)                 dimcode leaf root
   protocol and `ui.open`'s reply changed. Tui §3.6's existing fallback keeps the direct TUI for an old
   CLI with a new daemon, and for a new CLI with an old daemon.
 - **What the link carries** (the [Tui §8](plugins/Tui.md#8-security) update):
-  - **The rule.** The session exports every process-group name that crosses languages. The
-    [generated catalog](../architecture/rust-agent/generated/catalog.md) lists them, and the installed
-    foreign process rows add the names they provide.
-  - **Today's set.**
-    - `auxiliaryModel`, `managementMethods`, `partRegistry`, `pluginFiles`, `sessionMetadata`,
-      `sessionPermissions`, `settings`, `workflowFiles`;
-    - `sessions`, whose methods `launch`, `input`, `lookup`, `history`, `withdraw`, `stop`, `idle` and
-      `delete` act on Sessions;
-    - the enabled Scheduler's `scheduleJobs` and `wakeups`, and optional Workflow's `workflowRuns`.
+  - **The rule.** The session exports every process-group name that crosses languages, including services provided by installed foreign process rows.
   - **What the leaf could therefore do.** It could act on any Session, register management methods,
     and register Session parts whose copies run in the leaf.
   - **Why this is accepted.** The leaf is reached only through a private address that a local
     `ui.open` caller names. That caller already holds a local protocol v3 connection on `daemon.sock`,
     which reaches the same Sessions and management methods. Its `Tui` uses protocol v3 only. The
     trust boundary stays the local user ([ADR 003](../adr/003-approval-scope.md); AGENTS rule 11).
-  - **The Tui §8 rewrite.** §8 is rewritten around this set, and its sentence "The leaf link exposes
+  - **The Tui §8 rewrite.** §8 states the export rule, and its sentence "The leaf link exposes
     no Session or management method" goes.
   - These services are not isolated from the leaf, although rutis's guidance for a service a far end
     should not see is `isolate` on the providing row. They are Dim's shared cross-language services,
@@ -543,7 +533,7 @@ in one pull request. Each step is its own commit.
 
 | Step | Work | Gate |
 | --- | --- | --- |
-| 0 (own pull request, on 0.17.1) | M6: one placement API, the minimal host, and the 41 files moved to it | `cargo test --workspace --locked`; `xtask check` and `graph` with the step 0 graph diff of §6; the placement checks of §6 |
+| 0 (own pull request, on 0.17.1) | M6: one placement API, the minimal host, and the 41 files moved to it | `cargo test --workspace --locked`; `xtask check`; the placement checks of §6 |
 | 1 | Pins and lock files (M1), to 0.19.3; the authoring pin | `cargo metadata` resolves; the lock files name 0.19.3 |
 | 2 | Kernel and catalog: M2, M3 | The tests of the crates below `dim-app-server` and of `tests/integration` (`extensions.rs` follows in step 3); the Timeline `before` checks of §6 |
 | 3 | Runtimes: M4, M5, M9 | Node- and Python-backed flow tests of the App Server and `tests/integration` |
@@ -558,18 +548,9 @@ The checks `.github/workflows/ci.yml` runs, at the workspace root, in its order:
 1. `cargo deny --locked check advisories licenses` (the dependencies job)
 2. `cargo build --workspace --locked`, `cargo fmt --all -- --check`,
    `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`
-3. `cargo run --locked -p xtask -- check`, then `graph`. `check` also fails on a stale
-   `npm/branch-services.d.ts`. The committed graphs come from the mock, local and App Server
-   assemblies. None of them starts a language runtime, so M4's removed rows never appear in them. The
-   expected diff of each pull request:
-   - Step 0 (M6):
-     - `generated/services.json` and `generated/app-server/` are expected not to move;
-     - in `generated/local/`, `FileStorage` and `HostPlatform` move from the root to rows of the
-       host's loader;
-     - the generated blocks of the plugin pages regenerate with it.
-   - The upgrade: only fibers that rutis 0.19 itself adds.
-
-   Each pull request records its measured diff and explains every change against this list.
+3. `cargo run --locked -p xtask -- check`, including the `npm/branch-services.d.ts` freshness check.
+   M6 moves `FileStorage` and `HostPlatform` into the host loader of the local profile.
+   The mock and App Server profiles keep their placements. The upgrade adds only rutis 0.19 fibers.
 4. `node --test scripts/*.test.mjs`
 5. The actual CLI profiles: `cargo test --locked -p dimcode --test cli_flow -- --ignored`, with
    `DIM_TEST_APP_SERVER` and `DIM_TEST_NPM_WRAPPER`
@@ -663,8 +644,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
   the [plugin pages index](../architecture/rust-agent/plugins/README.md) and the
   [architecture overview](../architecture/README.md): 0.17 references and the runtime and leaf
   mechanisms.
-- The `docs/zh/` counterparts where they exist. The generated pages under
-  `docs/architecture/rust-agent/generated/` change only through `xtask graph`.
+- The `docs/zh/` counterparts where they exist.
 
 ## 8. Risks
 
@@ -675,7 +655,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
 | Installed plugins reach exported services and `rutis/loader` | Accepted: they are trusted code (rule 11); `rutis/loader` cannot add or remove rows without an editable layer (M5) |
 | A leaf starts its session but its `Tui` never attaches | Closed after `START`; a replacement keeps the old interface until the new one attaches (M8) |
 | A host gets a second loader | M6: a loader is per host and an Agent never creates one; the App Server and each minimal host hold one |
-| Moving 159 calls changes what a test or a graph checks | Each moved test keeps its assertions; M6 lands alone on 0.17.1, so its diff carries no upgrade change; §6 states its expected graph diff |
+| Moving 159 calls changes what a test or a graph checks | Each moved test keeps its assertions; M6 lands alone on 0.17.1, so its diff carries no upgrade change; §6 identifies the affected placements |
 | #645 lands | It landed after the upgrade, on the published `Loader::instance_rows` of 0.19.2 and with no behavior change, so it conflicts with neither the pins nor this upgrade; the instance rows it reads go when #684 lands (§3) |
 | rutis prints into the TUI's terminal | M7's sink; rutis-bridge's own `eprintln!` when a session cannot run plugins is covered by the terminal check |
 | TypeScript plugin configurations that did not match their schema now fail | The plugin tests and the Node-backed flows run with the shipped configurations |

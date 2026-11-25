@@ -39,9 +39,7 @@ test('documentation and non-code repository metadata need no build group',()=>{
 });
 
 test('documents that code reads keep their checks',()=>{
-  assert.deepEqual(classify(['docs/architecture/rust-agent/plugins/goal.md']),only('static'));
-  assert.deepEqual(classify(['docs/architecture/rust-agent/generated/crates.mmd']),only('static'));
-  assert.deepEqual(classify(['docs/architecture/rust-agent/generated/catalog.md']),only('xtask'));
+  assert.deepEqual(classify(['docs/architecture/rust-agent/plugins/ModelProvider.md']),only('xtask'));
   assert.deepEqual(classify(['docs/design/appserver/native-storage-format.md']),only('rust'));
   assert.deepEqual(classify(['docs/architecture/tui-e2e.md']),only('scripts'));
   assert.deepEqual(classify(['docs/design/plugins/EventHub.md']),only('rust'));
@@ -186,13 +184,13 @@ test('main push checks use the whole push range in a shallow checkout',{skip:!ha
   git(checkout,'commit','-q','-m','skill doc');
   assert.deepEqual(runSelector(checkout,'push',head),only(),'non-code metadata pushes skip all build groups');
 
-  const generatedBase=git(checkout,'rev-parse','HEAD').trim();
-  const generated=path.join(checkout,'docs/architecture/rust-agent/generated');
-  mkdirSync(generated,{recursive:true});
-  writeFileSync(path.join(generated,'catalog.md'),'# Catalog\n');
+  const pluginBase=git(checkout,'rev-parse','HEAD').trim();
+  const plugins=path.join(checkout,'docs/architecture/rust-agent/plugins');
+  mkdirSync(plugins,{recursive:true});
+  writeFileSync(path.join(plugins,'ModelProvider.md'),'# ModelProvider\n');
   git(checkout,'add','-A');
-  git(checkout,'commit','-q','-m','generated architecture');
-  assert.deepEqual(runSelector(checkout,'push',generatedBase),only(...groups),'checked architecture documents keep the full main run');
+  git(checkout,'commit','-q','-m','document the model provider plugin');
+  assert.deepEqual(runSelector(checkout,'push',pluginBase),only(...groups),'checked architecture documents keep the full main run');
 
   const clientBase=git(checkout,'rev-parse','HEAD').trim();
   mkdirSync(path.join(checkout,'crates/dim-client/src'),{recursive:true});

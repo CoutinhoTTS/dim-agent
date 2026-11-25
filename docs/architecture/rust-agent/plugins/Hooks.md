@@ -12,8 +12,7 @@ points. The configuration owner,
 HooksSettings, is an App Server plugin: it registers the `hooks`,
 `hooks-projects` and `hooks-plugins` Settings sources, the `hooks.*` management
 methods, the `P:HooksService` that PluginManager's owner operations call, and
-the `HookSources` Session part that binds `S:HookSourcesHost`. Their assembly
-is in the generated App Server services page.
+the `HookSources` Session part that binds `S:HookSourcesHost`.
 
 A plugin's document is registered through `P:HooksService`, kept as the
 `{dir, hooks}` entry of `hooks-plugins` and read after the user's and the
@@ -64,15 +63,6 @@ cancellation token terminates its process tree on close.
 | `S:SessionConfig` | Pass the working directory, permission and collaboration-role facts to the payload. |
 | `S:SessionIdentity` | Name the Session in the payload and `DIM_SESSION_ID`. |
 | `S:SubmitChecks` | Register `hooks`, the `UserPromptSubmit` check the operator-input entries call. |
-
-<!-- generated:plugin HooksSession — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:HookSourcesHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SubmitChecks` |
-| 提供 | `S:HooksRuntime` |
-| 被注入于 | `HooksBranch` |
-<!-- /generated -->
 
 ## HooksBranch
 
@@ -155,15 +145,6 @@ compacted context baseline.
 | `B:Dispatcher` | Follow the events that open each hook point. |
 | `B:Timeline` | Query the specific facts each hook point needs and append output. |
 | `S:ToolRegistry` | Read a tool's declaration for its matcher alias when the branch adopted no tool part. |
-
-<!-- generated:plugin HooksBranch — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Approval`、`B:BranchLifecycle`、`B:Dispatcher`、`B:Permission`、`B:Timeline`、`B:TimelineIdentity`、`S:HooksRuntime`、`S:ToolRegistry` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->
 
 ## Diagnostics
 

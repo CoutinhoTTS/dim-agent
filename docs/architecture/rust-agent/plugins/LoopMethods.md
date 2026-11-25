@@ -11,12 +11,3 @@ It owns no persistent state, background worker, events or services. Reads end wi
 | --- | --- |
 | `S:TreeCommands` | Query the requested branch at its published cutoff. |
 | `S:SessionMethods` | Register the read entry. |
-
-<!-- generated:plugin LoopMethods — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:SessionMethods`、`S:TreeCommands` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->
