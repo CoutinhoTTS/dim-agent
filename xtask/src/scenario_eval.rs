@@ -11683,6 +11683,11 @@ mod tests {
                 vec![receipt("2", "f2"), receipt("3", "f3")],
                 [missing_note(), unconsumed()].concat(),
             ),
+            (
+                "the cap left the earlier receipt unconsumed",
+                vec![receipt("3", "f3"), receipt("2", "f2")],
+                [unconsumed(), missing_note()].concat(),
+            ),
         ];
         for (case, inputs, export) in cases {
             let export = export
