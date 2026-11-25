@@ -951,11 +951,1040 @@ impl Worker {
 mod tests {
     use super::*;
     use crate::client::Message;
+    use crate::model::view::ViewSnapshot;
 
-    /// A page that left earlier content out reports it only after the
-    /// snapshot that carries the page. The interface drains both updates
-    /// before it paints, so the order is the worker's to keep, not the
-    /// interface's to observe.
+    /// One `step/text` event, as the daemon sends it on the wire and in a page.
+    fn text(sequence: u64, request: &str, delta: &str) -> serde_json::Value {
+        json!({
+            "id": format!("text-{sequence}"), "sequence": sequence, "create_at": 2000,
+            "type": "step", "name": "text",
+            "data": {"turn_id": "t2", "request_id": request, "delta": delta}
+        })
+    }
+
+    /// The same event, decoded as the live stream decodes it.
+    fn event(sequence: u64, request: &str, delta: &str) -> Event {
+        serde_json::from_value(text(sequence, request, delta)).expect("a text event")
+    }
+
+    /// One user message, as the daemon sends it on the wire and in a page.
+    fn said(sequence: u64, message: &str) -> serde_json::Value {
+        json!({
+            "id": format!("in-{sequence}"), "sequence": sequence, "create_at": 2000,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [{"type": "text", "text": message}]}}
+        })
+    }
+
+    /// The withdrawal of `input`, as the daemon sends it on the wire and in a page.
+    fn input_deleted(sequence: u64, input: &str) -> serde_json::Value {
+        json!({
+            "id": format!("deleted-{sequence}"), "sequence": sequence, "create_at": 2000,
+            "type": "input", "name": "deleted", "data": {"input_id": input}
+        })
+    }
+
+    /// The creation of `branch` in `parent`'s history, cut after `at`.
+    fn line_created(sequence: u64, branch: &str, at: u64) -> serde_json::Value {
+        json!({
+            "id": format!("create-{branch}"), "sequence": sequence, "create_at": 2000,
+            "type": "branch", "name": "create",
+            "data": {
+                "branch": branch, "at": {"kind": "sequence", "sequence": at},
+                "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                "prompt": branch,
+            }
+        })
+    }
+
+    /// The same `input` or `branch` event, decoded as the live stream decodes it.
+    fn tell(event: serde_json::Value) -> Event {
+        serde_json::from_value(event).expect("a Session event")
+    }
+
+    /// The line `id` of the Session's line list.
+    fn listed(worker: &Worker, id: &str) -> crate::model::view::LineView {
+        worker
+            .projection
+            .line_views()
+            .iter()
+            .find(|line| line.id == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("line {id} is listed"))
+    }
+
+    /// Answers the outstanding history read with the daemon's failure.
+    async fn fail(worker: &mut Worker, what: &str) {
+        let id = worker
+            .task_history_request
+            .as_ref()
+            .unwrap_or_else(|| panic!("{what} was sent"))
+            .id;
+        worker
+            .message(Message::Response {
+                id,
+                result: Err(client::RpcError {
+                    code: -32603,
+                    message: "the daemon dropped the read".into(),
+                    data: None,
+                }),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// Answers the outstanding history read with a page.
+    async fn answer(worker: &mut Worker, page: serde_json::Value) {
+        let id = worker
+            .task_history_request
+            .as_ref()
+            .expect("the read in flight")
+            .id;
+        worker
+            .message(Message::Response {
+                id,
+                result: Ok(page),
+            })
+            .await
+            .unwrap();
+    }
+
+    /// A `branch/create-failed` event for `branch`, as the daemon sends it.
+    fn create_failed(sequence: u64, branch: &str) -> Event {
+        serde_json::from_value(create_failed_page(sequence, branch)).expect("a create-failed event")
+    }
+
+    /// The wire form of [`create_failed`], for a page that records it.
+    fn create_failed_page(sequence: u64, branch: &str) -> serde_json::Value {
+        json!({
+            "id": format!("create-failed-{sequence}"),
+            "sequence": sequence,
+            "create_at": 2000,
+            "type": "branch",
+            "name": "create-failed",
+            "data": {
+                "status": "failed", "branch": branch,
+                "createEvent": sequence - 1, "error": "creation refused"
+            }
+        })
+    }
+
+    /// A client whose daemon answered hello and then hung up: the next request
+    /// fails where it is written, before any reply exists.
+    async fn hung_up_client() -> Client {
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let home = tempfile::tempdir().unwrap();
+        let endpoint = home.path().join("daemon.sock");
+        let listener = tokio::net::UnixListener::bind(&endpoint).unwrap();
+        std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (hung_up, wait) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let _home = home;
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                return;
+            }
+            let Ok(request) = serde_json::from_str::<serde_json::Value>(&line) else {
+                return;
+            };
+            let mut socket = reader.into_inner();
+            let reply = json!({"jsonrpc":"2.0","id":request["id"],"result":{
+                "instanceId":"hung-up-test","serverVersion":"test","protocolVersion":4,
+                "features":["session.create","session.history","session.history.latestTurn"],
+                "daemonProfile":{"kind":"product"}
+            }});
+            if socket
+                .write_all(format!("{reply}\n").as_bytes())
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let _ = socket.shutdown().await;
+            drop(socket);
+            let _ = hung_up.send(());
+        });
+        let client = Client::connect(&dim_client::ConnectionConfig {
+            endpoint,
+            server: dim_client::Server {
+                program: std::env::current_exe().unwrap(),
+                embedded: false,
+            },
+            profile: None,
+            client_kind: "cli",
+            client_name: "dim-cli-test",
+            protocol_version: 4,
+        })
+        .await
+        .unwrap();
+        wait.await.unwrap();
+        client
+    }
+
+    /// A branch whose earlier read failed reports `Unread` and reads again on
+    /// the next press. A failure that kept the read recorded as in flight makes
+    /// `earlier_view` report `Reading` with nothing sent, and `earlier` returns
+    /// at its own state: PageUp, the load-more row and `/earlier` never read
+    /// that line again.
+    #[tokio::test]
+    async fn a_failed_earlier_read_returns_the_branch_to_unread_and_reads_again() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("main");
+        let history = worker.task_history.get_mut("main").unwrap();
+        history.done = true;
+        history.window.before = Some(7);
+        history.window.through = Some(9);
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::Unread,
+            "the loaded window has older history"
+        );
+
+        worker.earlier("main");
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::Reading,
+            "the earlier read is in flight"
+        );
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the earlier read").await;
+
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::Unread,
+            "a failed earlier read leaves the older history to read"
+        );
+        worker.earlier("main");
+        assert_eq!(
+            worker.task_history["main"].earlier,
+            EarlierRead::Reading,
+            "the next press records another earlier read"
+        );
+        assert!(
+            worker.task_history_queue.contains(&"main".to_owned()),
+            "the next press queues a read"
+        );
+    }
+
+    /// A `/tasks` retry of a failed earlier read reads the same older request
+    /// the window still holds, and the rows it brings go ahead of the ones
+    /// already loaded. A retry that records no earlier read folds the page as a
+    /// first window instead: every event in it is at or below the line's
+    /// cutoff, so none of them reach the transcript.
+    #[tokio::test]
+    async fn a_retried_earlier_read_prepends_the_rows_it_reads() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        {
+            let history = worker.task_history.get_mut("b-7c").unwrap();
+            history.done = true;
+            history.window.before = Some(200);
+            history.window.through = Some(300);
+        }
+        worker.apply("b-7c", event(300, "r-loaded", "the answer loaded first"));
+
+        worker.earlier("b-7c");
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the earlier read").await;
+
+        worker
+            .command(crate::model::session::Command::TaskHistory {
+                projection_id: worker.projection_id,
+            })
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            worker.task_history_request.is_some(),
+            "the retried read is in flight"
+        );
+        assert_eq!(
+            worker.task_history["b-7c"].window.before,
+            Some(200),
+            "the retry is the older request the window still holds"
+        );
+        worker.task_history_queue.clear();
+        let older: Vec<_> = (2..=101)
+            .map(|sequence| text(sequence, &format!("r-older-{sequence}"), "older "))
+            .collect();
+        answer(
+            &mut worker,
+            json!({"events": older, "through": 300, "nextBefore": 2, "nextAfter": 101}),
+        )
+        .await;
+
+        let rows = worker.lines["b-7c"].projection.rows();
+        assert_eq!(rows.len(), 101, "every row of the page joined the line");
+        assert_eq!(
+            rows[0].text, "older ",
+            "the page's first row is ahead of everything loaded"
+        );
+        assert_eq!(
+            rows[100].text, "the answer loaded first",
+            "the loaded rows follow the older page"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7c".to_owned()),
+            "the page was an older page, not a first window"
+        );
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::Unread,
+            "the window still starts after the event before the page"
+        );
+        assert_eq!(
+            worker.task_history["b-7c"].window.before,
+            Some(2),
+            "the window holds the older request the page ended at"
+        );
+    }
+
+    /// A branch that ends while its older page is in flight does not finish
+    /// its window on that page: the page is history the window has not read
+    /// yet, not the branch's first window. Only a reply that answered no
+    /// earlier read finishes an ended branch.
+    #[tokio::test]
+    async fn an_ended_branch_does_not_finish_on_an_earlier_page() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        {
+            let history = worker.task_history.get_mut("b-7c").unwrap();
+            history.done = true;
+            history.window.before = Some(200);
+            history.window.through = Some(300);
+        }
+        worker.earlier("b-7c");
+        worker.poll_task_history().await.unwrap();
+        {
+            let history = worker.task_history.get_mut("b-7c").unwrap();
+            history.done = false;
+            history.ended = true;
+        }
+        let older: Vec<_> = (2..=101)
+            .map(|sequence| text(sequence, &format!("r-older-{sequence}"), "older "))
+            .collect();
+        answer(
+            &mut worker,
+            json!({"events": older, "through": 300, "nextBefore": 2, "nextAfter": 101}),
+        )
+        .await;
+
+        assert!(
+            !worker.task_history["b-7c"].done,
+            "an earlier page leaves the ended branch's window unfinished"
+        );
+        assert_eq!(
+            worker.task_history["b-7c"].earlier,
+            EarlierRead::None,
+            "the earlier page settled the read it answered"
+        );
+    }
+
+    /// Opening a branch's line after its earlier read failed starts the line
+    /// over: the window that read was asked for is gone with the reset. A
+    /// failure left in place outlives the window it belonged to, and a retry
+    /// from the tasks panel then folds the line's first window as an older
+    /// page, which prepends rows below the cutoff and never reads it on.
+    #[tokio::test]
+    async fn a_line_opened_after_a_failed_earlier_read_records_no_read() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("b-7c");
+        {
+            let history = worker.task_history.get_mut("b-7c").unwrap();
+            history.done = true;
+            history.window.before = Some(7);
+            history.window.through = Some(9);
+            history.earlier = EarlierRead::Failed;
+        }
+
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            worker.task_history["b-7c"].earlier,
+            EarlierRead::None,
+            "the line starts over, so nothing earlier is recorded against it"
+        );
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::AtStart,
+            "the line's window starts from nothing, so it reports its start"
+        );
+    }
+
+    /// A retried earlier read is an earlier read again: the line reports
+    /// `Reading` while it is in flight, and a press during it queues nothing.
+    #[tokio::test]
+    async fn a_tasks_retry_of_an_earlier_read_reports_reading() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.before = Some(7);
+            history.window.through = Some(9);
+        }
+        worker.earlier("main");
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the earlier read").await;
+
+        worker
+            .command(crate::model::session::Command::TaskHistory {
+                projection_id: worker.projection_id,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::Reading,
+            "the retried read is the earlier read the window still holds"
+        );
+        worker.task_history_queue.clear();
+        worker.earlier("main");
+        assert!(
+            worker.task_history_queue.is_empty(),
+            "a press during the retried read queues nothing"
+        );
+    }
+
+    /// A request that fails on the transport, before any reply exists, lands a
+    /// first window in its failed state: the line shows the failure instead of
+    /// staying blank and nothing reads it again on its own.
+    #[tokio::test]
+    async fn a_failed_window_send_lands_the_line_in_the_error_state() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("main");
+        worker.client = hung_up_client().await;
+
+        worker.poll_task_history().await.unwrap();
+
+        let history = &worker.task_history["main"];
+        assert!(
+            history.window_error.is_some(),
+            "a window that could not be sent is a failed window: {:?}",
+            history.error
+        );
+        assert!(!history.window_complete, "the window did not read");
+        assert!(
+            worker.task_history_request.is_none(),
+            "no read is in flight"
+        );
+        assert!(
+            !worker.task_history_queue.iter().any(|id| id == "main"),
+            "the failed window is not read again on its own"
+        );
+
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.window_error.is_some(),
+            "the failed window is published, not left loading"
+        );
+        assert!(!snapshot.history_complete, "the window did not load");
+    }
+
+    /// A first window that failed is not kept as the line's failure once its
+    /// creation fails: the creation settles the line and `/tasks` no longer
+    /// lists the read error, so a stale read failure would be all the line
+    /// still showed.
+    #[tokio::test]
+    async fn a_create_failure_clears_a_failed_window() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        fail(&mut worker, "the line's window").await;
+        assert!(worker.task_history["b-7c"].window_error.is_some());
+
+        worker.task_event("b-7c", create_failed(400, "b-7c"));
+
+        let history = &worker.task_history["b-7c"];
+        assert!(history.done, "the failed creation settled the line");
+        assert!(
+            history.error.is_none(),
+            "the tasks panel no longer lists it"
+        );
+        assert!(
+            history.window_error.is_none(),
+            "the line does not keep the read failure of a window it will never read"
+        );
+        assert!(
+            !history.window_complete,
+            "the failed creation read no window"
+        );
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        assert!(
+            snapshot.window_error.is_none(),
+            "the settled line publishes no read failure"
+        );
+    }
+
+    fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {
+        let mut snapshot = None;
+        while let Ok(update) = receiver.try_recv() {
+            if let Update::Snapshot(state) = update {
+                snapshot = Some(*state);
+            }
+        }
+        snapshot.expect("a published snapshot")
+    }
+
+    /// A line's own window can start after its start. The lines it opened show
+    /// no count then, and the earlier page that reaches the start fills it in.
+    #[tokio::test]
+    async fn an_earlier_page_of_a_line_counts_the_lines_it_opened() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+        assert_eq!(
+            listed(&worker, "b-7c").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 2,
+                messages: 1,
+            }),
+            "the line b-7c is cut after main's first message"
+        );
+
+        worker.task_history_queue.clear();
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(10, "carry on"), line_created(12, "b-90", 10)],
+                "through": 12, "nextBefore": 10, "nextAfter": 12,
+            }),
+        )
+        .await;
+        worker.task_history_queue.clear();
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the line's window starts after its start, so the cut counts nothing"
+        );
+
+        worker.earlier("b-7c");
+        assert_eq!(worker.earlier_view(), Earlier::Reading);
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(5, "the first ask")],
+                "through": 12, "nextBefore": 1, "nextAfter": 5,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "the earlier page reaches the line's start and the cut counts every message"
+        );
+    }
+
+    /// The directory's row for `branch`, a line of `parent` cut at `at`.
+    fn listed_line(branch: &str, parent: &str, at: u64) -> dim_client::wire::BranchEntry {
+        dim_client::wire::BranchEntry {
+            purpose: Some(branch.into()),
+            cut_messages: None,
+            end: None,
+            branch_id: branch.into(),
+            parent_branch_id: Some(parent.into()),
+            branch_point: Some(at),
+            state: "open".into(),
+            head: 0,
+        }
+    }
+
+    /// A Session whose main history is whole and cut `b-7c` after its first
+    /// message, and a `session.turn.get` read that moved the Session cursor to
+    /// the head of `b-7c` without replaying an event of its history. `b-90` was
+    /// created before this attachment read `b-7c`, so only the directory lists it.
+    async fn a_line_discovered_through_its_cut(worker: &mut Worker) {
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+        worker.projection.directory(&listed_line("b-7c", "main", 2));
+        worker
+            .projection
+            .directory(&listed_line("b-90", "b-7c", 10));
+
+        worker.task_history_queue.clear();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        answer(
+            worker,
+            json!({"branchId":"b-7c","through":12,"turn":null,"output":null}),
+        )
+        .await;
+        worker.task_history_queue.clear();
+        worker.finish_window("b-7c");
+        assert_eq!(
+            worker.cursors.get("b-7c"),
+            Some(&12),
+            "the finished cut read left the Session cursor at the line's head"
+        );
+    }
+
+    /// Opens `branch` and answers the first page its history read asks for.
+    async fn open_line(worker: &mut Worker, branch: &str, page: serde_json::Value) {
+        worker.task_history_queue.clear();
+        worker
+            .command(crate::model::session::Command::FocusLine(branch.into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        answer(worker, page).await;
+        worker.task_history_queue.clear();
+    }
+
+    /// A cut read moves the Session cursor to a line's head without replaying
+    /// its events. Opening the line replays its history below that cursor, and
+    /// the line list must still count it: the child the line created before this
+    /// attachment, and the child it opens afterwards, show the count of the
+    /// whole prefix, and the same page again counts nothing twice.
+    #[tokio::test]
+    async fn opening_a_line_counts_the_history_the_cursor_passed() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut worker).await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the cut read leaves the line's child without a count"
+        );
+
+        open_line(
+            &mut worker,
+            "b-7c",
+            json!({
+                "events": [
+                    said(5, "the first ask"),
+                    said(10, "carry on"),
+                    line_created(12, "b-90", 10),
+                ],
+                "through": 12, "nextBefore": 1, "nextAfter": 12,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "opening the line counts the child it created before the window"
+        );
+
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        worker.apply("b-7c", tell(said(13, "next ask")));
+        worker.apply("b-7c", tell(line_created(15, "b-91", 14)));
+        assert_eq!(
+            listed(&worker, "b-91").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 14,
+                messages: 4,
+            }),
+            "the line counts every message it holds when it opens a child"
+        );
+
+        for event in [
+            said(5, "the first ask"),
+            said(10, "carry on"),
+            line_created(12, "b-90", 10),
+        ] {
+            worker.replay("b-7c", tell(event));
+        }
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "the same page again counts nothing twice"
+        );
+    }
+
+    /// A line opened before its history reaches its start shows no count for the
+    /// lines it opened, not a smaller one; the earlier page that reaches the
+    /// start completes the count.
+    #[tokio::test]
+    async fn a_line_opened_before_its_start_counts_after_the_earlier_page() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut worker).await;
+        open_line(
+            &mut worker,
+            "b-7c",
+            json!({
+                "events": [said(10, "carry on"), line_created(12, "b-90", 10)],
+                "through": 12, "nextBefore": 10, "nextAfter": 12,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the window starts after the line's own start, so its cut counts nothing"
+        );
+
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        worker.earlier("b-7c");
+        assert_eq!(worker.earlier_view(), Earlier::Reading);
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(4, "the first ask")],
+                "through": 12, "nextBefore": 1, "nextAfter": 4,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "the earlier page reaches the start and counts what the cut inherits"
+        );
+    }
+
+    /// The line list counts the same whichever of a line's open page and an
+    /// earlier page arrives first, and counts nothing twice.
+    #[tokio::test]
+    async fn a_line_counts_the_same_whichever_page_arrives_first() {
+        let page = || {
+            json!({
+                "events": [
+                    said(4, "the first ask"),
+                    said(10, "carry on"),
+                    line_created(12, "b-90", 10),
+                ],
+                "through": 12, "nextBefore": 1, "nextAfter": 12,
+            })
+        };
+
+        let (mut earlier_first, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut earlier_first).await;
+        earlier_first
+            .projection
+            .line_event("b-7c", &tell(said(4, "the first ask")));
+        open_line(&mut earlier_first, "b-7c", page()).await;
+        assert_eq!(
+            listed(&earlier_first, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "a page read earlier counts once when the open page repeats it"
+        );
+
+        let (mut open_first, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut open_first).await;
+        open_line(&mut open_first, "b-7c", page()).await;
+        open_first
+            .projection
+            .line_event("b-7c", &tell(said(4, "the first ask")));
+        assert_eq!(
+            listed(&open_first, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 3,
+            }),
+            "an earlier page that repeats the open page counts nothing twice"
+        );
+    }
+
+    /// The open page carries the withdrawal and a cut after it while the
+    /// withdrawn input sits on an earlier page: the cut after the withdrawal
+    /// leaves the input out, and a cut before it keeps counting the input.
+    #[tokio::test]
+    async fn a_withdrawal_below_the_cursor_keeps_each_cut_at_its_own_sequence() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        a_line_discovered_through_its_cut(&mut worker).await;
+        worker.projection.directory(&listed_line("b-91", "b-7c", 7));
+        assert_eq!(listed(&worker, "b-90").cut, None);
+        assert_eq!(listed(&worker, "b-91").cut, None);
+
+        open_line(
+            &mut worker,
+            "b-7c",
+            json!({
+                "events": [
+                    input_deleted(9, "in-5"),
+                    text(10, "r1", "carry on"),
+                    line_created(12, "b-90", 10),
+                ],
+                "through": 12, "nextBefore": 9, "nextAfter": 12,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the window starts after the line's own start, so its cut counts nothing"
+        );
+
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+        worker.earlier("b-7c");
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [said(5, "withdrawn ask"), line_created(8, "b-91", 7)],
+                "through": 12, "nextBefore": 1, "nextAfter": 8,
+            }),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-91").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 7,
+                messages: 2,
+            }),
+            "a withdrawal after the cut leaves its message in the count"
+        );
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 1,
+            }),
+            "a withdrawal before the cut leaves its message out of the count"
+        );
+    }
+
+    /// A line read only through `session.turn.get` never loaded its history:
+    /// the cuts that count it show nothing, even when live events already
+    /// counted them.
+    #[tokio::test]
+    async fn a_line_read_only_through_its_cut_counts_nothing() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+
+        worker.task_history_queue.clear();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        worker.apply("b-7c", tell(said(10, "carry on")));
+        worker.apply("b-7c", tell(line_created(12, "b-90", 10)));
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 10,
+                messages: 2,
+            }),
+            "the live events counted the cut before the read settled"
+        );
+
+        answer(
+            &mut worker,
+            json!({"branchId":"b-7c","through":12,"turn":null,"output":null}),
+        )
+        .await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the line was never read from its start, so its cut counts nothing"
+        );
+    }
+
+    /// The methods a test worker offers when its history reads use display
+    /// transcript pages, whose `done` flag says the page reached the start.
+    const TRANSCRIPT_FEATURES: [&str; 7] = [
+        "session.create",
+        "session.history",
+        "session.history.latestTurn",
+        "session.input.pending.blockPresence",
+        "session.history.display",
+        "session.history.detail",
+        "session.history.display.transcript",
+    ];
+
+    /// A display transcript page carrying `items` and the cursor below them.
+    fn transcript_page(
+        items: Vec<serde_json::Value>,
+        next_before: u64,
+        done: bool,
+    ) -> serde_json::Value {
+        json!({
+            "items": items, "through": 1000, "nextBefore": next_before,
+            "nextAfter": 1000, "done": done,
+        })
+    }
+
+    /// `count` display-only text events from `first`; each request id is its
+    /// own transcript row.
+    fn draft_page(first: u64, count: u64) -> Vec<serde_json::Value> {
+        (first..first + count)
+            .map(|sequence| text(sequence, &format!("r{sequence}"), "draft "))
+            .collect()
+    }
+
+    /// `count` user messages from `first`, each its own transcript row and each
+    /// one a message a cut counts.
+    fn asked_page(first: u64, count: u64) -> Vec<serde_json::Value> {
+        (first..first + count)
+            .map(|sequence| said(sequence, &format!("ask {sequence}")))
+            .collect()
+    }
+
+    /// Opens `b-7c` in a transcript window that starts after its own start,
+    /// then answers an `/earlier` read whose pages carry 10, 20, 30 and 250
+    /// rows. The retention budget keeps the newest 300 rows, so the oldest
+    /// page is dropped even though its `done` flag reached the line's start;
+    /// that page carries every user message `b-90` inherits.
+    async fn a_transcript_read_that_drops_its_oldest_page() -> Worker {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&TRANSCRIPT_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.discover_branch("main");
+        {
+            let history = worker.task_history.get_mut("main").unwrap();
+            history.done = true;
+            history.window.through = Some(4);
+        }
+        worker.apply("main", tell(said(2, "find the leak")));
+        worker.apply("main", tell(line_created(4, "b-7c", 2)));
+
+        let mut head = draft_page(331, 10);
+        head.push(line_created(341, "b-90", 240));
+        worker.task_history_queue.clear();
+        worker
+            .command(crate::model::session::Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(head, 331, false)).await;
+        worker.task_history_queue.clear();
+        worker.task_history.get_mut("b-7c").unwrap().done = true;
+
+        worker.earlier("b-7c");
+        for (first, count) in [(321, 10), (301, 20), (271, 30)] {
+            worker.poll_task_history().await.unwrap();
+            answer(
+                &mut worker,
+                transcript_page(draft_page(first, count), first, false),
+            )
+            .await;
+        }
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(asked_page(11, 250), 11, true)).await;
+        worker
+    }
+
+    /// The page that reached the line's start is dropped under the retention
+    /// budget, so the retained history does not cover the start: the cut stays
+    /// unknown instead of counting the messages that happened to survive.
+    #[tokio::test]
+    async fn a_history_read_that_drops_its_oldest_page_leaves_the_cut_unknown() {
+        let worker = a_transcript_read_that_drops_its_oldest_page().await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            None,
+            "the retained history misses the dropped page, so the count is unknown"
+        );
+    }
+
+    /// The dropped page loaded on a later `/earlier` fills the gap: the cut is
+    /// recalculated from the whole history, equal to a complete read.
+    #[tokio::test]
+    async fn loading_the_page_a_retention_drop_omitted_recounts_the_cut() {
+        let mut worker = a_transcript_read_that_drops_its_oldest_page().await;
+        assert_eq!(
+            worker.earlier_view(),
+            Earlier::Unread,
+            "the dropped page is the earlier history left to read"
+        );
+        worker.earlier("b-7c");
+        worker.poll_task_history().await.unwrap();
+        answer(&mut worker, transcript_page(asked_page(11, 250), 11, true)).await;
+        assert_eq!(
+            listed(&worker, "b-90").cut,
+            Some(crate::model::view::LineCut {
+                sequence: 240,
+                messages: 231,
+            }),
+            "the page that fills the gap counts what a complete read counts"
+        );
+    }
+
+    /// A window whose page left out earlier content says so in a notice. The
+    /// notice is sent after the snapshot that carries the page, so the
+    /// interface's next frame draws the page's rows before the notice that
+    /// reports them missing. Both updates share one channel, and the interface
+    /// applies whatever it drains in that order.
     #[tokio::test]
     async fn a_missing_prefix_notice_follows_the_page_it_reports() {
         let (mut worker, receiver, _sent) =
@@ -964,24 +1993,14 @@ mod tests {
         worker.focus = DEFAULT_BRANCH_ID.into();
         worker.discover_branch(DEFAULT_BRANCH_ID);
         worker.poll_task_history().await.unwrap();
-        let id = worker
-            .task_history_request
-            .as_ref()
-            .expect("the first window is in flight")
-            .id;
-        worker
-            .message(Message::Response {
-                id,
-                result: Ok(json!({
-                    "events":[{
-                        "id":"text-2","sequence":2,"create_at":2000,"type":"step","name":"text",
-                        "data":{"turn_id":"t2","request_id":"r-loaded","delta":"the loaded page"}
-                    }],
-                    "through":2,"nextAfter":2,"nextBefore":2
-                })),
-            })
-            .await
-            .unwrap();
+        answer(
+            &mut worker,
+            json!({
+                "events": [text(2, "r-loaded", "the loaded page")],
+                "through": 2, "nextAfter": 2, "nextBefore": 2
+            }),
+        )
+        .await;
 
         let updates: Vec<Update> = receiver.try_iter().collect();
         let page = updates
@@ -1001,6 +2020,243 @@ mod tests {
         assert!(
             page < notice,
             "the page's snapshot is sent before the notice that reports the missing earlier content"
+        );
+    }
+
+    /// A creation that fails while the line's first window is in flight
+    /// returns to the line the directory knows, not to `main`: that parent's
+    /// window starts over and is read again, while `/lines` refuses the failed
+    /// line before the parent's window loads and after it fails.
+    #[tokio::test]
+    async fn a_create_failure_returns_to_the_parent_the_directory_knows() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("b-7c");
+        {
+            let history = worker.task_history.get_mut("b-7c").unwrap();
+            history.done = true;
+            history.window_complete = true;
+            history.window.through = Some(2);
+        }
+        worker.task_history_queue.clear();
+        let create: Event = serde_json::from_value(json!({
+            "id": "create-child", "sequence": 2, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 1}, "branch": "b-7d", "prompt": "Narrow the parser",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        }))
+        .expect("a branch create event");
+        worker.apply("b-7c", create);
+        worker
+            .command(Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7d"),
+            "the child's first window is in flight"
+        );
+
+        worker.task_event("b-7c", create_failed(400, "b-7d"));
+        assert_eq!(
+            worker.focus, "b-7c",
+            "the failed line returns to the line it was cut from"
+        );
+        assert!(
+            worker.task_history["b-7d"].done,
+            "the failed line is terminal"
+        );
+        assert!(
+            worker.task_history_queue.contains(&"b-7c".to_owned())
+                && !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the parent is read again; the failed line is not"
+        );
+        worker
+            .command(Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.focus, "b-7c",
+            "the failed line is refused while the parent's window reads"
+        );
+
+        fail(&mut worker, "the failed line's first window").await;
+        worker.poll_task_history().await.unwrap();
+        assert_eq!(
+            worker
+                .task_history_request
+                .as_ref()
+                .map(|read| read.branch_id.as_str()),
+            Some("b-7c"),
+            "the parent's window reads again"
+        );
+        fail(&mut worker, "the parent's window").await;
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            worker.task_history["b-7c"].window_error.is_some(),
+            "the parent's window failed"
+        );
+        worker
+            .command(Command::FocusLine("b-7d".into()))
+            .await
+            .unwrap();
+        assert_eq!(
+            worker.focus, "b-7c",
+            "the failed line is refused after the parent's window fails"
+        );
+    }
+
+    /// A live creation failure the parent's page has not projected yet, or a
+    /// page that records the creation and its failure in either order, leaves
+    /// the child terminal: `/lines` refuses it, and the parent's finished
+    /// window neither resets nor queues it.
+    #[tokio::test]
+    async fn a_create_failure_is_terminal_whatever_the_page_order() {
+        let create = json!({
+            "id": "create-child", "sequence": 2, "create_at": 1000, "type": "branch", "name": "create",
+            "data": {
+                "at": {"kind": "sequence", "sequence": 1}, "branch": "b-7d", "prompt": "Narrow the parser",
+                "source": {"kind": "host", "operation_id": "op"}
+            }
+        });
+        for (live, page) in [
+            (true, vec![create.clone()]),
+            (false, vec![create.clone(), create_failed_page(3, "b-7d")]),
+        ] {
+            let (mut worker, _receiver, _sent) =
+                crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+            worker.session_id = "s1".into();
+            worker.focus = "main".into();
+            worker.discover_branch("b-7c");
+            worker
+                .command(Command::FocusLine("b-7c".into()))
+                .await
+                .unwrap();
+            worker.poll_task_history().await.unwrap();
+            if live {
+                worker.task_event("b-7c", create_failed(3, "b-7d"));
+            }
+            answer(
+                &mut worker,
+                json!({"events": page, "through": 300, "nextBefore": 1, "nextAfter": 300}),
+            )
+            .await;
+            worker.methods.insert("session.input.pending".into());
+            worker.methods.insert("session.turn.get".into());
+            worker.poll_task_history().await.unwrap();
+            answer(
+                &mut worker,
+                json!({"branchId":"b-7c","through":300,"inputs":[],"next":null}),
+            )
+            .await;
+            worker.poll_task_history().await.unwrap();
+            answer(
+                &mut worker,
+                json!({"branchId":"b-7c","through":300,"turn":null,"output":null}),
+            )
+            .await;
+            worker.poll_task_history().await.unwrap();
+
+            let child = worker
+                .projection
+                .line_views()
+                .iter()
+                .find(|line| line.id == "b-7d")
+                .expect("the page projected the child");
+            assert_eq!(
+                child.state,
+                LineState::CreationFailed,
+                "{page:?}: the child is terminal"
+            );
+            assert!(
+                worker.task_history["b-7d"].done,
+                "{page:?}: the parent's finished window did not reset the child"
+            );
+            assert!(
+                !worker.task_history_queue.contains(&"b-7d".to_owned()),
+                "{page:?}: the parent's window did not queue the child"
+            );
+            worker
+                .command(Command::FocusLine("b-7d".into()))
+                .await
+                .unwrap();
+            assert_eq!(worker.focus, "b-7c", "{page:?}: the child stays refused");
+            assert!(
+                !worker.lines.contains_key("b-7d"),
+                "{page:?}: the refused child has no transcript"
+            );
+        }
+    }
+
+    /// A creation failure that first makes the directory row terminal while
+    /// another line is focused publishes the terminal state on its own, so
+    /// `/lines` cannot keep showing the child as waiting; a repeated failure
+    /// schedules no second snapshot.
+    #[tokio::test]
+    async fn a_live_create_failure_publishes_the_terminal_directory_without_focus() {
+        let (mut worker, mut receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.discover_branch("b-7c");
+        worker
+            .command(Command::FocusLine("b-7c".into()))
+            .await
+            .unwrap();
+        worker.poll_task_history().await.unwrap();
+        answer(
+            &mut worker,
+            json!({"events":[{
+                "id": "create-child", "sequence": 2, "create_at": 1000, "type": "branch", "name": "create",
+                "data": {
+                    "at": {"kind": "sequence", "sequence": 1}, "branch": "b-7d", "prompt": "Narrow the parser",
+                    "source": {"kind": "host", "operation_id": "op"}
+                }
+            }], "through": 300, "nextBefore": 1, "nextAfter": 300}),
+        )
+        .await;
+        let snapshot = published(&mut receiver);
+        let child = snapshot
+            .lines
+            .iter()
+            .find(|line| line.id == "b-7d")
+            .expect("the parent's first page published the child");
+        assert_eq!(
+            child.state,
+            LineState::Waiting,
+            "the child waits for its creation"
+        );
+
+        worker.task_event("b-7c", create_failed(400, "b-7d"));
+        assert!(
+            worker.publish_at.is_some(),
+            "the terminal directory state schedules a snapshot without focus"
+        );
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        let child = snapshot
+            .lines
+            .iter()
+            .find(|line| line.id == "b-7d")
+            .expect("the published directory keeps the child");
+        assert_eq!(
+            child.state,
+            LineState::CreationFailed,
+            "the published snapshot shows the terminal state"
+        );
+        assert_eq!(snapshot.focus, "b-7c", "the parent stays shown");
+
+        worker.task_event("b-7c", create_failed(401, "b-7d"));
+        assert!(
+            worker.publish_at.is_none(),
+            "a repeated failure schedules no second snapshot"
         );
     }
 }

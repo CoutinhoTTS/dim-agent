@@ -3537,6 +3537,7 @@ fn tui_reopening_tasks_rearms_a_failed_line_window() {
             &main,
             json!({"events":[],"through":0,"nextAfter":0,"done":true}),
         );
+        wire.no_context();
         event(wire, "main", child_created("b-7c", 1, "reopen the parser"));
         let page = |index: u64| {
             [
@@ -3567,8 +3568,6 @@ fn tui_reopening_tasks_rearms_a_failed_line_window() {
             }
             match request["method"].as_str().unwrap() {
                 "account.providers" => wire.reply(&request, json!([])),
-                "session.context.usage" => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                    "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}})),
                 other => assert!(
                     wire.empty_state(&request),
                     "unexpected request {other}: {request}"
@@ -3609,32 +3608,34 @@ fn tui_a_branch_creation_failure_settles_the_line_before_its_first_read() {
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
         let methods = wire.read("session.methods");
-        wire.reply(&methods, json!({"methods":[
-            {"name":"session.input.pending","mutating":false},
-            {"name":"session.exec.pending","mutating":false},
-            {"name":"session.turn.get","mutating":false}
-        ]}));
+        wire.reply(
+            &methods,
+            json!({"methods":[
+                {"name":"session.input.pending","mutating":false},
+                {"name":"session.exec.pending","mutating":false},
+                {"name":"session.turn.get","mutating":false}
+            ]}),
+        );
         let main = wire.read("session.history");
-        wire.reply(&main, json!({"events":[fact("main-message",1,1000,"step","text",json!({
+        wire.reply(
+            &main,
+            json!({"events":[fact("main-message",1,1000,"step","text",json!({
             "turn_id":"turn","request_id":"request","delta":"main transcript"
-        }))],"through":1,"nextAfter":1,"done":true}));
-        let (mut context, mut providers) = (false, false);
-        while !context || !providers {
+        }))],"through":1,"nextAfter":1,"done":true}),
+        );
+        wire.no_context();
+        let mut providers = false;
+        while !providers {
             let request = wire.read_any();
-            match request["method"].as_str().unwrap() {
-                "account.providers" => {
-                    providers = true;
-                    wire.reply(&request, json!([]));
-                }
-                "session.context.usage" => {
-                    context = true;
-                    wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                        "code":-32601,"message":"Unknown method","data":{"appError":"unknown_method"}}}));
-                }
-                other => assert!(
+            if request["method"] == "account.providers" {
+                providers = true;
+                wire.reply(&request, json!([]));
+            } else {
+                let other = request["method"].as_str().unwrap();
+                assert!(
                     wire.empty_state(&request),
                     "unexpected startup read {other}: {request}"
-                ),
+                );
             }
         }
         event(wire, "main", child_created("b-7c", 2, "reopen the parser"));
