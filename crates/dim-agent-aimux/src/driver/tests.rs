@@ -98,6 +98,69 @@ fn driver(fetch: Arc<ScriptedFetch>) -> AimuxDriver {
     }
 }
 
+fn driver_with(fetch: FetchFunction) -> AimuxDriver {
+    AimuxDriver {
+        files: None,
+        identity: ModelIdentity::default(),
+        transport: ReqwestFetch::default(),
+        fetch,
+        generation: CancellationToken::new(),
+        tasks: TaskTracker::new(),
+        streams: Mutex::new(Vec::new()),
+        requests: tokio::sync::Semaphore::new(4),
+    }
+}
+
+/// A transport whose reply body is already closed: an exchange that reads a
+/// non-2xx body completes in the poll that produced the headers.
+struct EndedBodyFetch {
+    reply: Mutex<Option<tokio::sync::oneshot::Receiver<EndedBodyReply>>>,
+}
+
+#[derive(Debug)]
+struct EndedBodyReply {
+    status: http::StatusCode,
+    headers: http::HeaderMap,
+}
+
+#[async_trait::async_trait]
+impl Fetch for EndedBodyFetch {
+    async fn fetch(&self, _: FetchRequest) -> Result<FetchResponse, FetchError> {
+        let reply = self
+            .reply
+            .lock()
+            .unwrap()
+            .take()
+            .expect("one scripted reply per exchange");
+        let reply = reply.await.expect("the scripted reply is released");
+        Ok(FetchResponse {
+            status: reply.status,
+            headers: reply.headers,
+            url: url::Url::parse("http://aimux.test/v1").unwrap(),
+            body: futures_util::stream::empty::<Result<Bytes, FetchError>>().boxed(),
+        })
+    }
+}
+
+/// A transport the test fails itself: the exchange reports the error the test
+/// releases, and no response headers were produced to report.
+struct FailingFetch {
+    reply: Mutex<Option<tokio::sync::oneshot::Receiver<FetchError>>>,
+}
+
+#[async_trait::async_trait]
+impl Fetch for FailingFetch {
+    async fn fetch(&self, _: FetchRequest) -> Result<FetchResponse, FetchError> {
+        let error = self
+            .reply
+            .lock()
+            .unwrap()
+            .take()
+            .expect("one scripted failure per exchange");
+        Err(error.await.expect("the scripted failure is released"))
+    }
+}
+
 fn request() -> ModelRequest {
     ModelRequest::new("local", "test-model", vec![Message::text(Role::User, "hi")])
 }
@@ -799,6 +862,201 @@ async fn a_header_report_written_at_the_allowance_stays_on_time() {
     let mut stream = poll_until_idle(invoke.as_mut())
         .expect("the report must start the reply")
         .expect("the reply must start after the report");
+    let start = next_chunk(&mut stream)
+        .expect("the reply must deliver its start")
+        .expect("the reply must not fail before its start");
+    assert!(matches!(start, ModelChunk::MessageStart { .. }));
+    let text = next_chunk(&mut stream)
+        .expect("the reply must deliver its text")
+        .expect("the first event must deliver text");
+    assert!(matches!(text, ModelChunk::Text(text) if text == "hello"));
+}
+
+/// The compatible provider returns its stream at the headers, so the exchange
+/// completes in the poll that publishes a report written after the allowance:
+/// the exchange arm must judge that report before it returns the stream.
+#[tokio::test(start_paused = true)]
+async fn a_compatible_exchange_completing_after_its_allowance_is_late() {
+    let (fetch, reply) = scripted();
+    let driver = driver(fetch);
+    // Half a tick puts the allowance between two ticks, so the timer fires up
+    // to one tick after it.
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiCompatible),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    // The exchange is polled 0.2 ms after the allowance, before its timer.
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT + Duration::from_micros(200)).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body: ScriptedBody::default(),
+        })
+        .unwrap();
+    // One poll reports the headers and returns the stream: there is no second
+    // exchange poll to read the report in.
+    let error = match poll_once(invoke.as_mut()) {
+        Poll::Ready(Err(error)) => error,
+        Poll::Ready(Ok(_)) => panic!("a reply must not start from a late report"),
+        Poll::Pending => panic!("the exchange completion must be judged in the same poll"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("no response headers arrived within 300 seconds of sending the request")
+    );
+}
+
+/// A non-2xx reply whose error body is already at EOF reads that body and
+/// fails in the poll that publishes its report: while still awaiting headers,
+/// the late report ends the wait as missing headers even though the exchange
+/// is ready in that same poll.
+#[tokio::test(start_paused = true)]
+async fn a_late_error_report_with_a_finished_body_fails_as_missing_headers() {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let driver = driver_with(Arc::new(EndedBodyFetch {
+        reply: Mutex::new(Some(receiver)),
+    }));
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiChat),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT + Duration::from_micros(200)).await;
+    sender
+        .send(EndedBodyReply {
+            status: http::StatusCode::UNAUTHORIZED,
+            headers: headers("application/json"),
+        })
+        .unwrap();
+    let error = match poll_once(invoke.as_mut()) {
+        Poll::Ready(Err(error)) => error,
+        Poll::Ready(Ok(_)) => panic!("a reply must not start from a late error report"),
+        Poll::Pending => panic!("the completed error body must fail the request in this poll"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*kind, HostErrorKind::Transport);
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(model.status, None);
+    assert_eq!(
+        model.reason.as_deref(),
+        Some("no response headers arrived within 300 seconds of sending the request")
+    );
+}
+
+/// An exchange failure with no header report keeps its own classification:
+/// while the task still awaits headers, a transport failure released after the
+/// allowance is not mistaken for missing headers.
+#[tokio::test(start_paused = true)]
+async fn an_exchange_failure_without_a_report_keeps_its_error() {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let driver = driver_with(Arc::new(FailingFetch {
+        reply: Mutex::new(Some(receiver)),
+    }));
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiChat),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its transport"
+    );
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT + Duration::from_micros(200)).await;
+    sender
+        .send(FetchError::Connect(
+            "the connection was refused".to_string().into(),
+        ))
+        .unwrap();
+    let error = match poll_once(invoke.as_mut()) {
+        Poll::Ready(Err(error)) => error,
+        Poll::Ready(Ok(_)) => panic!("a failed exchange must not start a stream"),
+        Poll::Pending => panic!("a transport failure must end the request without a report"),
+    };
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(
+        *kind,
+        HostErrorKind::Http {
+            status: None,
+            code: None,
+        }
+    );
+    assert_eq!(model.kind, ModelFailureKind::Network);
+    assert_eq!(model.reason.as_deref(), Some("the connection was refused"));
+}
+
+/// A compatible exchange that completes exactly at the allowance is on time:
+/// the comparison includes the instant, so the reply still starts and delivers
+/// its text.
+#[tokio::test(start_paused = true)]
+async fn a_compatible_exchange_completing_at_the_allowance_starts() {
+    let (fetch, reply) = scripted();
+    let body = ScriptedBody::default();
+    let driver = driver(fetch);
+    tokio::time::advance(Duration::from_micros(500)).await;
+    let mut invoke = driver.invoke(
+        Arc::new(request()),
+        connection(ModelProtocol::OpenaiCompatible),
+        CancellationToken::new(),
+    );
+    assert!(
+        poll_until_idle(invoke.as_mut()).is_none(),
+        "the request must wait for its response headers"
+    );
+    // The exchange is polled exactly at the allowance, still before its timer.
+    tokio::time::advance(stream::STREAM_IDLE_TIMEOUT).await;
+    reply
+        .send(ScriptedReply {
+            status: http::StatusCode::OK,
+            headers: headers("text/event-stream"),
+            body: body.clone(),
+        })
+        .unwrap();
+    let mut stream = match poll_once(invoke.as_mut()) {
+        Poll::Ready(Ok(stream)) => stream,
+        Poll::Ready(Err(error)) => panic!("a report at the allowance must not be late: {error:?}"),
+        Poll::Pending => panic!("the exchange completion must be judged in the same poll"),
+    };
+    body.push(format!(
+        "data: {}\n\n",
+        json!({"id": "remote-id", "choices": [{"index": 0, "delta": {"content": "hello"}, "finish_reason": Value::Null}]})
+    ));
     let start = next_chunk(&mut stream)
         .expect("the reply must deliver its start")
         .expect("the reply must not fail before its start");
