@@ -20,7 +20,8 @@ use dim_agent_capabilities::{
 use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BoxFuture, BranchOptions, Dispatcher, Feature,
-    LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session, SessionConfig,
+    LoopPhase, LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session,
+    SessionConfig,
     StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQueryDirection,
     TimelineStore, TimelineTrace,
 };
@@ -59,6 +60,9 @@ pub struct Probe {
     fail_state: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
     /// How many state records the hook changed.
     failed_states: Arc<AtomicUsize>,
+    /// One branch's Loop state, which a case can set before it ends the line:
+    /// a Tool end of a running line is parked until the line's turn ends.
+    loops: Mutex<HashMap<String, tokio::sync::watch::Sender<LoopSnapshot>>>,
 }
 
 impl Probe {
@@ -109,6 +113,22 @@ impl Probe {
     /// How many state records the hook changed.
     pub fn failed_states(&self) -> usize {
         self.failed_states.load(Ordering::SeqCst)
+    }
+    /// Reports `branch` as running or idle, as its Loop would: a Tool end of a
+    /// running line is parked until its turn ends.
+    pub fn set_running(&self, branch: &str, running: bool) {
+        let loops = self.loops.lock().unwrap();
+        let sender = loops
+            .get(branch)
+            .unwrap_or_else(|| panic!("branch {branch} has a Loop"));
+        sender.send_replace(LoopSnapshot {
+            phase: if running {
+                LoopPhase::Running
+            } else {
+                LoopPhase::Idle
+            },
+            turn_id: running.then(|| "turn".to_owned()),
+        });
     }
 }
 
@@ -232,12 +252,12 @@ impl DynPlugin for ProbeBranch {
 }
 
 /// Every branch must provide the Loop's state, which Goal never reads. The
-/// harness supplies an idle state instead of the AgentLoop, so no turn is
-/// driven and the test owns every fact.
+/// harness supplies the state a case sets through [`Probe::set_running`]
+/// instead of the AgentLoop, so no turn is driven and the test owns every fact.
 struct IdleLoop(tokio::sync::watch::Sender<LoopSnapshot>);
 impl LoopState for IdleLoop {
     fn state(&self) -> LoopSnapshot {
-        LoopSnapshot::default()
+        self.0.borrow().clone()
     }
     fn watch(&self) -> tokio::sync::watch::Receiver<LoopSnapshot> {
         self.0.subscribe()
@@ -246,13 +266,17 @@ impl LoopState for IdleLoop {
 
 struct LoopStub {
     key: Key<dyn LoopState>,
+    identity: Key<TimelineIdentity>,
     watch: tokio::sync::watch::Sender<LoopSnapshot>,
+    probe: Arc<Probe>,
 }
 impl LoopStub {
-    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+    fn new(names: &Names<'_>, probe: Arc<Probe>) -> rutis::Result<Self> {
         Ok(Self {
             key: names.key()?,
+            identity: names.key()?,
             watch: tokio::sync::watch::channel(LoopSnapshot::default()).0,
+            probe,
         })
     }
 }
@@ -261,10 +285,16 @@ impl DynPlugin for LoopStub {
         "GoalLoopStub"
     }
     fn injects(&self) -> Vec<TypeKey> {
-        Vec::new()
+        vec![self.identity.erase()]
     }
     fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
         Box::pin(async move {
+            let identity = ctx.require_at(&self.identity)?;
+            self.probe
+                .loops
+                .lock()
+                .unwrap()
+                .insert(identity.branch_id.clone(), self.watch.clone());
             ctx.provide_at(
                 self.key.clone(),
                 Arc::new(IdleLoop(self.watch.clone())) as Arc<dyn LoopState>,
@@ -978,11 +1008,7 @@ impl Env {
                     }),
             )
             .require_part(dim_goal::SESSION_PART)
-            .require_part(dim_goal::BRANCH_PART)
-            .require_feature(
-                Feature::new("GoalLoop")
-                    .branch("GoalLoop", |names| Ok(Box::new(LoopStub::new(names)?))),
-            );
+            .require_part(dim_goal::BRANCH_PART);
         let session_probe = probe.clone();
         builder.require_feature(
             Feature::new("GoalProbeSession").session("GoalProbeSession", move |names| {
@@ -990,11 +1016,15 @@ impl Env {
             }),
         );
         let branch_probe = probe.clone();
+        let loop_probe = probe.clone();
         builder.require_feature(
             Feature::new("GoalProbeBranch").branch("GoalProbeBranch", move |names| {
                 Ok(Box::new(ProbeBranch::new(names, branch_probe.clone())?))
             }),
         );
+        builder.require_feature(Feature::new("GoalLoop").branch("GoalLoop", move |names| {
+            Ok(Box::new(LoopStub::new(names, loop_probe.clone())?))
+        }));
         defaults::tool_host(
             &mut builder,
             Arc::new(dim_agent_capabilities::adapters::MockTools),
@@ -1734,6 +1764,12 @@ impl Env {
     pub async fn close(self) {
         self.host.close().await.unwrap();
         let _ = std::fs::remove_dir_all(&self.home);
+    }
+
+    /// Reports `branch` as running or idle for the runtime's end flow: a Tool
+    /// end of a running line is parked until its turn ends.
+    pub fn set_running(&self, branch: &str, running: bool) {
+        self.probe.set_running(branch, running);
     }
 }
 
