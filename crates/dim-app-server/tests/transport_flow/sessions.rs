@@ -937,23 +937,13 @@ async fn idle_covers_written_turns_and_waits_on_a_pending_approval_until_stop() 
         second >= cutoff,
         "the idle branch never goes back: {second} < {cutoff}"
     );
-    let presence = format!(
-        "<dim-state source=\"{}\">",
-        dim_agent_capabilities::environment_clients::CLIENTS
-    );
-    let snapshot = |kind: &EventKind| {
-        matches!(kind, EventKind::InputMessage(data)
-            if data.user.is_none()
-                && matches!(data.blocks.as_slice(), [InputBlock::Raw { text, .. }]
-                    if text.starts_with(&presence)))
-    };
     let extra = branch_events(&session, "main", (cutoff + 1)..=second)
         .await
         .unwrap();
     assert!(
         extra.is_empty()
             || (extra.len() == 2
-                && snapshot(&extra[0].kind)
+                && client_presence(&extra[0].kind)
                 && matches!(extra[1].kind, EventKind::InputApplied(_))),
         "the idle branch only takes the client presence snapshot: {:?}",
         extra
@@ -1214,23 +1204,47 @@ async fn a_consumer_launches_writes_waits_and_withdraws_by_input_id() {
     server.join().await.unwrap();
 }
 
-/// Waits for the branch's event after `after` to be published and returns it.
+/// Whether `kind` is the client-presence snapshot the EnvironmentClients
+/// branch part appends once after publication (EnvironmentClients §5).
+fn client_presence(kind: &EventKind) -> bool {
+    let presence = format!(
+        "<dim-state source=\"{}\">",
+        dim_agent_capabilities::environment_clients::CLIENTS
+    );
+    matches!(kind, EventKind::InputMessage(data)
+        if data.user.is_none()
+            && matches!(data.blocks.as_slice(), [InputBlock::Raw { text, .. }]
+                if text.starts_with(&presence)))
+}
+
+/// Waits for the branch's first published event after `after` that is not the
+/// client-presence snapshot, and returns it. That snapshot comes from the
+/// part's own task, so it can take any sequence after `after`; every other
+/// event is returned in order.
 async fn published_after(session: &Session, after: u64) -> Arc<AgentEvent> {
     let publication = session.publication("main").unwrap();
     let mut watch = publication.watch();
-    let published = tokio::time::timeout(
-        Duration::from_secs(5),
-        watch.wait_for(|&(published, _)| published > after),
-    )
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut cursor = after;
+        loop {
+            let sequence = watch
+                .wait_for(|&(published, _)| published > cursor)
+                .await
+                .expect("the branch's timeline is open")
+                .0;
+            let next = branch_events(session, "main", (cursor + 1)..=sequence)
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|event| !client_presence(&event.kind));
+            if let Some(event) = next {
+                return event;
+            }
+            cursor = sequence;
+        }
+    })
     .await
     .expect("the next event is published")
-    .expect("the branch's timeline is open");
-    let sequence = published.0;
-    branch_events(session, "main", sequence..=sequence)
-        .await
-        .unwrap()
-        .pop()
-        .unwrap()
 }
 
 /// Sessions §6.6: a withdraw whose command was written before a close starts
