@@ -56,13 +56,13 @@ terminal record is a no-op.
 
 | Action | Exec command | Shell command | Job | Shell |
 | --- | --- | --- | --- | --- |
-| `kill` running | cancel + terminate; await release; `cancelled` or `failed{terminate_failed}` | ETX only if active; terminal from marker or sweep | signal pid; `cancelled` or `failed{terminate_failed}`; missing pid answers `task_running` and keeps a pid watcher | terminate PTY; `cancelled` or `failed{terminate_failed}`; sweep |
-| `kill` terminal / settle | no-op / after result | no-op / after result | no-op / after fact | no-op / after children; removes remaining terminal children |
+| `kill` running | cancel + terminate; await release; `cancelled` or `failed{terminate_failed}` | ETX only if active; terminal from marker or sweep | signal pid; pending stop until release; `cancelled` on release, `failed{shell_exited}`/`failed{owner_unloaded}` on sweep; missing pid answers `task_running` and keeps a pid watcher | terminate PTY; `cancelled` or `failed{terminate_failed}`; sweep |
+| `kill` terminal / settle | no-op / after result | no-op / after result | no-op / after fact | no-op / removes the shell record |
 | shell exit | n/a | `failed{shell_exited}` with partial output | `failed{shell_exited}` with file read | `exited`/`signaled`/`cancelled` |
 | timeout / unload | `spawn.timeout` → `timed_out`; `wait` never kills; unload `cancelled{owner_unloaded}` | deadline is `kill`; unload same | no timeout; unload same after sweep | no timeout; unload same |
 
-A shell's terminal marks every child terminal; `settle(shellId)` removes the shell and its
-remaining children. `settle` keeps registered logs; the shell log exposed by the `shell`
+A shell's terminal marks every child terminal; `settle(shellId)` removes only the shell
+record. A job whose release is unconfirmed stays Running until release or the shell's sweep. `settle` keeps registered logs; the shell log exposed by the `shell`
 reply is registered and kept until `removeOutputDirectory` or Session deletion; only the
 internal init log is removed on release.
 ### 1.4 Interrupt, pid, pwsh, Windows
