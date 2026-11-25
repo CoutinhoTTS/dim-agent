@@ -119,6 +119,9 @@ pub enum Stage {
     /// After the change writer took the write guard and settled the decisions,
     /// before it composes the record it commits with its trigger.
     Change,
+    /// After a change waited for the publication of the cutoff it loads the
+    /// branch's current work from, before it queries that work.
+    Query,
     /// After a state record read the fold and before its append commits.
     Append,
 }
