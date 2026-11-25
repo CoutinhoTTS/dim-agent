@@ -39,6 +39,32 @@ impl Owner {
         Ok(through)
     }
 
+    /// Releases task admission and takes up what the settlement deferred: a
+    /// creation, an interrupt or a fold that reached `settle` while the
+    /// decisions were suspended ran no task, and no later input may be needed
+    /// for it (Pursuit §4.1, §13 E2).
+    pub(super) fn resume_settlement(self: &Arc<Self>) {
+        if let Some(interrupt) = self.release_settlement() {
+            self.interrupted(interrupt);
+        }
+    }
+
+    /// Releases task admission and returns the interrupt the settlement
+    /// deferred to the caller: `resume_settlement` takes it up, a caller whose
+    /// state write failed leaves it with the fold for a later settlement. That
+    /// caller's settlement waited for every task it cancelled to finish before
+    /// it wrote, so the decisions it cancelled decide nothing after this
+    /// release (Pursuit §4.1, §13 E2, #2119).
+    pub(super) fn release_settlement(self: &Arc<Self>) -> Option<u64> {
+        let interrupt = {
+            let mut state = self.state.lock().unwrap();
+            state.terminating = false;
+            state.fold.pending_interrupt()
+        };
+        self.settle();
+        interrupt
+    }
+
     pub(super) fn resume_decisions(self: &Arc<Self>) {
         if !self.state.lock().unwrap().fold.running() {
             return;

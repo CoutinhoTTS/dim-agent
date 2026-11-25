@@ -173,7 +173,7 @@ Goal 从分支的第一条本地 Queue 输入识别这个角色（Prompt 在 `br
 | # | 改动 |
 | --- | --- |
 | E1 | **从线的来源识别。** 当 `treeCommands.info(自己的 id)` 的 `source = {kind: "host", operation_id: "goal:evaluate:N"}` 且 `parent = B` 时，这条线上的 Goal 担任评审者角色，不再读 prompt 的第一行。prompt 保留 `<dim-goal kind="evaluate" …>` 这一首行，只给模型看（§5） |
-| E2 | **Goal 结束它的评审者。** 评审 `N` 的结论或失败已经决定（§4.1），或者之后的目标变更已经取代了 `N`，`N` 就在 `B` 上了结。了结之后，`B` 上的 Goal 通过一个写入前复核的自有任务，以 `treeCommands.end(E, {kind: "host", operation_id: "goal:evaluate:N"})` 结束 `E`。如果 `B` 的历史里已经有 `E` 的 `branch/ended`，Goal 什么也不做。加载时用同样的检查补齐：已记录的评审者，若它的 `N` 已了结、而 `B` 上没有它的 `branch/ended`，就结束它 |
+| E2 | **Goal 结束它的评审者。** 评审 `N` 的结论或失败已经决定（§4.1），之后的目标变更已经取代了 `N`，或者目标已经不再运行，`N` 就在 `B` 上了结。了结之后，`B` 上的 Goal 通过一个写入前复核的自有任务，以 `treeCommands.end(E, {kind: "host", operation_id: "goal:evaluate:N"})` 结束 `E`。如果 `B` 的历史里已经有 `E` 的 `branch/ended`，Goal 什么也不做。加载时用同样的检查补齐：已记录的评审者，若它的 `N` 已了结、而 `B` 上没有它的 `branch/ended`，就结束它 |
 | E3 | **结论之前的外部结束算 `failed`。** `N` 仍是当前评审时，如果 `B` 上 `E` 的 `branch/ended` 出现在 `E` 的结论之前，就判为 `failed`：暂停（`evaluation_failed`），与 §4.1 相同 |
 
 接口：

@@ -862,6 +862,15 @@ impl Fold {
     pub fn interrupted(&self) -> bool {
         self.last_interrupt > self.active
     }
+    /// The turn interrupt that still pauses the goal and that no state record
+    /// answered yet: the decision a settlement may have dropped while it held
+    /// task admission (Pursuit §4.1).
+    pub(crate) fn pending_interrupt(&self) -> Option<u64> {
+        (self.running()
+            && self.last_interrupt > self.active
+            && !self.is_decided(self.last_interrupt))
+        .then_some(self.last_interrupt)
+    }
     pub fn count(&self) -> usize {
         self.continuation_count
     }
@@ -923,6 +932,130 @@ impl Fold {
     /// trigger does not answer a newer one.
     pub fn pending_change(&self) -> Option<u64> {
         (self.last_change > self.state_after).then_some(self.last_change)
+    }
+    /// Whether the turn end `after` still decides at this fold: it is the
+    /// newest turn end, and no turn interrupt follows it. An interrupt after it
+    /// states that pause itself, and the end states nothing.
+    pub(crate) fn turn_end_stands(&self, after: u64) -> bool {
+        self.turn_end.as_ref().map(|end| end.sequence) == Some(after)
+            && self.interrupt_after(after).is_none()
+    }
+    /// The decision the turn end `after` still takes, with the boundary its
+    /// first decision applied: it stands ([`turn_end_stands`](Self::turn_end_stands)),
+    /// and [`decide_turn_end`] decides it. The decision and the record writer
+    /// that states it both read it here, so a pause is stated at the boundary
+    /// it was taken at.
+    pub(crate) fn turn_end_decision(
+        &self,
+        after: u64,
+        limit: Option<u64>,
+        progress: Option<Progress>,
+    ) -> Option<Decision> {
+        if !self.turn_end_stands(after) {
+            return None;
+        }
+        decide_turn_end(self, limit, progress)
+    }
+    /// The pause the turn end at `after` still decides, and the reason the fold
+    /// gives it: no evaluator-first decision over it, and
+    /// [`turn_end_decision`](Self::turn_end_decision) over the fold with the
+    /// limit and the progress its decision read. A driving input or a newer
+    /// turn that folds while the record is written leaves the pause to that
+    /// turn (C4, C5); a driving input withdrawn in that window returns the end
+    /// to the evaluator, which the pause no longer answers; an interrupt that
+    /// follows the end states that pause itself.
+    pub(crate) fn pause_at_end(
+        &self,
+        after: u64,
+        limit: Option<u64>,
+        progress: Option<Progress>,
+    ) -> Option<&'static str> {
+        if decide_evaluation(self, after) {
+            return None;
+        }
+        match self.turn_end_decision(after, limit, progress) {
+            Some(Decision::Pause { reason }) => Some(reason),
+            _ => None,
+        }
+    }
+    /// Whether the `continue` conclusion at `sequence` still answers
+    /// `evaluation` and no newer turn follows it (Pursuit §4.1, §5).
+    pub(crate) fn conclusion_stands(&self, sequence: u64, evaluation: u64) -> bool {
+        self.conclusions
+            .get(&evaluation)
+            .map(|record| record.sequence)
+            == Some(sequence)
+            && !self.turn_open()
+            && self
+                .turn_end
+                .as_ref()
+                .is_none_or(|end| end.sequence < sequence)
+    }
+    /// Whether a conclusion still decides where the fold stands: the goal runs,
+    /// and no background task or driving input is open (Pursuit §5).
+    fn conclusion_ready(&self) -> bool {
+        self.running() && !self.pending_driving() && !self.open_tasks()
+    }
+    /// Whether the conclusion at `sequence` of `evaluation` still decides the
+    /// pause it states: it stands, and the goal is at a point a conclusion
+    /// still decides.
+    pub(crate) fn conclusion_decides(&self, sequence: u64, evaluation: u64) -> bool {
+        self.conclusion_stands(sequence, evaluation) && self.conclusion_ready()
+    }
+    /// The decision a `continue` conclusion at `sequence` of `evaluation`
+    /// still takes at this fold: the conclusion is the evaluation's own, the
+    /// judged turn end is still the newest and its turn is not open, no turn
+    /// interrupt follows that end, and the goal is at a point the conclusion
+    /// still decides the continuation limit (Pursuit §4.1, §5). The decision
+    /// and the record writer that states it both read it here, so a pause is
+    /// stated at the boundary it was taken at.
+    pub(crate) fn evaluated_continuation(
+        &self,
+        sequence: u64,
+        evaluation: u64,
+        limit: Option<u64>,
+    ) -> Option<Decision> {
+        if !self.conclusion_stands(sequence, evaluation)
+            || !self.is_current(evaluation)
+            || self.turn_end.as_ref().map(|end| end.sequence) != Some(evaluation)
+            || self.interrupt_after(evaluation).is_some()
+        {
+            return None;
+        }
+        decide_evaluated_continuation(self, limit)
+    }
+    /// The pause the `continue` conclusion at `sequence` of `evaluation` still
+    /// decides, and the reason the fold gives it now:
+    /// [`evaluated_continuation`](Self::evaluated_continuation) at the writer's
+    /// cutoff.
+    pub(crate) fn pause_at_conclusion(
+        &self,
+        sequence: u64,
+        evaluation: u64,
+        limit: Option<u64>,
+    ) -> Option<&'static str> {
+        match self.evaluated_continuation(sequence, evaluation, limit) {
+            Some(Decision::Pause { reason }) => Some(reason),
+            _ => None,
+        }
+    }
+    /// Whether the failed evaluation `evaluation` still pauses the goal: the
+    /// goal runs, the evaluation is current, no conclusion answers it, and no
+    /// driving input or newer turn supersedes it (C4, C5, Pursuit §4.1). An
+    /// evaluation the settlement ended for a pause the Queue abandoned is not
+    /// its own failure, and neither is an end that folds after the pause the
+    /// goal already stopped on.
+    pub(crate) fn pauses_at_failure(&self, evaluation: u64) -> bool {
+        self.running()
+            && self.is_current(evaluation)
+            && !self.conclusions.contains_key(&evaluation)
+            && !self.turn_open()
+            && !self.pending_driving()
+    }
+    /// Whether evaluation `N` still wants its evaluator: the goal runs, no
+    /// conclusion answers it and it is still current (Pursuit §13 E2).
+    pub(crate) fn wants_evaluator(&self, evaluation: u64) -> bool {
+        self.running() && !self.conclusions.contains_key(&evaluation) && self.is_current(evaluation)
     }
 }
 
@@ -1071,7 +1204,7 @@ pub fn decide_conclusion(
 /// judged this turn with the whole of it in front of it, so the evaluated
 /// path does not read progress and states `idle="0"` (Pursuit §5).
 pub fn decide_evaluated_continuation(fold: &Fold, limit: Option<u64>) -> Option<Decision> {
-    if !fold.running() || fold.pending_driving() || fold.open_tasks() {
+    if !fold.conclusion_ready() {
         return None;
     }
     if limit.is_some_and(|limit| fold.count() as u64 >= limit) {
@@ -1085,7 +1218,7 @@ pub fn decide_evaluated_continuation(fold: &Fold, limit: Option<u64>) -> Option<
 
 #[cfg(test)]
 mod tests {
-    use super::{Conclusion, Fold, conclusion_of};
+    use super::{Conclusion, Fold, Source, TurnStatus, conclusion_of};
     use crate::text;
     use dim_agent_types::InputBlock;
 
@@ -1129,6 +1262,37 @@ mod tests {
         assert_eq!(report("done", "已完成并验证").result_text(), "证");
         assert_eq!(report("done", "😀abcd").result_text(), "d");
         assert_eq!(report("blocked", "完成").result_text(), "");
+    }
+
+    /// A turn end states a pause only as [`decide_turn_end`](super::decide_turn_end)
+    /// decides one: `completed`, with the turn closed and no driving input, and
+    /// a limit the continuation count already reached.
+    #[test]
+    fn only_a_completed_turn_end_states_a_pause() {
+        let fold = Fold {
+            objective: Some("ship it".into()),
+            state: text::State::Active,
+            ..Fold::default()
+        };
+        let mut cancelled = fold.clone();
+        cancelled.apply_source(
+            1,
+            Source::TurnEnd {
+                turn_id: "cancelled",
+                status: TurnStatus::Cancelled,
+            },
+        );
+        assert_eq!(cancelled.pause_at_end(1, Some(0), None), None);
+        let mut completed = fold;
+        completed.apply_source(
+            2,
+            Source::TurnEnd {
+                turn_id: "completed",
+                status: TurnStatus::Completed,
+            },
+        );
+        assert_eq!(completed.pause_at_end(2, Some(0), None), Some("limit"));
+        assert_eq!(completed.pause_at_end(2, None, None), None);
     }
 
     /// R1: each free-text field of a state record sits in its own element with

@@ -417,6 +417,10 @@
   },
   {
     "from": "dim-goal",
+    "to": "dim-agent-capabilities"
+  },
+  {
+    "from": "dim-goal",
     "to": "dim-agent-runtime"
   },
   {
