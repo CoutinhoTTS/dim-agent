@@ -161,7 +161,7 @@ unusable output directory before the process starts.
 `wait` reports the terminal record but never removes it; a timeout answers `running` and only
 stops waiting. The caller decides when the record is no longer needed and calls `settle`. `settle`
 accepts only a terminal task or a shell that exited; a running command, shell or background job
-answers `task_running`; settling an already released id is `Ok`. `kill` is the explicit stop; when
+answers `task_running`; settling an already released id is `Ok`. `kill` is the explicit stop; a second kill while a stop is pending answers `task_running`; when
 it ends a background job the owner marks that job ended so it can be settled. `wait`, `kill`,
 `output` and `tail` address shell command and job ids as well as exec commands, and `output` for a
 job performs a bounded seek/read of its log. A terminal shell answers `write`/`resize` with

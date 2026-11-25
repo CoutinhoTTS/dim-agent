@@ -1236,9 +1236,6 @@ impl HostPlatform {
         if !task.is_running() {
             return Err(HostPlatformError::TaskRunning);
         }
-        if !self.stopping.lock().unwrap().insert(task.id.clone()) {
-            return Err(HostPlatformError::TaskRunning);
-        }
         match &task.kind {
             TaskKind::Command(command) => {
                 command.kill.cancel();
@@ -1271,6 +1268,9 @@ impl HostPlatform {
                     .map_err(|error| HostPlatformError::Io(error.to_string()))
             }
             TaskKind::Job(job) => {
+                if !self.stopping.lock().unwrap().insert(task.id.clone()) {
+                    return Err(HostPlatformError::TaskRunning);
+                }
                 let mut pid = job.pid.subscribe();
                 let mut current = *pid.borrow_and_update();
                 if current.is_none() {
@@ -1303,16 +1303,13 @@ impl HostPlatform {
                                 if kill_job(pid).await.is_err() {
                                     let shutdown = shutdown.clone();
                                     let id = record.id.clone();
-                                    if stopping.lock().unwrap().contains(&id) {
-                                        let stopping = stopping.clone();
-                                        workers.spawn(async move {
-                                            observe_job_release(record, job, pid, shutdown).await;
-                                            stopping.lock().unwrap().remove(&id);
-                                        });
-                                    }
+                                    let stopping = stopping.clone();
+                                    workers.spawn(async move {
+                                        observe_job_release(record, job, pid, shutdown).await;
+                                        stopping.lock().unwrap().remove(&id);
+                                    });
                                     return;
                                 }
-                                stopping.lock().unwrap().remove(&record.id);
                                 record.finish(Terminal {
                                     status: TaskStatus::Cancelled,
                                     exit_code: None,
@@ -1322,6 +1319,7 @@ impl HostPlatform {
                                     output: job.output_record().0,
                                     note: None,
                                 });
+                                stopping.lock().unwrap().remove(&record.id);
                                 return;
                             }
                             tokio::select! {
@@ -1354,7 +1352,6 @@ impl HostPlatform {
                     });
                     return Err(HostPlatformError::Failed(error.to_string()));
                 }
-                self.stopping.lock().unwrap().remove(&task.id);
                 task.finish(Terminal {
                     status: TaskStatus::Cancelled,
                     exit_code: None,
@@ -1364,6 +1361,7 @@ impl HostPlatform {
                     output: job.output_record().0,
                     note: None,
                 });
+                self.stopping.lock().unwrap().remove(&task.id);
                 Ok(())
             }
         }
@@ -3660,7 +3658,7 @@ async fn job_released(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        !native::process_alive(pid)
+        !native::tree_alive(pid)
     }
 }
 
