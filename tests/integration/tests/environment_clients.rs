@@ -1,9 +1,9 @@
 use crate::local_support;
 
 use dim_agent_capabilities::environment_clients::SessionClientsHost;
+use dim_agent_capabilities::environment_clients::{BRANCH_PART, CLIENTS};
 use dim_agent_capabilities::environment_clients::{
-    BRANCH_PART, CLIENTS, ClientChannel, ClientPresence, ClientsChanged, SessionPresences,
-    clients_changes,
+    ClientChannel, ClientPresence, ClientsChanged, SessionPresences, clients_changes,
 };
 use dim_agent_capabilities::execution_settings::prompt::{
     BRANCH_PART as SETTINGS_BRANCH_PART, SESSION_PART,
@@ -12,6 +12,7 @@ use dim_agent_capabilities::execution_settings::{
     ExecutionSettings, ExecutionSettingsHost, prompt::SNAPSHOT_SOURCE,
 };
 use dim_agent_capabilities::host_platform::HostPlatform;
+use dim_agent_runtime::Session;
 use dim_agent_runtime::SessionConfig;
 use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::{
@@ -19,7 +20,7 @@ use dim_agent_runtime::{
     QueryPage, QueryResult, QuerySpec, StoredBranch, StoredEvent, TimelineKey, TimelineReadScope,
     TimelineStore, TimelineStoreBinding, TimelineTrace,
 };
-use dim_agent_runtime::{BranchOptions, Session, testing::branch_events};
+use dim_agent_runtime::{BranchOptions, testing::branch_events};
 use dim_agent_types::{BranchSource, EventKind, InputBlock};
 use local_support::*;
 use rutis::Ctx;

@@ -1,10 +1,12 @@
 use crate::local_support;
 
+use dim_agent_capabilities::execution_settings::ExecutionSettingsError;
 use dim_agent_capabilities::{
-    execution_settings::{ExecutionSettings, ExecutionSettingsError, ExecutionSettingsHost},
+    execution_settings::{ExecutionSettings, ExecutionSettingsHost},
     settings::{SettingsChanged, SettingsScope, settings_changes},
 };
-use dim_agent_runtime::{BranchOptions, Session};
+use dim_agent_runtime::BranchOptions;
+use dim_agent_runtime::Session;
 use dim_agent_types::{BranchSource, EventKind, InputBlock};
 use local_support::*;
 use std::sync::{Arc, Mutex};
