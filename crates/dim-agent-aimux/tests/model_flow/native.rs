@@ -2160,6 +2160,50 @@ async fn a_stream_event_numeric_type_is_not_a_status_and_is_not_retried() {
     chat.close().await;
 }
 
+/// A stream event that reports its status as a three-digit string cuts a
+/// reply that showed only private thought, so the attempt committed nothing
+/// and the request is retried in place; the second attempt finishes the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_status_string_mid_thinking_is_retried_in_place() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit(
+            "stream-code-string-thinking".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events.iter().any(
+            |event| matches!(&event.kind, EventKind::Text(data) if data.delta == "after the retry")
+        ),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(requests, 2, "the string 502 is retried in place");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
 /// A retryable status still cannot replay an attempt that published visible
 /// answer text: a numeric 5xx after the text fails the turn after one
 /// request. The second attempt would answer if it were retried.
@@ -2958,6 +3002,17 @@ async fn respond_native(
                 if endpoint.requests.lock().unwrap().len() == 1 {
                     sse(vec![
                         json!({"error":{"type":"502","message":"the provider reported an opaque label"}}),
+                    ])
+                } else {
+                    frame(json!({"content":"after the retry"}), json!("stop")) + "data: [DONE]\n\n"
+                }
+            } else if request_text.contains("stream-code-string-thinking") {
+                if endpoint.requests.lock().unwrap().len() == 1 {
+                    frame(
+                        json!({"reasoning_content":"thinking before the cut"}),
+                        Value::Null,
+                    ) + &sse(vec![
+                        json!({"error":{"code":"502","message":"Network connection lost."}}),
                     ])
                 } else {
                     frame(json!({"content":"after the retry"}), json!("stop")) + "data: [DONE]\n\n"

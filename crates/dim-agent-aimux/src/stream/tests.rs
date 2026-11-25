@@ -1996,3 +1996,75 @@ fn a_numeric_type_or_provider_code_is_not_a_status() {
         }
     );
 }
+
+/// A stream event that writes its status as an exactly three-digit decimal
+/// string is read through the same status table as the JSON integer, and its
+/// `code` keeps the string.
+#[test]
+fn a_stream_event_status_written_as_a_string_is_a_class_label() {
+    use aimux_core::ApiCallErrorOrigin::StreamEvent as Event;
+
+    for (code, want) in [
+        ("502", ModelFailureKind::ServerError),
+        ("503", ModelFailureKind::ServerError),
+        ("429", ModelFailureKind::RateLimited),
+        ("401", ModelFailureKind::AuthRejected),
+    ] {
+        let (kind, facts) = classified(call_failure(
+            Event,
+            Some(500),
+            json!({"error": {"code": code, "message": "the provider reported the failure"}}),
+            None,
+        ));
+        assert_eq!(facts.kind, want, "{code}");
+        assert_eq!(
+            kind,
+            HostErrorKind::Http {
+                status: Some(500),
+                code: Some(code.into()),
+            },
+            "{code}"
+        );
+    }
+}
+
+/// A string code is a status only in a stream event's own code, exactly three
+/// ASCII digits and inside 400 to 599: anything else keeps the normalized
+/// string as an opaque code, and a response's own status still decides.
+#[test]
+fn a_string_code_is_a_status_only_when_it_is_exactly_three_digits_in_range() {
+    use aimux_core::ApiCallErrorOrigin::{HttpResponse as Http, StreamEvent as Event};
+
+    for code in ["399", "600", "0502"] {
+        let (kind, facts) = classified(call_failure(
+            Event,
+            Some(500),
+            json!({"error": {"code": code, "message": "Unrecognized."}}),
+            None,
+        ));
+        assert_eq!(facts.kind, ModelFailureKind::Unknown, "{code}");
+        assert_eq!(
+            kind,
+            HostErrorKind::Http {
+                status: Some(500),
+                code: Some(code.into()),
+            },
+            "{code}"
+        );
+    }
+
+    let (kind, facts) = classified(call_failure(
+        Http,
+        Some(200),
+        json!({"error": {"code": "500", "message": "refused"}}),
+        None,
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::Unknown);
+    assert_eq!(
+        kind,
+        HostErrorKind::Http {
+            status: Some(200),
+            code: Some("500".into()),
+        }
+    );
+}
