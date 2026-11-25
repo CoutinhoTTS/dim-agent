@@ -1301,11 +1301,11 @@ impl HostPlatform {
                                     stopping.lock().unwrap().remove(&record.id);
                                     return;
                                 }
+                                let tree = job_tree(pid);
                                 if kill_job(pid).await.is_err() {
                                     let shutdown = shutdown.clone();
                                     let id = record.id.clone();
                                     let stopping = stopping.clone();
-                                    let tree = job_tree(pid);
                                     workers.spawn(async move {
                                         observe_job_release(record, job, pid, shutdown, tree).await;
                                         stopping.lock().unwrap().remove(&id);
@@ -1347,13 +1347,13 @@ impl HostPlatform {
                     });
                     return Err(HostPlatformError::TaskRunning);
                 };
+                let tree = job_tree(pid);
                 if let Err(error) = kill_job(pid).await {
                     let record = task.clone();
                     let job = job.clone();
                     let shutdown = self.command_shutdown.clone();
                     let stopping = self.stopping.clone();
                     let id = task.id.clone();
-                    let tree = job_tree(pid);
                     self.command_workers.spawn(async move {
                         observe_job_release(record, job, pid, shutdown, tree).await;
                         stopping.lock().unwrap().remove(&id);
