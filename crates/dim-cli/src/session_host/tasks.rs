@@ -2113,34 +2113,11 @@ mod tests {
         );
     }
 
-    /// Opening the line a creation failure already ended does not start its
-    /// window over: the failure is known before the line's row, and the line
-    /// stays terminal instead of queueing a read.
-    #[tokio::test]
-    async fn a_failed_creation_is_not_armed_when_its_line_is_opened() {
-        let (mut worker, _receiver, _sent) =
-            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
-        worker.session_id = "s1".into();
-        worker.focus = "main".into();
-        worker.task_event("main", create_failed(3, "b-7d"));
-        worker.discover_branch("b-7d");
-
-        worker.line_projection("b-7d");
-
-        assert!(
-            worker.task_history["b-7d"].done,
-            "the failed creation stays terminal"
-        );
-        assert!(
-            !worker.task_history_queue.contains(&"b-7d".to_owned()),
-            "the failed line is not read again on its own"
-        );
-    }
-
     /// A live creation failure the parent's page has not projected yet, or a
     /// page that records the creation and its failure together, leaves the
-    /// child terminal: `/lines` refuses it, and the parent's finished window
-    /// neither resets nor queues it.
+    /// child terminal: `/lines` refuses it, the parent's finished window
+    /// neither resets nor queues it, and opening the failed line starts no
+    /// window read.
     #[tokio::test]
     async fn a_create_failure_is_terminal_whatever_the_page_order() {
         let create = json!({
@@ -2232,6 +2209,17 @@ mod tests {
                 !worker.lines.contains_key("b-7d"),
                 "{page:?}: the refused child has no transcript"
             );
+            if live {
+                worker.line_projection("b-7d");
+                assert!(
+                    worker.task_history["b-7d"].done,
+                    "{page:?}: opening the failed line keeps it terminal"
+                );
+                assert!(
+                    !worker.task_history_queue.contains(&"b-7d".to_owned()),
+                    "{page:?}: the failed line is not read again on its own"
+                );
+            }
         }
     }
 
@@ -2274,6 +2262,36 @@ mod tests {
             "the child waits for its creation"
         );
 
+        worker.methods.insert("session.input.pending".into());
+        worker.methods.insert("session.turn.get".into());
+        worker.task_history_queue.clear();
+        worker.task_history_queue.push_back("b-7c".into());
+        worker.poll_task_history().await.unwrap();
+        assert!(
+            matches!(
+                worker.task_history_request.as_ref().map(|read| &read.stage),
+                Some(ReadStage::Inventory("session.input.pending"))
+            ),
+            "the parent's inventory is in flight"
+        );
+        fail(&mut worker, "the parent's inventory").await;
+        assert!(
+            worker.task_history["b-7c"].error.is_some(),
+            "the parent's inventory failed"
+        );
+        worker.publish();
+        let snapshot = published(&mut receiver);
+        let child = snapshot
+            .lines
+            .iter()
+            .find(|line| line.id == "b-7d")
+            .expect("the failed inventory leaves the child listed");
+        assert_eq!(
+            child.state,
+            LineState::Waiting,
+            "the failed inventory left the child waiting"
+        );
+
         worker.task_event("b-7c", create_failed(400, "b-7d"));
         assert!(
             worker.publish_at.is_some(),
@@ -2289,7 +2307,7 @@ mod tests {
         assert_eq!(
             child.state,
             LineState::CreationFailed,
-            "the published snapshot shows the terminal state"
+            "the published snapshot shows the terminal state, not waiting"
         );
         assert_eq!(snapshot.focus, "b-7c", "the parent stays shown");
 
