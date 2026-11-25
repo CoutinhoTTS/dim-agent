@@ -34,9 +34,12 @@ Decision status: Proposed.
 - Session 由 Agents 持有：进程调用方经 Agents 的 `sessions`，按 `sessionId` 选 Session，可选再带 `branchId`。
 - 分支由它所在的 Session 持有：Session 部件经本 Session 自己的数据面，按 `branchId` 选本 Session 的分支。它不能指定别的 Session。这个数据面是 Session 这个持有者自己的操作，不是只做路由的对象；Session 自己的读取也由它提供（[#2025](https://github.com/arcships/dim/issues/2025)）。
 - 每一层查的是持有者已有的表：Agents 的 Session 表、Session 的分支表。不新建路由对象，也不另建索引。
+- 一个分支在它发布之后才能被选中，结束之后选不中。分支正在建立、还没发布时，进程调用方和 Session 部件看到的都是「分支不在」：两条路径看的是 Session 分支表的同一份发布状态。
 - 选中目标之后，调用的是目标所有者在 catalog 中的操作本身。所有者不为此登记，也不写代码。
 - 调用方只给 id、服务名、方法名和参数，拿不到实例键，也拿不到对象。所以「实例键只在实例内部可读」的约定不变。
-- 选不中时，调用方要能分清三种情况：Session 不在、Session 正在关闭、分支不在。分支结束不等于 Session 关闭：Session 仍然存活时，分支不在对这个分支是最终结果，不影响同一 Session 的其他调用。错误的名字、每种错误下调用方的下一步和验收，在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
+- 选不中时，调用方要能分清三种情况：Session 不在、Session 正在关闭、分支不在。分支结束不等于 Session 关闭：Session 仍然存活时，分支不在对这个分支是最终结果，不影响同一 Session 的其他调用。
+- 加载失败不等于 Session 不在：Agents 正在重载时，调用方可以稍后重试；存储的 Session 恢复失败时，原因要交给调用方。只有 Session 不存在或已经关闭，才是最终结果。这些情况都在调用目标的操作之前回答，不会调用到目标。
+- 错误的名字、每种错误下调用方的下一步和验收，在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
 
 ### D3. 可调用的只有目标作用域的数据面
 
@@ -57,9 +60,9 @@ Decision status: Proposed.
 
 ### D5. 加载与保持属于 Agents
 
-- 进程调用方经 `sessions` 的一次调用，由 Agents 在调用期间保持目标 Session 加载：Session 未加载时先加载，调用结束后释放。所以只有 Session 不存在，或已经关闭、不能再加载时，才是「Session 不在」。这与现在的 `sessions` 方法和 Rpc 相同。
+- 进程调用方经 `sessions` 的一次调用，由 Agents 在调用期间保持目标 Session 加载：Session 未加载时先加载，调用结束后释放。所以只有 Session 不存在，或已经关闭、不能再加载时，才是「Session 不在」（加载失败见 D2）。这与现在的 `sessions` 方法和 Rpc 相同。
 - Session 部件只调用本 Session，它在调用时一定已加载。
-- 在多次调用之间一直保持加载，现在没有调用方需要，不提供；出现这种需求时由 Agents 契约定义。
+- 这一条只规定这条调用路径上的保持。现有的长期保持不变：Collaboration 发出的请求在结果写回之前保持成员 Session 加载，客户端 attach 之后在 detach 之前保持 Session 加载。改变它们是另外的产品决定。
 - 保持只决定 Session 是否加载，选目标与调用仍按 D2。
 
 ### D6. Agents 只保留自己的操作
