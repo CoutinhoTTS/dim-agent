@@ -1305,8 +1305,9 @@ impl HostPlatform {
                                     let shutdown = shutdown.clone();
                                     let id = record.id.clone();
                                     let stopping = stopping.clone();
+                                    let tree = job_tree(pid);
                                     workers.spawn(async move {
-                                        observe_job_release(record, job, pid, shutdown).await;
+                                        observe_job_release(record, job, pid, shutdown, tree).await;
                                         stopping.lock().unwrap().remove(&id);
                                     });
                                     return;
@@ -1352,8 +1353,9 @@ impl HostPlatform {
                     let shutdown = self.command_shutdown.clone();
                     let stopping = self.stopping.clone();
                     let id = task.id.clone();
+                    let tree = job_tree(pid);
                     self.command_workers.spawn(async move {
-                        observe_job_release(record, job, pid, shutdown).await;
+                        observe_job_release(record, job, pid, shutdown, tree).await;
                         stopping.lock().unwrap().remove(&id);
                     });
                     return Err(HostPlatformError::Failed(error.to_string()));
@@ -2891,12 +2893,12 @@ mod windows {
         }
     }
 
-    pub fn tree_pids(pid: u32) -> Vec<u32> {
+    pub fn tree_pids(pid: u32) -> Option<Vec<u32>> {
         // SAFETY: snapshot handle is closed below; entries are sized.
         let parents = unsafe {
             let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snapshot == INVALID_HANDLE_VALUE {
-                return vec![pid];
+                return None;
             }
             let mut entry: PROCESSENTRY32W = std::mem::zeroed();
             entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
@@ -2922,11 +2924,11 @@ mod windows {
             );
             index += 1;
         }
-        tree
+        Some(tree)
     }
 
     pub fn tree_alive(pid: u32) -> bool {
-        tree_pids(pid).into_iter().any(process_alive)
+        tree_pids(pid).is_none_or(|tree| tree.into_iter().any(process_alive))
     }
 
     const SHELL_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
@@ -3612,12 +3614,13 @@ async fn observe_job_release(
     job: Arc<shell::ShellJob>,
     pid: u32,
     shutdown: CancellationToken,
+    tree: Option<Vec<u32>>,
 ) {
     loop {
         if record.is_terminal() {
             return;
         }
-        if job_released(pid).await {
+        if job_released(pid, tree.as_deref()).await {
             record.finish(Terminal {
                 status: TaskStatus::Cancelled,
                 exit_code: None,
@@ -3651,6 +3654,12 @@ pub async fn kill_job(pid: u32) -> io::Result<()> {
     {
         let tree = native::tree_pids(pid);
         native::terminate_tree(pid)?;
+        let Some(tree) = tree else {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "job tree could not be enumerated",
+            ));
+        };
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         while tree.iter().copied().any(native::process_alive) {
             if tokio::time::Instant::now() >= deadline {
@@ -3665,14 +3674,27 @@ pub async fn kill_job(pid: u32) -> io::Result<()> {
     }
 }
 
-async fn job_released(pid: u32) -> bool {
+pub(crate) fn job_tree(pid: u32) -> Option<Vec<u32>> {
     #[cfg(unix)]
     {
+        let _ = pid;
+        None
+    }
+    #[cfg(windows)]
+    {
+        native::tree_pids(pid)
+    }
+}
+
+async fn job_released(pid: u32, tree: Option<&[u32]>) -> bool {
+    #[cfg(unix)]
+    {
+        let _ = tree;
         wait_job_exit(pid).await.is_ok()
     }
     #[cfg(windows)]
     {
-        !native::tree_alive(pid)
+        tree.is_some_and(|tree| tree.iter().copied().all(|pid| !native::process_alive(pid)))
     }
 }
 
