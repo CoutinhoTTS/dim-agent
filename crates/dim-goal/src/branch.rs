@@ -1007,9 +1007,6 @@ impl Owner {
         let moved = std::cell::Cell::new(false);
         let events = self.timeline.append_batch_registered(drafts, |events| {
             if let Some(admitted) = &admitted {
-                if let Some(error) = self.dispatcher.failure() {
-                    return Err(error);
-                }
                 if admitted.is_closing() {
                     return Err(AgentError::Closed(self.branch_id.clone()));
                 }
