@@ -2379,3 +2379,146 @@ async fn a_decision_folded_while_a_change_loads_its_work_is_taken() {
         env.close().await;
     }
 }
+
+/// A `done` or `blocked` conclusion that folds while a change holds task
+/// admission states its decision even with a background task still open: the
+/// background wait holds a `continue`, not a terminal conclusion (#2158).
+#[tokio::test]
+async fn a_terminal_conclusion_folded_in_the_settlement_window_is_stated() {
+    for case in ["done", "blocked"] {
+        let env = Env::start().await;
+        let (evaluation, create) = completion_requested(&env).await;
+
+        // A background task the branch started is still open when the
+        // conclusion arrives.
+        env.exec_started("main", "work", "task-1");
+        let head = env.timeline("main").committed();
+        env.dispatched("main", head).await;
+
+        // The operator pause settles the decisions and stops before it
+        // composes its record and trigger.
+        let mut change = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Change,
+            head,
+            Some(head),
+        );
+        let pause = env.goal("pause", json!({}));
+        let (pause, fact) = tokio::join!(pause, async {
+            assert_eq!(
+                change.arrived().await,
+                head,
+                "{case}: the pause's writer is held at the cutoff it read"
+            );
+            let fact = match case {
+                "done" => {
+                    write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified")
+                }
+                _ => write_conclusion(
+                    &env,
+                    &create.branch,
+                    evaluation,
+                    "blocked",
+                    "BLOCKED: a deploy key",
+                ),
+            };
+            env.dispatched("main", fact).await;
+            change.release();
+            fact
+        });
+        pause.expect("the pause writes");
+        let expected = match case {
+            "done" => texts::evaluated("main", "ship it", "completed", "verified", fact),
+            _ => texts::evaluated("main", "ship it", "blocked", "a deploy key", fact),
+        };
+        let writes = env.writes("main").await;
+        let markers: Vec<&str> = writes.iter().map(|block| block.marker.as_str()).collect();
+        assert!(
+            writes.iter().any(|block| block.text == expected),
+            "{case}: the conclusion folded at {fact} while a task is open is stated; writes: {markers:?}"
+        );
+        env.close().await;
+    }
+}
+
+/// A deferred record whose append fails keeps its place: a later change states
+/// the decision instead of losing it with the failed write (#2158).
+#[tokio::test]
+async fn a_failed_deferred_record_leaves_its_decision_to_the_next_change() {
+    let env = Env::start().await;
+    let (_, create) = completion_requested(&env).await;
+    let head = env.timeline("main").committed();
+    env.dispatched("main", head).await;
+
+    // The operator pause settles the decisions and stops before it composes
+    // its record and trigger.
+    let mut change = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Change,
+        head,
+        Some(head),
+    );
+    let pause = env.goal("pause", json!({}));
+    let (pause, failed) = tokio::join!(pause, async {
+        assert_eq!(
+            change.arrived().await,
+            head,
+            "the pause's writer is held at the cutoff it read"
+        );
+        // The evaluator's line ends in that window: its failure is deferred to
+        // the settlement the pause holds.
+        let failed = env
+            .emit(
+                "main",
+                EventKind::BranchEnded(BranchEndedData {
+                    branch: create.branch.clone(),
+                    end_event: 0,
+                    source: BranchSource::Host {
+                        operation_id: "user".into(),
+                    },
+                    ancestor: None,
+                }),
+            )
+            .sequence;
+        env.dispatched("main", failed).await;
+
+        // The deferred record's append is refused: its published status no
+        // longer matches the state its writer states.
+        let failure = env.probe.fail_next_state();
+        change.release();
+        failure
+            .await
+            .expect("the writer refuses the deferred failure report");
+        failed
+    });
+    assert_eq!(
+        env.probe.failed_states(),
+        1,
+        "the writer's own check refuses the deferred record at {failed}"
+    );
+    assert!(
+        pause.is_err(),
+        "the change whose deferred record was refused reports the failure: {pause:?}"
+    );
+
+    // The next change states what the failed one kept.
+    env.goal("resume", json!({}))
+        .await
+        .expect("the resume writes");
+    let writes = env.writes("main").await;
+    let markers: Vec<&str> = writes.iter().map(|block| block.marker.as_str()).collect();
+    let expected = texts::evaluated_pause(
+        "main",
+        "ship it",
+        "evaluation_failed",
+        "the evaluator could not check the result",
+        failed,
+    );
+    assert!(
+        writes.iter().any(|block| block.text == expected),
+        "the deferred record refused at {failed} is stated by the next change; writes: {markers:?}"
+    );
+    env.close().await;
+}
