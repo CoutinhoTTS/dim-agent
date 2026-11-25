@@ -717,6 +717,7 @@ impl ShellSession {
     async fn handle_shell_exit(self: &Arc<Self>, generation: u64, end: Option<WaitReply>) {
         let mut settled: Vec<Settlement> = Vec::new();
         let mut orphans: Vec<BackgroundTask> = Vec::new();
+        let mut cleanup_unconfirmed = false;
         let occupying;
         #[allow(
             unused_assignments,
@@ -769,29 +770,81 @@ impl ShellSession {
                 )
                 .await
                 .ok();
-            let data = reply.map_or_else(
-                || ExecEndedData {
-                    task_id: occ.task_id.clone(),
-                    status: ExecStatus::Failed,
-                    result: reset_result(&occ.task_id, &occ.output_path, &preview),
-                },
-                |reply| ended_from_reply(&occ.task_id, &reply, &occ.output_path),
-            );
+            if reply
+                .as_ref()
+                .is_none_or(|reply| reply.status == WaitStatus::Running)
             {
+                let id = occ.task_id.clone();
+                let path = occ.output_path.clone();
+                let ended = occ.ended.clone();
+                let fallback = reset_result(&id, &path, &preview);
                 let mut inner = self.inner.lock().await;
-                inner.occupy_tail = Some(preview);
-                inner.occupy_exit = None;
+                if inner.occupying.is_none() {
+                    inner.occupying = Some(occ);
+                }
+                drop(inner);
+                let this = self.clone();
+                let host = self.host.clone();
+                self.tasks.lock().await.spawn(async move {
+                    let reply = host
+                        .wait(
+                            WaitRequest {
+                                task_id: id.clone(),
+                                timeout_ms: None,
+                            },
+                            never_cancelled(),
+                        )
+                        .await;
+                    let data = match reply {
+                        Ok(reply) => ended_from_reply(&id, &reply, &path),
+                        Err(_) => ExecEndedData {
+                            task_id: id.clone(),
+                            status: ExecStatus::Failed,
+                            result: fallback,
+                        },
+                    };
+                    let mut inner = this.inner.lock().await;
+                    if inner
+                        .occupying
+                        .as_ref()
+                        .is_none_or(|task| task.task_id != id)
+                    {
+                        return;
+                    }
+                    inner.occupying = None;
+                    inner.occupy_tail = match &data.result.content {
+                        ToolContent::Text(text) => Some(text.clone()),
+                        _ => None,
+                    };
+                    inner.occupy_exit = None;
+                    drop(inner);
+                    let _ = host
+                        .settle(TaskRequest {
+                            task_id: id.clone(),
+                        })
+                        .await;
+                    this.settle(data);
+                    ended.notify_waiters();
+                });
+            } else {
+                let reply = reply.expect("checked above");
+                let data = ended_from_reply(&occ.task_id, &reply, &occ.output_path);
+                {
+                    let mut inner = self.inner.lock().await;
+                    inner.occupy_tail = Some(preview);
+                    inner.occupy_exit = None;
+                }
+                let _ = self
+                    .host
+                    .settle(TaskRequest {
+                        task_id: occ.task_id.clone(),
+                    })
+                    .await;
+                settled.push(Settlement {
+                    data,
+                    ended: Some(occ.ended),
+                });
             }
-            let _ = self
-                .host
-                .settle(TaskRequest {
-                    task_id: occ.task_id.clone(),
-                })
-                .await;
-            settled.push(Settlement {
-                data,
-                ended: Some(occ.ended),
-            });
         }
         for task in orphans {
             let killed = self
@@ -812,6 +865,19 @@ impl ShellSession {
                 )
                 .await
                 .ok();
+            if reply
+                .as_ref()
+                .is_none_or(|reply| reply.status == WaitStatus::Running)
+            {
+                cleanup_unconfirmed = true;
+                self.inner
+                    .lock()
+                    .await
+                    .background
+                    .insert(task.task_id.clone(), task);
+                continue;
+            }
+            let reply = reply.expect("checked above");
             if killed.is_ok() {
                 let _ = self
                     .host
@@ -820,16 +886,9 @@ impl ShellSession {
                     })
                     .await;
             }
-            let preview = file_tail(&task.output_path, OUTPUT_LIMIT);
-            let mut data = reply.map_or_else(
-                || ExecEndedData {
-                    task_id: task.task_id.clone(),
-                    status: ExecStatus::Failed,
-                    result: reset_result(&task.task_id, &task.output_path, &preview),
-                },
-                |reply| ended_from_reply(&task.task_id, &reply, &task.output_path),
-            );
+            let mut data = ended_from_reply(&task.task_id, &reply, &task.output_path);
             if let Err(error) = killed {
+                cleanup_unconfirmed = true;
                 if let ToolContent::Text(text) = &mut data.result.content {
                     text.push_str(&format!("\nJob could not be terminated: {error}"));
                 }
@@ -840,7 +899,16 @@ impl ShellSession {
             settled.push(Settlement { data, ended: None });
         }
         if let Some(task_id) = shell_task {
-            self.stop_shell(&task_id).await;
+            if cleanup_unconfirmed {
+                let _ = self
+                    .host
+                    .kill(TaskRequest {
+                        task_id: task_id.clone(),
+                    })
+                    .await;
+            } else {
+                self.stop_shell(&task_id).await;
+            }
         }
         for settlement in settled {
             self.settle(settlement.data);
