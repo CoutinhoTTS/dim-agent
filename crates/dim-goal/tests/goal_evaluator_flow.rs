@@ -2522,3 +2522,178 @@ async fn a_failed_deferred_record_leaves_its_decision_to_the_next_change() {
     );
     env.close().await;
 }
+
+/// A conclusion or an evaluator failure that commits after the evaluation
+/// request drained and folds before its batch is stated first: the request
+/// writes only while the cutoff that drain read still stands (#2172).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_folded_in_the_evaluation_request_window_is_stated() {
+    for case in ["done", "blocked", "evaluation_failed"] {
+        let env = Env::start().await;
+        let (evaluation, create) = completion_requested(&env).await;
+        let head = env.timeline("main").committed();
+        env.dispatched("main", head).await;
+
+        // The request settles its decisions, drains, and stops before it
+        // commits the record that states the request.
+        let mut batch = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Batch,
+            head,
+            Some(head),
+        );
+        let report = env.tool(
+            "main",
+            json!({"status": "completed", "summary": "all tests pass"}),
+        );
+        let (_, fact) = tokio::join!(report, async {
+            assert_eq!(
+                batch.arrived().await,
+                head,
+                "{case}: the request is held at the cutoff it drained"
+            );
+            let fact = match case {
+                "done" => {
+                    write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified")
+                }
+                "blocked" => write_conclusion(
+                    &env,
+                    &create.branch,
+                    evaluation,
+                    "blocked",
+                    "BLOCKED: a deploy key",
+                ),
+                _ => {
+                    env.emit(
+                        "main",
+                        EventKind::BranchEnded(BranchEndedData {
+                            branch: create.branch.clone(),
+                            end_event: 0,
+                            source: BranchSource::Host {
+                                operation_id: "user".into(),
+                            },
+                            ancestor: None,
+                        }),
+                    )
+                    .sequence
+                }
+            };
+            assert_eq!(
+                fact,
+                head + 1,
+                "{case}: the decision commits behind the request's drain"
+            );
+            env.dispatched("main", fact).await;
+            batch.release();
+            fact
+        });
+        let writes = env.writes("main").await;
+        let markers: Vec<&str> = writes.iter().map(|block| block.marker.as_str()).collect();
+        assert_decision_and_state(&writes, &markers, case, fact);
+        env.close().await;
+    }
+}
+
+/// A conclusion that commits behind the evaluation request's drain and folds
+/// after its batch leaves that batch unwritten: the request drains again,
+/// states the decision, and composes its own record from the fold that holds
+/// it (#2172).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_decision_folded_while_the_evaluation_request_batch_is_held_is_stated() {
+    for case in ["done", "blocked"] {
+        let env = Env::start().await;
+        let (evaluation, create) = completion_requested(&env).await;
+        let head = env.timeline("main").committed();
+        env.dispatched("main", head).await;
+
+        // The request is held before its batch, and the fold holds the
+        // decision the test commits in that window.
+        let mut batch = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Batch,
+            head,
+            Some(head),
+        );
+        let mut folded = dim_goal::testing::hold_input(env.session_id(), "main", head + 1);
+        let report = env.tool(
+            "main",
+            json!({"status": "completed", "summary": "all tests pass"}),
+        );
+        let (_, fact) = tokio::join!(report, async {
+            assert_eq!(
+                batch.arrived().await,
+                head,
+                "{case}: the request is held at the cutoff it drained"
+            );
+            let fact = match case {
+                "done" => {
+                    write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified")
+                }
+                _ => write_conclusion(
+                    &env,
+                    &create.branch,
+                    evaluation,
+                    "blocked",
+                    "BLOCKED: a deploy key",
+                ),
+            };
+            assert_eq!(
+                fact,
+                head + 1,
+                "{case}: the decision commits behind the request's drain"
+            );
+            assert_eq!(
+                folded.arrived().await,
+                fact,
+                "{case}: the fold holds the decision"
+            );
+            batch.release();
+            folded.release();
+            fact
+        });
+        let writes = env.writes("main").await;
+        let markers: Vec<&str> = writes.iter().map(|block| block.marker.as_str()).collect();
+        assert_decision_and_state(&writes, &markers, case, fact);
+        env.close().await;
+    }
+}
+
+/// Asserts that the decision committed at `fact` has its own state record and
+/// that the request's record keeps it instead of restoring `active`.
+fn assert_decision_and_state(writes: &[Block], markers: &[&str], case: &str, fact: u64) {
+    let (needle, expected) = match case {
+        "done" => (
+            r#"status="completed""#,
+            texts::evaluated("main", "ship it", "completed", "verified", fact),
+        ),
+        "blocked" => (
+            r#"status="blocked""#,
+            texts::evaluated("main", "ship it", "blocked", "a deploy key", fact),
+        ),
+        _ => (
+            r#"reason="evaluation_failed""#,
+            texts::evaluated_pause(
+                "main",
+                "ship it",
+                "evaluation_failed",
+                "the evaluator could not check the result",
+                fact,
+            ),
+        ),
+    };
+    assert!(
+        writes.iter().any(|block| block.text == expected),
+        "{case}: the decision committed at {fact} is stated; writes: {markers:#?}"
+    );
+    let last = writes
+        .iter()
+        .rev()
+        .find(|block| block.marker.contains(r#"kind="state""#))
+        .expect("the request's state record");
+    assert!(
+        last.marker.contains(needle),
+        "{case}: the goal keeps the state decided at {fact}; writes: {markers:#?}"
+    );
+}

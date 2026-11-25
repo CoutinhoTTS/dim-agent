@@ -708,6 +708,14 @@ impl Owner {
                 if decisions.is_cancelled() {
                     return Err(AgentError::Cancelled("Goal command superseded".into()));
                 }
+                #[cfg(feature = "testing")]
+                crate::testing::stage_held(
+                    &self.session_id,
+                    &self.branch_id,
+                    crate::testing::Stage::Batch,
+                    head,
+                )
+                .await;
                 if matches!(
                     &change,
                     Change::Report {
