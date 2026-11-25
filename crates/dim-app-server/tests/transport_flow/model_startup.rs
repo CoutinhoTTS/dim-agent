@@ -1413,3 +1413,114 @@ async fn a_temporary_route_on_the_builtin_xai_takes_only_the_native_xai_image_fo
     fixture.abort();
     std::fs::remove_dir_all(home).unwrap();
 }
+
+/// Asserts that both environment snapshots and the `input/applied` events the
+/// queue writes for them are published through `through`.
+async fn opening_snapshots(session: &dim_agent_runtime::Session, through: u64) {
+    use dim_agent_capabilities::environment_clients::CLIENTS;
+    use dim_agent_capabilities::execution_settings::prompt::SNAPSHOT_SOURCE;
+
+    let events = branch_events(session, "main", ..=through).await.unwrap();
+    let seen: Vec<_> = events.iter().map(|event| event.kind.key()).collect();
+    for (source, label) in [
+        (CLIENTS, "the client presence snapshot"),
+        (SNAPSHOT_SOURCE, "the execution settings snapshot"),
+    ] {
+        let marker = format!("<dim-state source=\"{source}\">");
+        let snapshot = events.iter().find(|event| {
+            matches!(&event.kind, EventKind::InputMessage(data)
+                if data.user.is_none()
+                    && data.blocks.iter().any(|block| matches!(block,
+                        dim_agent_types::InputBlock::Raw { text, .. }
+                            if text.starts_with(&marker))))
+        });
+        let Some(snapshot) = snapshot else {
+            panic!("{label} is published through {through}: {seen:?}");
+        };
+        assert!(
+            events.iter().any(|event| matches!(&event.kind,
+                EventKind::InputApplied(data) if data.input_id == snapshot.id)),
+            "the input queue applied {label} through {through}: {seen:?}"
+        );
+    }
+}
+
+/// The environment snapshots are facts of the branch opening: `session.create`
+/// and a restore return only after both snapshots and the `input/applied`
+/// events the queue writes for them are committed and dispatched, so a
+/// temporary route is admitted without a `session.idle` in between (#2165).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_opened_branch_returns_its_environment_snapshots_and_admits_a_temporary_route() {
+    let home = std::env::temp_dir().join(format!("dim-opening-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let server = start(&home).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let view = client
+        .rpc("provider.management", json!({"providerId":"xai"}))
+        .await;
+    assert_ok(&view);
+    let version = view["result"]["providers"][0]["version"].as_u64().unwrap();
+    assert_ok(
+        &client
+            .rpc(
+                "provider.update",
+                json!({"providerId":"xai","expectedVersion":version,
+                    "patch":{"credential":{"action":"set","value":"opening-route-key"},"enabled":true}}),
+            )
+            .await,
+    );
+    assert_ok(
+        &client
+            .rpc(
+                "provider.routes.set",
+                json!({"providerId":"xai",
+                    "connection":{"apiFormat":"openai-compatible","baseUrl":"http://127.0.0.1:1/opening/v1"}}),
+            )
+            .await,
+    );
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"model":{"provider":"xai","modelId":"grok-4.7"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let through = created["result"]["sequence"].as_u64().unwrap();
+    let session = server.agent().unwrap().get_session(&sid).unwrap();
+    opening_snapshots(&session, through).await;
+
+    let selected = client
+        .rpc(
+            "session.model.update",
+            json!({"sessionId":sid,"branchId":"main",
+                "providerId":"xai","modelId":"grok-4.7"}),
+        )
+        .await;
+    assert_ok(&selected);
+    assert_ne!(
+        selected["result"]["model"]["providerId"],
+        json!("xai"),
+        "the temporary route is the execution identity: {selected}"
+    );
+
+    server.shutdown();
+    server.join().await.unwrap();
+    let server = start(&home).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let recovered = client
+        .rpc(
+            "session.model.update",
+            json!({"sessionId":sid,"branchId":"main",
+                "providerId":"xai","modelId":"grok-4.7","requireExpiredRoute":true}),
+        )
+        .await;
+    assert_ok(&recovered);
+    let session = server.agent().unwrap().get_session(&sid).unwrap();
+    let through = session.sequence("main").unwrap();
+    opening_snapshots(&session, through).await;
+
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
