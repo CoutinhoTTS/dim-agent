@@ -388,7 +388,7 @@ providerService.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 5. 验证
 
-- `xtask check`：按 §2.3 验证当前 catalog，拒绝缺少 dispatcher 的公共 shared 名称。
+- 运行 `cargo run --locked -p xtask -- check`，按 §2.3 校验实际装配中的服务面。生成的 catalog 仅供本地查阅。
 - 每个服务：现有 flow 测试 + 一个 loopback session 的跨边界用例；不新增 mock-only 测试。
 - 数量：不改 `cargo test` 的总量要求；按受影响 crate 跑，最终 `cargo test --workspace --locked`。
 
@@ -398,4 +398,4 @@ providerService.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 7. 交付顺序
 
-[#1292](https://github.com/arcships/dim/issues/1292) 按 §3.2 的首批操作和各 owner 推进 §2.6 的迁移，包含 §3.1 的公共名称与私有装配边界。各实现批次随代码更新生成的 catalog 及自己负责的操作契约。
+[#1292](https://github.com/arcships/dim/issues/1292) 按 §3.2 的首批操作和各 owner 推进 §2.6 的迁移，包含 §3.1 的公共名称与私有装配边界。每批随代码更新对应 owner 的操作契约，并按 §5 验证。

@@ -12,8 +12,7 @@ points. The configuration owner,
 HooksSettings, is an App Server plugin: it registers the `hooks`,
 `hooks-projects` and `hooks-plugins` Settings sources, the `hooks.*` management
 methods, the `P:HooksService` that PluginManager's owner operations call, and
-the `HookSources` Session part that binds `S:HookSourcesHost`. Their assembly
-is in the generated App Server services page.
+the `HookSources` Session part that binds `S:HookSourcesHost`.
 
 A plugin's document is registered through `P:HooksService`, kept as the
 `{dir, hooks}` entry of `hooks-plugins` and read after the user's and the
