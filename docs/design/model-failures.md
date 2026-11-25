@@ -37,7 +37,9 @@ streaming is never cut; an expired bound outranks a part that is ready at the
 same moment, and cancelling the request outranks both. A wait whose event has a
 producer-reported instant is judged against that instant: the transport reports
 the moment it produced the response headers, so headers written inside the
-allowance are on time even when the driver next polls after it. A wait with no
+allowance are on time even when the driver next polls after it, and headers
+written after the allowance are late even when the report is read before the
+timer that ends it fires. A wait with no
 such instant, the provider returning the stream and one stream part, keeps the
 deadline-first order.
 
