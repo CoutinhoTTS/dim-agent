@@ -24,7 +24,7 @@ Decision status: Proposed.
 - 进程作用域的调用方：用 `sessionId` 到达 Session 组的数据面，用 `(sessionId, branchId)` 到达分支组的数据面。
 - Session 作用域的调用方：用 `branchId` 到达本 Session 分支组的数据面。`branchId` 就是分支线的 id（line id）。
 - 调用方直接调用目标所有者自己的操作。中间不为某个操作单独开转发方法（例如 `sessions` 现在的 `withdraw`、`pending`），不改写请求或回复，也不转述目标所有者的错误。
-- D2 中按 id 选目标的调用不算转发：它不带业务含义，对每个操作都一样，请求、回复和目标所有者的错误原样传递；只有选不中时，才由持有者回答 D2 的三种错误。错误的形状在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
+- D2 中按 id 选目标的调用不算转发：它不带业务含义，对每个操作都一样，请求、回复和目标所有者的错误原样传递；只有选不中或加载不了时，才由持有者回答 D2 中的情况（三种选不中，以及加载失败）。错误的形状在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
 - 调用里表示分支的字段名由绑定决定，在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
 
 ### D2. 由持有实例的一方按 id 选目标，实例键不离开实例
@@ -38,7 +38,7 @@ Decision status: Proposed.
 - 选中目标之后，调用的是目标所有者在 catalog 中的操作本身。所有者不为此登记，也不写代码。
 - 调用方只给 id、服务名、方法名和参数，拿不到实例键，也拿不到对象。所以「实例键只在实例内部可读」的约定不变。
 - 选不中时，调用方要能分清三种情况：Session 不在、Session 正在关闭、分支不在。分支结束不等于 Session 关闭：Session 仍然存活时，分支不在对这个分支是最终结果，不影响同一 Session 的其他调用。
-- 加载失败不等于 Session 不在：Agents 正在重载时，调用方可以稍后重试；存储的 Session 恢复失败时，原因要交给调用方。只有 Session 不存在或已经关闭，才是最终结果。这些情况都在调用目标的操作之前回答，不会调用到目标。
+- 加载失败不等于 Session 不在：Agents 正在重载时，调用方可以稍后重试；存储的 Session 恢复失败时，原因要交给调用方。只有 Session 不存在或已经关闭，才是「Session 不在」。这些情况都在调用目标的操作之前回答，不会调用到目标。
 - 错误的名字、每种错误下调用方的下一步和验收，在 [#2127](https://github.com/arcships/dim/issues/2127) 定义。
 
 ### D3. 可调用的只有目标作用域的数据面
