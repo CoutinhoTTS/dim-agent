@@ -823,13 +823,16 @@ impl Projection {
         }
     }
 
-    /// The content of a held operator message for user queue actions.
-    pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
+    fn user_queue(&self) -> impl Iterator<Item = &dim_agent_types::PendingInput> {
         self.inputs
             .iter()
-            .find(|input| {
-                input.input_id == input_id && !input.applied && input.has_raw_blocks == Some(false)
-            })
+            .filter(|input| input.mode != InputMode::Steer && input.has_raw_blocks == Some(false))
+    }
+
+    /// The content of a held operator message for user queue actions.
+    pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
+        self.user_queue()
+            .find(|input| input.input_id == input_id && !input.applied)
             .and_then(|input| input.user.as_ref())
     }
 
@@ -900,11 +903,10 @@ impl Projection {
     }
 
     pub fn snapshot(&self) -> ViewSnapshot {
-        let mut pending: Vec<_> = self.inputs.iter().collect();
+        let mut pending: Vec<_> = self.user_queue().collect();
         pending.sort_by_key(|input| (!input.applied, input.sequence));
         let queued = pending
             .into_iter()
-            .filter(|input| input.has_raw_blocks == Some(false))
             .filter_map(|input| {
                 let user = input.user.as_ref()?;
                 Some(QueuedInput {
@@ -4127,6 +4129,7 @@ mod tests {
                 input(1, "in-5", "withdrawn", "queue"),
                 control(2, "deleted", "in-5"),
                 input(3, "in-6", "sent later", "queue"),
+                input(4, "in-7", "change course", "steer"),
             ],
         );
         assert!(
@@ -4135,6 +4138,10 @@ mod tests {
         );
         assert_eq!(replay.snapshot().queued[0].id, "in-6");
         assert!(replay.snapshot().queued[0].held);
+        assert_eq!(replay.snapshot().queued.len(), 1);
+        assert!(replay.held_input("in-7").is_none());
+        apply(&mut replay, &[control(5, "applied", "in-7")]);
+        assert_eq!(replay.snapshot().rows[0].text, "change course");
     }
 
     #[test]
