@@ -1,9 +1,18 @@
 {
   "description": "The same two-subsystem task on a small window, so main and its line compact and must still know which line they are",
   "message": "Two independent subsystems need building in this project, and each has its own failing test suite:\n\n- parser/ — the integer expression parser specified in parser/expr.py\n- cache/ — the bounded LRU cache with TTL specified in cache/lru.py\n\nThey share no code and do not touch the same files. Make `python3 -m unittest discover -s tests` pass for both, and keep the implementations to their specs.",
+  "calls": [
+    {"method": "session.branch_create", "params": {"parentBranchId": "main", "at": "session_open", "prompt": "Build the parser/ subsystem specified in parser/expr.py so `python3 -m unittest discover -s tests -p 'test_expr.py' -v` passes, keeping to its spec. Do not touch cache/ or tests/test_lru.py."}}
+  ],
+  "steers": [
+    {"afterSeconds": 0.1, "text": "A user line is already building parser/ (parser/expr.py and tests/test_expr.py). Keep main strictly on cache/ (cache/lru.py and tests/test_lru.py): do not open another line and do not edit parser/ files."}
+  ],
+  "afterIdle": {
+    "request": "Re-run the tests of the subsystem you are building and report whether they pass."
+  },
   "budget": {"turns": 30, "seconds": 900, "window": 29000},
   "probes": [
-    {"id": "identity-after-compaction", "kind": "must_show", "text": "after a compaction, main's next request still carries its roster of open lines and a line's next request still carries its own identity block"},
+    {"id": "identity-after-compaction", "kind": "must_show", "text": "after a compaction, a line's next request still carries its own identity block"},
     {"id": "line-stays-a-line", "kind": "must_not_show", "text": "after a compaction a line acts as if it were main or forgets which line it is"}
   ]
 }

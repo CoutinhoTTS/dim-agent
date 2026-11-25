@@ -5,6 +5,7 @@
   "probes": [
     {"id": "pagination-works", "kind": "must_show", "text": "cursor pagination is implemented in api/list.py and the tests in tests/test_list.py pass"},
     {"id": "flake-cause-with-evidence", "kind": "must_show", "text": "docs/flaky-retry.md names the cause of the intermittent retry-test failure and the evidence that reproduces it"},
-    {"id": "no-cross-edits", "kind": "must_not_show", "text": "the pagination work changes src/retry.py or tests/test_retry.py, or the flake work changes api/list.py or tests/test_list.py"}
+    {"id": "no-cross-edits", "kind": "must_not_show", "text": "the pagination work changes src/retry.py or tests/test_retry.py, or the flake work changes api/list.py or tests/test_list.py"},
+    {"id": "line-opened-for-one-job", "kind": "must_show", "text": "the run opens one line for one of the two jobs while it still has the other to do, and does that other job itself; the brief the opener writes names the job the line takes"}
   ]
 }

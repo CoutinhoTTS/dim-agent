@@ -8367,6 +8367,182 @@ async fn a_roster_and_an_identity_replay_separately_after_a_compaction() {
     soon(agent.close()).await.unwrap();
 }
 
+/// [`Compact`] with a 29,000-token window, so a manual step has a cut that
+/// keeps the last turn inside the retention bound.
+#[derive(Clone, Copy)]
+struct Roomy;
+impl ResolveContextModel for Roomy {
+    fn resolve(
+        &self,
+        _: Arc<ModelRequest>,
+        _: CancellationToken,
+    ) -> HostFuture<'_, Arc<dyn ContextModel>> {
+        Box::pin(async { Ok(Arc::new(Roomy) as Arc<dyn ContextModel>) })
+    }
+}
+impl ContextModel for Roomy {
+    fn context_window(&self) -> f64 {
+        29_000.
+    }
+    fn output_tokens(&self) -> f64 {
+        64.
+    }
+    fn threshold_tokens(&self) -> f64 {
+        20_000.
+    }
+    fn count_tokens(&self, request: &ModelRequest) -> f64 {
+        Compact.count_tokens(request)
+    }
+}
+impl CompactionStrategy for Roomy {
+    fn name(&self) -> &str {
+        Compact.name()
+    }
+    fn replacement_size(&self, model: &dyn ContextModel) -> f64 {
+        Compact.replacement_size(model)
+    }
+    fn compact(
+        &self,
+        input: CompactionInput,
+        cancel: CancellationToken,
+    ) -> HostFuture<'_, StrategyOutcome> {
+        Compact.compact(input, cancel)
+    }
+}
+
+/// A manual compaction, the one `session.context.compact` asks the loop for,
+/// replays a line's identity the way an automatic one does: the request after
+/// it still carries which line it is (Timeline branches §12.3). The identity
+/// probe of the compact scenario now reads a manual compaction, so this is the
+/// property that probe depends on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_manual_compaction_replays_a_lines_identity() {
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    builder
+        .timeline_store(dim_agent_runtime::TimelineStoreBinding::new(Arc::new(
+            MemoryTimelineStore::default(),
+        )))
+        .session_value(Arc::new(HistoryRenderer::default()))
+        .process_value(Arc::new(ModelHost(Arc::new(FlowModel))))
+        .session_value(Arc::new(ToolHost(Arc::new(MockTools))))
+        .session_value(Arc::new(PrepareContextHost(Arc::new(IdentityContext))))
+        .session_value(Arc::new(ContextModelHost(Some(Arc::new(Roomy)))))
+        .session_value(Arc::new(CompactionStrategyHost(Some(Arc::new(Roomy)))))
+        .require_feature(
+            Feature::new("PrepareModelHost").session("PrepareModelHost", |names| {
+                Ok(Box::new(DefaultPrepareModelPlugin::new(names)?))
+            }),
+        );
+    defaults::install(&mut builder);
+    let agent = MinimalHost::start(&builder).await.unwrap();
+    // The Session's own model: a manual compaction at idle has no request to
+    // adopt one from.
+    let session = soon(agent.create_session(SessionConfig {
+        model: ModelSelection {
+            provider_id: "test".into(),
+            model_id: "flow".into(),
+            capability_snapshot: None,
+            config: None,
+            metadata: None,
+        },
+        ..SessionConfig::default()
+    }))
+    .await
+    .unwrap();
+    let line = open_line(&session, "compact my line").await;
+    for text in ["x".repeat(1500), "y".repeat(1500)] {
+        session.submit(text, InputMode::Queue, &line).await.unwrap();
+        patient(session.idle(&line)).await.unwrap();
+    }
+    // The manual step reads the configuration the branch adopted; a flow test
+    // adopts none until it configures one.
+    session
+        .configure(
+            ConfigureUpdate {
+                model: Some(ModelSelection {
+                    provider_id: "test".into(),
+                    model_id: "flow".into(),
+                    capability_snapshot: None,
+                    config: None,
+                    metadata: None,
+                }),
+                ..Default::default()
+            },
+            &line,
+        )
+        .await
+        .unwrap();
+    let command = session
+        .service::<dim_agent_capabilities::agent_loop::AgentLoop>(&line)
+        .expect("the line's loop")
+        .compact()
+        .unwrap();
+    // A compaction is not a turn: `session.idle` returns before its step has
+    // written its result.
+    patient(async {
+        loop {
+            let events = chain_events(&session, &line, ..).await.unwrap();
+            if events.iter().any(|event| {
+                matches!(&event.kind, EventKind::ContextCompaction(data)
+                    if data.command == Some(command))
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    session
+        .submit("after the compaction".into(), InputMode::Queue, &line)
+        .await
+        .unwrap();
+    patient(session.idle(&line)).await.unwrap();
+    let events = chain_events(&session, &line, ..).await.unwrap();
+    let (at, outcome) = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ContextCompaction(data) if data.command == Some(command) => {
+                Some((event.sequence, &data.outcome))
+            }
+            _ => None,
+        })
+        .expect("the manual compaction wrote its result");
+    assert!(
+        matches!(outcome, ContextCompactionResult::Completed { .. }),
+        "the manual compaction completed on the line: {outcome:?}"
+    );
+    let message = baseline_message(&events, "branch:line")
+        .expect("the manual compaction replayed the line's identity");
+    let MessageContent::Text(text) = &message.content else {
+        panic!("the identity is text: {message:?}");
+    };
+    assert!(
+        text.starts_with(&format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\""
+        )),
+        "{text}"
+    );
+    // The request after the compaction carries that baseline: the opening input
+    // that carried the identity is behind the cut.
+    let request = events
+        .iter()
+        .filter(|event| event.sequence > at)
+        .find_map(|event| match &event.kind {
+            EventKind::ModelCall(data) => Some(&data.request),
+            _ => None,
+        })
+        .expect("the request after the compaction");
+    // One identity message and no second copy from the history: the opening
+    // input that carried it is behind the cut.
+    let identities = request
+        .messages
+        .iter()
+        .filter(|message| said(message).starts_with("<dim-branch-line"))
+        .count();
+    assert_eq!(identities, 1, "the baseline's identity is the only one");
+    soon(agent.close()).await.unwrap();
+}
+
 /// The compaction above and the child's replay need a line cut after its
 /// opener wrote a roster, so the inherited block is in the child's prefix.
 async fn wait_for_roster(session: &Session, line: &str) {

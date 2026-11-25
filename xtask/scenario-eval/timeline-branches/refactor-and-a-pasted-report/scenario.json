@@ -5,6 +5,7 @@
   "probes": [
     {"id": "refactor-done", "kind": "must_show", "text": "the CSV writer is in report/writer.py and report/export.py no longer defines it, and the tests and golden files pass"},
     {"id": "incident-cause-and-fix", "kind": "must_show", "text": "docs/incident-4471.md names the KeyError's cause and the fix"},
-    {"id": "no-cross-edits", "kind": "must_not_show", "text": "the refactor changes runbooks/nightly.py or docs/incident-4471.md, or the incident work changes report/export.py, report/writer.py, tests/test_export.py or tests/golden"}
+    {"id": "no-cross-edits", "kind": "must_not_show", "text": "the refactor changes runbooks/nightly.py or docs/incident-4471.md, or the incident work changes report/export.py, report/writer.py, tests/test_export.py or tests/golden"},
+    {"id": "line-opened-for-one-job", "kind": "must_show", "text": "the run opens one line for one of the two jobs while it still has the other to do, and does that other job itself; the brief the opener writes names the job the line takes"}
   ]
 }
