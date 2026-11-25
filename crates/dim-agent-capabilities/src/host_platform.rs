@@ -1302,7 +1302,7 @@ impl HostPlatform {
                                     return;
                                 }
                                 let tree = job_tree(pid);
-                                if kill_job(pid).await.is_err() {
+                                if kill_job(pid, tree.clone()).await.is_err() {
                                     let shutdown = shutdown.clone();
                                     let id = record.id.clone();
                                     let stopping = stopping.clone();
@@ -1348,7 +1348,7 @@ impl HostPlatform {
                     return Err(HostPlatformError::TaskRunning);
                 };
                 let tree = job_tree(pid);
-                if let Err(error) = kill_job(pid).await {
+                if let Err(error) = kill_job(pid, tree.clone()).await {
                     let record = task.clone();
                     let job = job.clone();
                     let shutdown = self.command_shutdown.clone();
@@ -3644,15 +3644,15 @@ async fn observe_job_release(
 /// Kills a background job that outlived its shell and confirms it is gone:
 /// the process group it leads on POSIX, the process tree under it on
 /// Windows.
-pub async fn kill_job(pid: u32) -> io::Result<()> {
+pub async fn kill_job(pid: u32, tree: Option<Vec<u32>>) -> io::Result<()> {
     #[cfg(unix)]
     {
+        let _ = tree;
         native::kill_tree(pid);
         wait_job_exit(pid).await
     }
     #[cfg(windows)]
     {
-        let tree = native::tree_pids(pid);
         native::terminate_tree(pid)?;
         let Some(tree) = tree else {
             return Err(io::Error::new(
