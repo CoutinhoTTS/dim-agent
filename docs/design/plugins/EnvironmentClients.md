@@ -115,6 +115,15 @@ A branch whose opening sealed before the part mounted, such as a `Connection`
 reload onto a live branch, registers nothing either; the first loop pass after
 `BranchLifecycle::activated()` appends the snapshot there.
 
+A snapshot appended after activation — a child line's first pass, a reloaded
+part's first pass, or a `ClientsChanged` wake — is published before the branch
+dispatches it, so a temporary route adoption that arrives before the branch
+consumes it is refused with `provider_route_conflict`
+([route admission](../appserver/provider-management.md#connection-scoped-provider-routes));
+the same call is adopted once the branch has dispatched the snapshot and its
+`input/applied`, so the caller retries the call or waits for `session.idle`
+first.
+
 ### Connection change
 
 App Server emits:
@@ -209,6 +218,7 @@ None to the runtime or rutis.
 | Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active, so `session.create` and a restore return with both |
 | A child line opens | The identity input is the line's first input; the snapshot follows it once the line is published |
 | A temporary route adopted with no `session.idle` after create | Adopted; the opening left nothing undispatched |
+| A temporary route adopted while a snapshot the part appended after activation is still dispatched | Refused with `provider_route_conflict`; the same call is adopted once the branch dispatches the snapshot and its `input/applied`; the caller retries or waits for `session.idle` |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
 | Two TUI leaves | Two `tui` entries, not one count |
 | A TUI leaf and its protocol connection | One `tui` entry; no duplicate `cli` entry |
