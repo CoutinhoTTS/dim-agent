@@ -435,22 +435,19 @@ mod face_tests {
                     matches!(result, Err(error) if error.to_string().contains("catalogMissing: shared but has no dispatcher"))
                 );
             } else {
-                let table = Table::new(agent.catalog(), agent.faces(), &layers, &ctx)
-                    .unwrap()
-                    .render();
-                assert!(
-                    table.contains(
-                        "| `catalogEcho` | process | CatalogBindings | data | `ping` async |"
-                    ),
-                    "{table}"
-                );
+                let table = Table::new(agent.catalog(), agent.faces(), &layers, &ctx).unwrap();
+                let echo = &table.services["catalogEcho"];
+                assert_eq!(echo.group, "process");
+                assert!(echo.providers.contains("CatalogBindings"));
+                assert_eq!(echo.face, "data");
+                assert_eq!(echo.methods["ping"], "async");
                 for private in ["catalogPrivate", "loaderService", "pluginMounter"] {
                     assert!(
-                        !table.contains(&format!("| `{private}` |")),
+                        !table.services.contains_key(private),
                         "{private} is a private key, not a public face"
                     );
                 }
-                assert!(table.contains("| `rutis/loader` |"));
+                assert!(table.services.contains_key("rutis/loader"));
                 let reply: String =
                     rutis_bridge::session::call_service(&ctx, "catalogEcho", "ping", ())
                         .await

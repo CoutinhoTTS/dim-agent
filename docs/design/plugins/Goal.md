@@ -4,7 +4,7 @@ Status: Draft.
 Scope: 既有 Goal Session/branch 部件的目标、命令、续行、模型输入和终止。
 Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 
-[业务状态与重载](Goal-state-read.md)唯一规定完整状态数据、内存与持久化边界、加载映射、原子提交、成本和验收。[读取与输入删除](Goal-property-queries.md)规定旧历史不恢复及输入删除不回滚的边界。本文规定 Goal 的入口、执行规则和模型协议；[Pursuit](Pursuit.md)规定 evaluator 判定方式。当前代码和生成装配图不因设计更新而宣称已实现目标。
+[业务状态与重载](Goal-state-read.md)唯一规定完整状态数据、内存与持久化边界、加载映射、原子提交、成本和验收。[读取与输入删除](Goal-property-queries.md)规定旧历史不恢复及输入删除不回滚的边界。本文规定 Goal 的入口、执行规则和模型协议；[Pursuit](Pursuit.md)规定 evaluator 判定方式。
 
 ## 1. Structure
 

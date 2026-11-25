@@ -135,7 +135,7 @@ rutis-bridge 的 `Session::new(channel)` 把一条 `Channel` 的对端接进本�
 
 ### 1.2 什么能过去
 
-判据在 rutis-bridge 的导出实现里，不在 `xtask graph` 的 “Crosses languages” 列：
+rutis-bridge 按以下条件导出服务。
 
 | 条件 | 说明 |
 | --- | --- |
@@ -568,7 +568,6 @@ flowchart TB
 落地：
 
 - 新服务必须标 `#[rutis::service]`；标 `internal` 的要写原因。`xtask check` 拒绝没有标记的进程/Session/branch 服务名。
-- `xtask graph` 的 catalog 把 `Crosses languages` 换成 `face: data | internal(reason)`，让例外可见。
 - 模板和评审清单加一条：“公开服务的方法只有数据；句柄留在哪一层内部？”
 - `HostPlatform`、`FileStorage`、`SqliteStorage` 作为第一批参照：内部保留对象，公开面换成 id 加操作。
 

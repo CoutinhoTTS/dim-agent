@@ -302,7 +302,7 @@ Rust 和 TypeScript Session part 均可使用此服务。路径由已持有文�
 | 示例与真实场景 | 一个零构建的 HTML + CSS + JS 示例，演示挂载、公开数据访问与清理 | 同一套契约覆盖多种渲染技术，业务逻辑不进入核心 |
 | Desktop | 在其仓库实现相同浏览器绑定、公开能力和资源适配 | 同一个插件包和构建产物无需重建；没有能力时明确不可用 |
 
-实际实现位置集中在 `crates/dim-app-server/`、`web/`、`npm/` 及相关传输流程测试；FileStorage 在 `crates/dim-agent-capabilities/` 内补充 R5 的 I/O 能力。UI 原型不要求调整 AgentLoop、Timeline、Dispatcher、事件 fixture 或 native Session 存储格式。新增服务和装配时才更新对应实现架构页，并按仓库规则生成 catalog/graph/types；设计阶段不手写当前架构图，也不修改生成文件。
+实际实现位置集中在 `crates/dim-app-server/`、`web/`、`npm/` 及相关传输流程测试；FileStorage 在 `crates/dim-agent-capabilities/` 内补充 R5 的 I/O 能力。UI 原型不要求调整 AgentLoop、Timeline、Dispatcher、事件 fixture 或 native Session 存储格式。新增服务和装配时才更新对应实现架构页。公开服务声明变更时运行 `xtask types`。
 
 成本主要在资源入口的授权与流式取消、内容版本一致性、实例清理及安装记录迁移。播放器的下载、转码和缓存由插件承担。共享框架依赖解析、任意 slot、声明式 UI DSL、组件间通信总线和通用资源代理均不属于实施项。
 
