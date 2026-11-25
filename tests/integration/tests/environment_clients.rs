@@ -174,10 +174,68 @@ async fn until_active(root: &rutis::Ctx, id: rutis::host::PluginId) {
     .expect("the replacement part becomes Active while the line loads");
 }
 
+/// Waits for the line's presence snapshot and the queue's `input/applied` for
+/// it, then asserts the line got exactly one snapshot and that it follows the
+/// line's identity input.
+async fn one_presence_snapshot_after_the_identity_input(session: &Session, child: &str) {
+    let marker = format!("<dim-state source=\"{CLIENTS}\">");
+    let is_presence = |event: &dim_agent_types::AgentEvent| {
+        matches!(&event.kind, EventKind::InputMessage(data)
+            if data.user.is_none()
+                && data.blocks.iter().any(|block| matches!(block,
+                    InputBlock::Raw { text, .. } if text.starts_with(&marker))))
+    };
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = branch_events(session, child, ..).await.unwrap();
+            let applied = events
+                .iter()
+                .filter(|event| is_presence(event))
+                .any(|snapshot| {
+                    events.iter().any(|event| {
+                        matches!(&event.kind,
+                        EventKind::InputApplied(data) if data.input_id == snapshot.id)
+                    })
+                });
+            if applied {
+                return events;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the line publishes its presence snapshot and its input/applied");
+    let identity_marker =
+        format!(r#"<dim-branch-line branch="{child}" parent="main" source="host">"#);
+    let identity = events
+        .iter()
+        .find(|event| {
+            matches!(&event.kind, EventKind::InputMessage(data)
+                if data.blocks.first().is_some_and(|block| matches!(block,
+                    InputBlock::Raw { text, .. } if text.starts_with(&identity_marker))))
+        })
+        .expect("the line's identity input")
+        .sequence;
+    let snapshots: Vec<_> = events.iter().filter(|event| is_presence(event)).collect();
+    for snapshot in &snapshots {
+        assert!(
+            snapshot.sequence > identity,
+            "a presence snapshot precedes the identity input: {} before {identity} ({} snapshots)",
+            snapshot.sequence,
+            snapshots.len()
+        );
+    }
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "the line gets its presence snapshot exactly once"
+    );
+}
+
 /// Replacing the presence part while a line still loads keeps the line's
-/// identity input first: the retired receipt writes nothing, the replacement
-/// appends the line's one presence snapshot after activation, and the append
-/// still waits for the branch to dispatch it.
+/// identity input first: the retired receipt writes nothing, and the
+/// replacement appends the line's one presence snapshot from its first pass
+/// after activation, which publishes before the branch dispatches it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_replaced_part_during_loading_writes_one_presence_snapshot_after_the_identity_input() {
     let dirs = Dirs::new();
@@ -222,54 +280,64 @@ async fn a_replaced_part_during_loading_writes_one_presence_snapshot_after_the_i
     hold.release.notify_one();
     let child = opening.await.unwrap().expect("the line opens");
 
-    let marker = format!("<dim-state source=\"{CLIENTS}\">");
-    let is_presence = |event: &dim_agent_types::AgentEvent| {
-        matches!(&event.kind, EventKind::InputMessage(data)
-            if data.user.is_none()
-                && data.blocks.iter().any(|block| matches!(block,
-                    InputBlock::Raw { text, .. } if text.starts_with(&marker))))
-    };
-    let events = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let events = branch_events(&session, &child, ..).await.unwrap();
-            if events.iter().any(|event| is_presence(event)) {
-                return events;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+    one_presence_snapshot_after_the_identity_input(&session, &child).await;
+
+    env.agent.close().await.unwrap();
+}
+
+/// A part that mounts after the line's `branch/start` was dispatched decides
+/// from the line's own opening fact, so its receipt writes nothing ahead of
+/// the identity input, which the tree appends after the opening seals: the
+/// published line appends the one snapshot once it activates.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_part_mounted_after_the_opening_event_dispatched_writes_after_the_identity_input() {
+    let dirs = Dirs::new();
+    let cwd = dirs.dir("work");
+    let presence = Arc::new(Presence(Mutex::new(Vec::new())));
+    let hold = Arc::new(OpeningDispatchHold::default());
+    let env = env(
+        &dirs,
+        Options {
+            clients: Some(presence.host()),
+            opening_dispatch_hold: Some(hold.clone()),
+            // The opening must outlast the replacement this flow performs while
+            // the opening event's dispatch is held, so an older tree fails on
+            // where the snapshot lands instead of failing to open.
+            startup_timeout: Some(Duration::from_secs(30)),
+            ..Options::default()
+        },
+    )
+    .await;
+    let session = env.session(&cwd, "").await.unwrap();
+    let known = presence_instances(&env.root);
+    let at = session.sequence("main").unwrap();
+
+    hold.arm();
+    let opening = tokio::spawn({
+        let session = session.clone();
+        async move {
+            session
+                .branch(
+                    "main".into(),
+                    at,
+                    BranchOptions {
+                        prompt: "line work".into(),
+                        source: BranchSource::Host {
+                            operation_id: "opening-dispatched".into(),
+                        },
+                    },
+                )
+                .await
         }
-    })
-    .await
-    .expect("the line publishes its presence snapshot");
-    let identity_marker =
-        format!(r#"<dim-branch-line branch="{child}" parent="main" source="host">"#);
-    let identity = events
-        .iter()
-        .find(|event| {
-            matches!(&event.kind, EventKind::InputMessage(data)
-                if data.blocks.first().is_some_and(|block| matches!(block,
-                    InputBlock::Raw { text, .. } if text.starts_with(&identity_marker))))
-        })
-        .expect("the line's identity input")
-        .sequence;
-    let snapshots: Vec<_> = events.iter().filter(|event| is_presence(event)).collect();
-    for snapshot in &snapshots {
-        assert!(
-            snapshot.sequence > identity,
-            "a presence snapshot precedes the identity input: {} before {identity} ({} snapshots)",
-            snapshot.sequence,
-            snapshots.len()
-        );
-    }
-    assert_eq!(
-        snapshots.len(),
-        1,
-        "the replacement writes the presence snapshot exactly once"
-    );
-    assert!(
-        events.iter().any(|event| matches!(&event.kind,
-            EventKind::InputApplied(data) if data.input_id == snapshots[0].id)),
-        "the branch dispatches the snapshot and writes its input/applied"
-    );
+    });
+    hold.entered.notified().await;
+    let part = until_presence_part_of_new_instance(&env.root, &known).await;
+    part.restart().await.unwrap();
+    until_active(&env.root, part.id).await;
+    hold.release.notify_one();
+    let child = opening.await.unwrap().expect("the line opens");
+
+    one_presence_snapshot_after_the_identity_input(&session, &child).await;
 
     env.agent.close().await.unwrap();
 }

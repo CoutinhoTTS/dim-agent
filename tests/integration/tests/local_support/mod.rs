@@ -265,6 +265,60 @@ impl rutis::Plugin for BranchHoldPlugin {
     }
 }
 
+/// Holds the next `branch/start` dispatch open until released: a window in
+/// which the opening event is committed and being dispatched, while the
+/// opening has not collected its receipts. A listener registered during that
+/// dispatch is not in the dispatch's listener set, so it does not see the
+/// event.
+#[derive(Default)]
+pub struct OpeningDispatchHold {
+    armed: std::sync::atomic::AtomicBool,
+    pub entered: Notify,
+    pub release: Notify,
+}
+impl OpeningDispatchHold {
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+struct OpeningDispatchHoldPlugin {
+    hold: Arc<OpeningDispatchHold>,
+    dispatcher: Key<Dispatcher>,
+}
+impl OpeningDispatchHoldPlugin {
+    fn new(names: &Names<'_>, hold: Arc<OpeningDispatchHold>) -> rutis::Result<Self> {
+        Ok(Self {
+            hold,
+            dispatcher: names.key()?,
+        })
+    }
+}
+impl DynPlugin for OpeningDispatchHoldPlugin {
+    fn name(&self) -> &str {
+        "OpeningDispatchHold"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.dispatcher.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a rutis::Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let dispatcher = ctx.require_at(&self.dispatcher)?;
+            let hold = self.hold.clone();
+            dispatcher.subscribe(ctx, "OpeningDispatchHold", &["branch/start"], move |_| {
+                let hold = hold.clone();
+                Box::pin(async move {
+                    if hold.armed.swap(false, Ordering::SeqCst) {
+                        hold.entered.notify_one();
+                        hold.release.notified().await;
+                    }
+                    Ok(())
+                })
+            })?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
 /// Records what each Session's `SessionLifecycle` reports, and can hold one
 /// Session's unload to keep a close in progress.
 #[derive(Default)]
@@ -414,6 +468,8 @@ pub struct Options {
     pub hold: Option<Arc<AssemblyHold>>,
     /// Holds the next branch's assembly open until released.
     pub branch_hold: Option<Arc<BranchHold>>,
+    /// Holds the next `branch/start` dispatch open until released.
+    pub opening_dispatch_hold: Option<Arc<OpeningDispatchHold>>,
     /// The inactivity budget of every Session and branch opening.
     pub startup_timeout: Option<std::time::Duration>,
     pub probe: Option<Arc<LifecycleProbe>>,
@@ -454,6 +510,7 @@ impl Default for Options {
             timezone: "Asia/Shanghai",
             hold: None,
             branch_hold: None,
+            opening_dispatch_hold: None,
             startup_timeout: None,
             probe: None,
             instructions: None,
@@ -619,6 +676,18 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
             Ok(Box::new(BranchHoldPlugin(hold.clone())))
         }));
         builder.require_part("BranchHold");
+    }
+    if let Some(hold) = options.opening_dispatch_hold {
+        builder.require_feature(Feature::new("OpeningDispatchHold").branch(
+            "OpeningDispatchHold",
+            move |names| {
+                Ok(Box::new(OpeningDispatchHoldPlugin::new(
+                    names,
+                    hold.clone(),
+                )?))
+            },
+        ));
+        builder.require_part("OpeningDispatchHold");
     }
     if let Some(probe) = options.probe {
         builder.require_feature(
