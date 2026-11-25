@@ -61,15 +61,6 @@ covers a check blocking a steer (`a_blocked_steer_writes_nothing_and_the_old_inp
 [submit_checks.rs](../../../../crates/dim-app-server/tests/transport_flow/submit_checks.rs)
 covers the table and the Rpc entries.
 
-<!-- generated:plugin InputMethods — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:SessionMethods`、`S:TreeCommands` |
-| 提供 | `S:SubmitChecks`、`S:dyn HostDispatch#submitChecks` |
-| 被注入于 | `HooksSession`、`Skills` |
-<!-- /generated -->
-
 ## InputQueue
 
 Owner: [input_queue.rs](../../../../crates/dim-agent-capabilities/src/input_queue.rs).
@@ -171,12 +162,3 @@ are ignored; original facts and native member indexes remain authoritative.
 [context_flow.rs](../../../../crates/dim-agent-capabilities/tests/context_flow.rs):
 `restoring_pending_inputs_runs_each_queued_input_in_its_own_turn`,
 `a_restored_queue_writes_one_owed_deletion_for_a_handover_input`.
-
-<!-- generated:plugin InputQueue — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:TreeCommands` |
-| 提供 | `B:InputQueue`、`B:StateCell<InputSnapshot>`、`B:dyn HostDispatch#inputQueue` |
-| 被注入于 | — |
-<!-- /generated -->

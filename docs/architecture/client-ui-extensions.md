@@ -3,7 +3,7 @@
 The [client UI design](../design/client-ui-extensions.md) owns the public
 contract. These are App Server presentation/resource owners, not Capabilities.
 They emit no Timeline events and do not alter agent execution. The generated
-[App Server assembly](rust-agent/generated/app-server/services.md) records their
+[App Server assembly](README.md#generated-architecture) records their
 current bindings.
 
 UiExtensions is an independently enabled process row that registers its Session

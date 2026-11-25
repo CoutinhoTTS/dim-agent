@@ -27,8 +27,7 @@ const windowsNative=[
 const rules=[
   [/^benchmarks\/baselines\/[^/]+\.json$/,[]],
   [/^\.agents\/|^skills\/|^\.github\/(?:ISSUE_TEMPLATE\/|pull_request_template\.md$|PULL_REQUEST_TEMPLATE\.md$)/,[]],
-  [/^docs\/architecture\/rust-agent\/generated\/catalog\.md$/,['xtask']],
-  [/^docs\/architecture\/rust-agent\/(plugins|generated)\//,['static']],
+  [/^docs\/architecture\/rust-agent\/plugins\//,['xtask']],
   [/^docs\/design\/appserver\/native-storage-format\.md$/,['rust']],
   // scripts/tui-tmux.test.mjs reads this page and checks every scenario is documented.
   [/^docs\/architecture\/tui-e2e\.md$/,['scripts']],

@@ -174,15 +174,6 @@ a continuation declines it.
 `replacing_a_tool_image_preserves_other_messages_and_the_stored_result`,
 `stored_attachment_and_tool_images_route_by_vision_capability`.
 
-<!-- generated:plugin ModelProvider — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:ContextPreparation`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`P:ModelHost` |
-| 提供 | `B:StateCell<ModelProgress>` |
-| 被注入于 | — |
-<!-- /generated -->
-
 ## Durable images at model execution
 
 During request adaptation, ModelProvider uses `session_files::resolve` to read

@@ -309,15 +309,6 @@ unresolvable targets and the unchanged read-only/full-access presets.
 non-interactive run answers an outside-read approval with the ordinary denial
 and exits 3.
 
-<!-- generated:plugin Permission — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`S:CommandRules`、`S:SessionConfig`、`S:SessionIdentity` |
-| 提供 | `B:Permission`、`B:StateCell<PermissionState>`、`B:dyn HostDispatch#permission` |
-| 被注入于 | `Approval`、`HooksBranch` |
-<!-- /generated -->
-
 ## Approval
 
 Owner: [approval.rs](../../../../crates/dim-agent-capabilities/src/approval.rs).
@@ -438,12 +429,3 @@ fails with `invalid_params`, which ends the prompt.
 `a_policy_change_ends_pending_questions_for_every_attached_client`,
 `automatic_permission_settlement_cannot_overtake_a_committed_denial` and
 `automatic_admission_waits_for_its_terminal_to_be_stored`.
-
-<!-- generated:plugin Approval — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Permission`、`B:StateCell<PermissionState>`、`B:Timeline` |
-| 提供 | `B:Approval`、`B:dyn HostDispatch#approval` |
-| 被注入于 | `HooksBranch`、`ToolExecutor` |
-<!-- /generated -->

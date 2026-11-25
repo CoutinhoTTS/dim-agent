@@ -302,7 +302,7 @@ TypeScript、纯内容包、Python runtime 和 UI 资源的能力分别按其实
 | --- | --- | --- |
 | `managementMethods` | `data`；新增目录操作仍为数据请求/回复，不传宿主句柄 | [管理方法](appserver/management-methods.md)、[服务面](service-faces.md) |
 | PluginManager 的公开 `plugin.*` 与 RuntimeManager 的 `runtime.*` | 管理协议数据面；具体方法由各 owner 贡献，不能把协议方法当作新的 catalog 服务名 | [PluginManager §6](plugins/PluginManager.md#6-interfaces-summary)、[RuntimeManager §5](plugins/RuntimeManager.md#5-interfaces) |
-| PluginManager 持有的 loader 控制句柄 | `internal(owner-api)`；不交给目录或客户端 | [rutis 使用契约](rutis-usage.md)、[当前 catalog](../architecture/rust-agent/generated/catalog.md) |
+| PluginManager 持有的 loader 控制句柄 | `internal(owner-api)`；不交给目录或客户端 | [rutis 使用契约](rutis-usage.md)、[当前 catalog](../architecture/README.md#generated-architecture) |
 | RuntimeManager 的本地 owner API、解释器启动资源 | owner API 为 `internal(owner-api)`，进程资源为 `internal(host-resource)`；不宣称它们可跨语言注入 | [RuntimeManager](plugins/RuntimeManager.md)；R2 的公开请求只能携带数据 |
 | Agent 的 `plugin` 工具 | 既有工具协议数据入口；不增加 Session 或 branch 服务 | [PluginManager §6](plugins/PluginManager.md#6-interfaces-summary) |
 

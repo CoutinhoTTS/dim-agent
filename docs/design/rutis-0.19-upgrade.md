@@ -442,7 +442,7 @@ daemon root (LocalId dim-daemon)                 dimcode leaf root
   CLI with a new daemon, and for a new CLI with an old daemon.
 - **What the link carries** (the [Tui §8](plugins/Tui.md#8-security) update):
   - **The rule.** The session exports every process-group name that crosses languages. The
-    [generated catalog](../architecture/rust-agent/generated/catalog.md) lists them, and the installed
+    [generated catalog](../architecture/README.md#generated-architecture) lists them, and the installed
     foreign process rows add the names they provide.
   - **Today's set.**
     - `auxiliaryModel`, `managementMethods`, `partRegistry`, `pluginFiles`, `sessionMetadata`,
@@ -559,14 +559,13 @@ The checks `.github/workflows/ci.yml` runs, at the workspace root, in its order:
 2. `cargo build --workspace --locked`, `cargo fmt --all -- --check`,
    `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo test --workspace --locked`
 3. `cargo run --locked -p xtask -- check`, then `graph`. `check` also fails on a stale
-   `npm/branch-services.d.ts`. The committed graphs come from the mock, local and App Server
+   `npm/branch-services.d.ts`. Locally generated graphs come from the mock, local and App Server
    assemblies. None of them starts a language runtime, so M4's removed rows never appear in them. The
    expected diff of each pull request:
    - Step 0 (M6):
-     - `generated/services.json` and `generated/app-server/` are expected not to move;
-     - in `generated/local/`, `FileStorage` and `HostPlatform` move from the root to rows of the
-       host's loader;
-     - the generated blocks of the plugin pages regenerate with it.
+     - `target/architecture/services.json` and `target/architecture/app-server/` are expected not to move;
+     - in `target/architecture/local/`, `FileStorage` and `HostPlatform` move from the root to rows of the
+       host's loader.
    - The upgrade: only fibers that rutis 0.19 itself adds.
 
    Each pull request records its measured diff and explains every change against this list.
@@ -663,8 +662,7 @@ Flow checks the suite must cover; extend existing tests only where the contract 
   the [plugin pages index](../architecture/rust-agent/plugins/README.md) and the
   [architecture overview](../architecture/README.md): 0.17 references and the runtime and leaf
   mechanisms.
-- The `docs/zh/` counterparts where they exist. The generated pages under
-  `docs/architecture/rust-agent/generated/` change only through `xtask graph`.
+- The `docs/zh/` counterparts where they exist. Inspect the resulting assembly with `xtask graph`.
 
 ## 8. Risks
 

@@ -19,7 +19,7 @@ and completion belong in the issue. The proposed authoring method is in the
 | What survives a reload for one feature? | The [lifecycle contract](plugin-contract.md#72-generations-reload-and-rebuild) and its owner design, for example [Goal state](plugins/Goal-state-read.md), [Queue recovery](input-queue-recovery.md), [Prompt state](prompt-state-read.md), [Wait](../architecture/rust-agent/plugins/Wait.md) | Apply the existing lifecycle obligations and the owner's business recovery outcome; restoring state does not justify leaving old execution running |
 | How do owner reads and saved results fit together? | [Saving boundaries](owner-state-indexed-reads.md), [Resume design](resume-read-design.md) | Keep cross-module dependencies here and detailed fields/algorithms in owner documents |
 | How does a part mount, name dependencies and cross languages? | [rutis usage](rutis-usage.md), [service faces](service-faces.md) | Link the current binding; do not copy old API spellings into architecture rules |
-| What exists in the actual assembly? | [Generated catalog](../architecture/rust-agent/generated/catalog.md) | Use as implementation evidence for that profile, not a closed universe of plugins |
+| What exists in the actual assembly? | [Generated catalog](../architecture/README.md#generated-architecture) | Use as implementation evidence for that profile, not a closed universe of plugins |
 | How can a design explain its use, promises and verification? | [Design argument guide](capability-design-arguments.md) | Reuse existing design material; reasoning tools are optional and run outcomes belong in issues/PRs |
 
 ## 2. Overlaps and ambiguity to resolve

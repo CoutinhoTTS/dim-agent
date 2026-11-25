@@ -177,8 +177,7 @@ hand-written adapter layer.
 Each name is declared once. A service that crosses languages declares its name on its Rust type with
 `#[rutis::service]`. A Rust-only service, or a name a foreign part provides, is registered in the
 host's loader catalog. `xtask graph` writes the authoritative table from the real assembly, the
-[generated catalog](../architecture/rust-agent/generated/catalog.md), and `xtask check` fails when it is
-stale (R4). What each name Dim defines is for is in the [plugin contract §4](plugin-contract.md#4-dims-services).
+[generated catalog](../architecture/README.md#generated-architecture), and `xtask check` validates the assembled service faces (R4). What each name Dim defines is for is in the [plugin contract §4](plugin-contract.md#4-dims-services).
 
 *Today:* every service that crosses languages is marked `#[rutis::service]`, the Session and branch
 ones included; rutis 0.17 removed the build script's service list (`Exports::service_in`), which
@@ -284,8 +283,8 @@ These requirements concern how Dim uses rutis. They follow
   `timeline`).
 - **Effect:** none at runtime.
 - **Owner:** `xtask`. Delivered ([#381](https://github.com/arcships/dim/issues/381)): `xtask graph`
-  writes the [generated catalog](../architecture/rust-agent/generated/catalog.md) from the App Server
-  product profile with one Session, and `xtask check` fails when it is stale.
+  writes the [generated catalog](../architecture/README.md#generated-architecture) from the App Server
+  product profile with one Session, and `xtask check` validates its service faces.
 
 ### R5. Foreign plugins register their parts
 

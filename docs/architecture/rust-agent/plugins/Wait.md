@@ -61,15 +61,6 @@ input it refused and how the input is wrong.
 `wait_reload_settles_the_tool_call_without_a_user_stop`,
 `wait_service_reload_ends_native_and_face_calls_and_refuses_old_handles`.
 
-<!-- generated:plugin Wait — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:ToolRegistry`、`S:TreeCommands` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->
-
 ## WaitBranch
 
 Owner: [wait.rs](../../../../crates/dim-agent-capabilities/src/wait.rs).
@@ -151,12 +142,3 @@ business error; retired face handles remain subject to framework availability er
 `wait_reports_a_task_whose_notice_the_model_already_read`,
 `wait_reload_settles_the_tool_call_without_a_user_stop`,
 `wait_service_reload_ends_native_and_face_calls_and_refuses_old_handles`.
-
-<!-- generated:plugin WaitBranch — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline` |
-| 提供 | `B:Wait`、`B:dyn HostDispatch#wait` |
-| 被注入于 | — |
-<!-- /generated -->

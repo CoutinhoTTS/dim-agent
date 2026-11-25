@@ -31,7 +31,7 @@ The external client protocol's `JsonValue` remains JSON-only and does not admit
 
 ## Available services
 
-The [generated catalog](architecture/rust-agent/generated/catalog.md) lists every name with its group,
+The [generated catalog](architecture/README.md#generated-architecture) lists every name with its group,
 provider and the methods it serves to other languages. This table says which to use for what.
 
 | Need | Service and scope | Availability |

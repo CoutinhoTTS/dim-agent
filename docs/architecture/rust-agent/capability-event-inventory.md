@@ -8,8 +8,8 @@
 
 候选来自依赖 Timeline / Dispatcher 的机械扫描，而 [Capability 契约](../../design/plugin-contract.md#6-capability)
 按折叠状态或写自身领域事实的行为定义。依赖存在不等于行为分类已经核实；只写输入或提供服务
-的部件不能仅凭依赖被认定为 Capability。产品的 20 个标记项取自[生成目录](generated/catalog.md#capabilities)；
-另补[本地装配](generated/local/services.json)的 HooksBranch 和源码中的可选 ShellSession。
+的部件不能仅凭依赖被认定为 Capability。产品的 20 个标记项取自[生成目录](../README.md#generated-architecture)；
+另补[本地装配](../README.md#generated-architecture)的 HooksBranch 和源码中的可选 ShellSession。
 这 22 个候选都是 **branch** 作用域；Session 中的 Wait 工具等同名业务部件不因此自动算 Capability。
 这里只列主要事件关联，不把订阅列表当成全部读取依赖。
 

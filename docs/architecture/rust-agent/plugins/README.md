@@ -2,12 +2,12 @@
 
 This directory has one page per plugin of the **local-execution profile**, not every App Server
 plugin. A plugin's page documents each part it registers and, for a plugin that owns process
-state, the plugin itself: each has its own dependency table and generated block. The authoritative assembly is
+state, the plugin itself: each has its own dependency table. The authoritative assembly is
 [`defaults::install_local_execution`](../../../../crates/dim-agent-capabilities/src/defaults.rs)
 plus Attachments (which `serve` adds where the host has native storage) and
 Questions (which the product profiles add), with process services and scripted model hosts supplied by
-[`xtask`](../../../../xtask/src/plugins.rs). Its recorded bindings are in
-[`generated/local/services.json`](../generated/local/services.json).
+[`xtask`](../../../../xtask/src/plugins.rs). Inspect its bindings in
+[the local assembly graph](../../README.md#generated-architecture).
 The graph uses isolated host facts and one fixture Skill, not the developer's
 home. The host fixture reuses HostPlatformPlugin's declared dependencies and keys.
 SessionStore's `sessionFiles` is a graph-only fixture that stores nothing.
@@ -17,7 +17,7 @@ Infrastructure plugins `BranchScope`, `SessionScope`, `SessionBroadcast`,
 (`SessionParts`, `SessionOptionalParts`, `BranchParts`, `BranchOptionalParts`), the row providing
 `partRegistry`, and the scripted `PrepareModelHost` plugin are excluded. This list may hold only
 runtime assembly and scripted model hosts: a newly assembled capability needs its own page instead of an
-entry here. Excluded rows can still appear as providers or consumers in the generated blocks. A service
+entry here. Excluded rows can still appear as providers or consumers in the local graph. A service
 dependency is not necessarily a plugin with the same name.
 
 ## Index
@@ -52,7 +52,7 @@ App Server optional plugins are outside this local-execution profile. [Web](../.
 
 The product also installs [ImageUnderstanding](../../image-understanding.md) next to Modality; its Session part consumes the process target and auxiliary-model services outside this local-execution profile.
 
-Process infrastructure rows are also outside this local-execution index. [UiExtensions and UiResources](../../client-ui-extensions.md) own client UI content and Session file publications. `UiHost` owns UI leaves: per leaf, a `UiLeaf` plugin whose life is the rutis session with the interactive `dimcode` process. Its contract is [Tui design §3.6](../../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) and its current assembly is in the generated [App Server services](../generated/app-server/services.md). The leaf runs its own `Tui` in the CLI's client tree; it is not a local-execution capability. The language runtimes' connection rows, `session-node` and `py`, are process infrastructure too: each starts its runtime and mounts the rutis session its foreign rows run on ([How Dim uses rutis A.4](../../../design/rutis-usage.md#a4-runtimes-and-sessions)).
+Process infrastructure rows are also outside this local-execution index. [UiExtensions and UiResources](../../client-ui-extensions.md) own client UI content and Session file publications. `UiHost` owns UI leaves: per leaf, a `UiLeaf` plugin whose life is the rutis session with the interactive `dimcode` process. Its contract is [Tui design §3.6](../../../design/plugins/Tui.md#36-ui-registry-and-ui-leaves) and its current assembly is in the generated [App Server services](../../README.md#generated-architecture). The leaf runs its own `Tui` in the CLI's client tree; it is not a local-execution capability. The language runtimes' connection rows, `session-node` and `py`, are process infrastructure too: each starts its runtime and mounts the rutis session its foreign rows run on ([How Dim uses rutis A.4](../../../design/rutis-usage.md#a4-runtimes-and-sessions)).
 
 ## Reading and maintaining these pages
 
@@ -89,13 +89,4 @@ complete events. `HistoryRenderer.rendered_stream` consumes context pages;
 describe current source, not the planned dynamic-event, loader-configuration or
 cross-language APIs in the [foundation ADR](../../../adr/001-harness-foundation.md).
 
-Run `cargo run --locked -p xtask -- graph` to refresh all generated blocks;
-never edit their contents by hand. English prose surrounds the generator's
-current table labels. `cargo run --locked -p xtask -- check` checks recorded-graph
-coverage in both directions, block freshness and exact dependency tables. Missing
-or empty documentation directories fail. Run `graph` after assembly changes so
-new capabilities participate in that check; plugins outside this profile are not
-covered by it. A page documents the names of the generated blocks it holds; each
-name's dependency table is the `Dependencies` (or `依赖`) table between the
-previous block and its own. Linked tests
-are existing evidence to consult, not a claim that every lifetime edge is covered.
+The heading immediately above each `Dependencies` or `依赖` section names the part. Run `cargo run --locked -p xtask -- check` to check coverage and dependency tables against the live local-execution assembly. Update the affected page when a documented part or its dependencies change.

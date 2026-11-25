@@ -290,7 +290,7 @@ flowchart LR
 - goal 插件读事件时注入 Timeline 服务而不是 `dispatcher`，调用 `Timeline.query`。`npm/branch-services.d.ts` 已经在 `Timeline` 上声明了 `query`。该文件的 `Services` 接口列出了 `timeline: Timeline`，所以这个名字存在。goal 目前注入 dispatcher、timelineIdentity、treeCommands、settings、branchLifecycle 和 sessionLifecycle；绑定能否为分支部件解析 `timeline` 未核实。goal 还读到已分配位置（`dispatcher.committed()` :104、`local(turnStart, through)` :176），所以它和文件读取、协作重建属于同一个未决问题。
 - App Server 通过 `Session::query(branch, query)` 读已装载的会话，它转发到 `Branch::query`，再到 Timeline 服务。
 - App Server 通过 `SessionStore` 读未装载的会话，因为它没有 Timeline 服务可用。页形状与 `query` 一致，所以装载与否不改变协议。
-- 删除这些读之后，`xtask types` 重新生成 `npm/branch-services.d.ts`，`xtask graph` 重新生成 `catalog.md`；生成文件里其余内容不得变化。
+- 删除这些读之后，`xtask types` 重新生成 `npm/branch-services.d.ts`，仅修改受影响的声明。可用 `xtask graph` 在本地查看装配后的方法。
 
 ### 6.6 开发时确认
 
@@ -350,7 +350,7 @@ flowchart LR
 
 ### 7.4 迁移之后删除的读
 
-在 Timeline、Branch、Agent 和 Dispatcher 上：history、local、page、page_cursor、context、context_with_checkpoint、event_by_id、event_position、compaction_cut、ancestor_events_of_kind、stored_page、stored_local、trace、stored_context_page 及其 _in 形式，。然后 xtask types 和 xtask graph 重新生成生成文件，其中其余内容不得变化。
+在 Timeline、Branch、Agent 和 Dispatcher 上：history、local、page、page_cursor、context、context_with_checkpoint、event_by_id、event_position、compaction_cut、ancestor_events_of_kind、stored_page、stored_local、trace、stored_context_page 及其 _in 形式。用 `xtask types` 重新生成受影响的声明。
 
 ### 7.5 未决定
 

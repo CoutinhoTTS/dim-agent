@@ -102,12 +102,24 @@ Detailed contracts live under [`rust-agent/`](rust-agent/) and are written in Ch
 
 ## Generated architecture
 
+Generate the reports from the workspace root.
+
 ```sh
 cargo run --locked -p xtask -- graph
-cargo run --locked -p xtask -- check
 ```
 
-Graphs are generated from actual runtime bindings and Cargo metadata into `docs/architecture/rust-agent/generated/`. Do not edit generated graphs by hand. `graph` is the only command that writes the generated architecture files; `check` verifies crate and syn-AST module boundaries live from source and fails, naming the stale files, when committed `crates.*` differ. Run `cargo run --locked -p xtask -- module-graph DIR` when you need `modules.json` / `modules.mmd` locally. `tests/extension-a`, `tests/extension-b` and `tests/integration` verify that independent external capabilities can participate without depending on internal implementation details.
+Open the reports under `target/architecture/`.
+
+| File | What it shows |
+| --- | --- |
+| `catalog.md` | Services, providers, faces, methods and Capabilities from the App Server product profile with a Session |
+| `services.md`, `local/services.md`, `app-server/services.md` | Service bindings in the mock, local execution and App Server assemblies |
+| `instances.mmd` | Session and branch instances |
+| `crates.mmd` | Crate dependencies from Cargo metadata |
+
+The graphs also have JSON representations. For module-level dependencies, run `cargo run --locked -p xtask-check -- module-graph target/architecture/modules`. All these reports are local to the checkout. Run `cargo run --locked -p xtask-check` for live crate and module boundary checks. The full `cargo run --locked -p xtask -- check` also validates service faces and plugin documentation against the runtime assembly.
+
+`tests/extension-a`, `tests/extension-b` and `tests/integration` verify that independent external capabilities can participate without depending on internal implementation details.
 
 ## Daemon profile identity
 

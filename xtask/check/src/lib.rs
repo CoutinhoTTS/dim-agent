@@ -7,7 +7,6 @@ pub mod i18n;
 pub mod literal_main;
 pub mod modules;
 pub mod npm;
-pub mod plugin_docs;
 pub mod plugin_skills;
 pub mod types;
 

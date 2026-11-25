@@ -131,8 +131,8 @@ builder 在两个宿主里建出的两个 Agent 不会挂上彼此的部件。
 
 每个名称只声明一次。跨语言的服务在其 Rust 类型上用 `#[rutis::service]` 声明名称。仅限 Rust 的服务，
 或由外来部件提供的名称，注册在宿主的 loader 服务目录中。
-`xtask graph` 从真实装配写出权威的表，即[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)，
-表过期时 `xtask check` 失败（R4）。Dim 定义的每个名称的用途见[插件契约 §4](plugin-contract.md#4-dim-的服务)。
+`xtask graph` 从真实装配写出权威的表，即[生成的服务目录](../../architecture/README.md#generated-architecture)，
+`xtask check` 校验装配中的服务面（R4）。Dim 定义的每个名称的用途见[插件契约 §4](plugin-contract.md#4-dim-的服务)。
 
 *现状：*所有跨语言的服务都标记了 `#[rutis::service]`，包括 Session 和分支级的服务；rutis 0.17 移除了
 构建脚本中的服务清单（`Exports::service_in`），也就是原来的另一种形式。标记过的类型在某个实例中提供时，
@@ -214,7 +214,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
   （`dispatcher`、`timeline`）标出哪些部件是 Capability。
 - **影响：**运行时没有影响。
 - **所有者：**`xtask`。已交付（[#381](https://github.com/arcships/dim/issues/381)）：`xtask graph` 从 App Server
-  产品配置及其中的一个 Session 写出[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)，表过期时 `xtask check` 失败。
+  产品配置及其中的一个 Session 写出[生成的服务目录](../../architecture/README.md#generated-architecture)，`xtask check` 校验装配中的服务面。
 
 ### R5. 外来插件登记自己的部件
 

@@ -491,7 +491,7 @@ S5c 在 §5.2、§5.3 和 §5.4 的基础上实现 `session.fork` 和 `session.d
 
 测试：第 1、3（未知 Session）、5、6（名字、大小、已取消的调用）、4、9 项是经由 `sessionFiles` 的流程测试，位于 [session_files_flow.rs](../../../../crates/dim-app-server/tests/session_files_flow.rs)；第 2 项，以及写入与 txn 2 之间的第 3、6 项，在 [files/tests.rs](../../../../crates/dim-app-server/src/storage/files/tests.rs) 中运行 S5c 的分叉步骤和该处的钩子；第 7 项是 [storage_flow.rs](../../../../crates/dim-app-server/tests/storage_flow.rs) 中的 `a_v13_store_upgrades_in_place_once`、`the_daemon_reports_a_v13_upgrade_on_stderr_once` 和拒绝用例；第 8 项是 [file_storage_flow.rs](../../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs) 中的 `directory_creation_stays_inside_the_authorized_root`。
 
-验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及先 `cargo run --locked -p xtask -- graph` 再 `check`，因为 SessionStore 提供了新服务。
+验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及 `cargo run --locked -p xtask -- check`，因为 SessionStore 提供了新服务。
 
 ## 17. 实现中的设计变更
 

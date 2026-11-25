@@ -370,7 +370,7 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
 - **版本不一致。** 链接协议和 `ui.open` 的回复都变了，所以 `hello` 公布的 feature 从 `ui.leaf` 改为 `ui.leaf.2`。
   无论是旧 CLI 连新 daemon，还是新 CLI 连旧 daemon，Tui §3.6 现有的回退机制都会改为直接运行 TUI。
 - **链接现在承载的内容**（对 [Tui §8](../../design/plugins/Tui.md#8-security) 的更新）：
-  - **规则。** 会话导出所有能跨语言的进程级名字。[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)
+  - **规则。** 会话导出所有能跨语言的进程级名字。[生成的服务目录](../../architecture/README.md#generated-architecture)
     列出了它们；已安装的外语进程行还会加上它们自己提供的名字。
   - **目前的集合。**
     - `auxiliaryModel`、`managementMethods`、`partRegistry`、`pluginFiles`、`sessionMetadata`、`sessionPermissions`、
@@ -463,13 +463,12 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 1. `cargo deny --locked check advisories licenses`（dependencies 任务）
 2. `cargo build --workspace --locked`、`cargo fmt --all -- --check`、
    `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`
-3. `cargo run --locked -p xtask -- check`，然后 `graph`。`npm/branch-services.d.ts` 过期时 `check` 也会失败。提交的图
+3. `cargo run --locked -p xtask -- check`，然后 `graph`。`npm/branch-services.d.ts` 过期时 `check` 也会失败。本地生成的图
    来自 mock、本地和 App Server 三个装配，它们都不启动语言运行时，所以 M4 删掉的行从不出现在图里。各个 pull request
    预期的 diff：
    - 步骤 0（M6）：
-     - `generated/services.json` 和 `generated/app-server/` 预期不变；
-     - `generated/local/` 里，`FileStorage` 和 `HostPlatform` 从 root 下移到宿主 loader 的行里；
-     - 插件页面里的生成块随之重新生成。
+     - `target/architecture/services.json` 和 `target/architecture/app-server/` 预期不变；
+     - `target/architecture/local/` 里，`FileStorage` 和 `HostPlatform` 从 root 下移到宿主 loader 的行里。
    - 升级：只有 rutis 0.19 自己新增的 fiber。
 
    每个 pull request 都记录实际测得的 diff，并对照这份清单解释每一处变化。
@@ -547,8 +546,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
   [single-tree](../../architecture/rust-agent/single-tree.md)（也包括 Agent 的放置方式，M6），[lifecycle](../../architecture/rust-agent/lifecycle.md)，
   [插件页面索引](../../architecture/rust-agent/plugins/README.md)和[架构概览](../../architecture/README.md)：
   其中对 0.17 的引用，以及运行时和 leaf 的机制。
-- 已有中文版的，同时更新 `docs/zh/` 下的对应文档。`docs/architecture/rust-agent/generated/` 下的生成页面
-  只通过 `xtask graph` 更新。
+- 已有中文版的，同时更新 `docs/zh/` 下的对应文档。可运行 `xtask graph` 查看本地装配。
 
 ## 8. 风险
 

@@ -99,7 +99,7 @@ Which scope that is, is a Dim decision:
 
 The names Dim defines, each following the identity and shape rules of
 [rutis usage §3](rutis-usage.md#3-services-by-name). The authoritative table is the
-[generated catalog](../architecture/rust-agent/generated/catalog.md): `xtask graph` writes it from the
+[generated catalog](../architecture/README.md#generated-architecture): `xtask graph` writes it from the
 real assembly with each name's group, provider, methods and whether it crosses languages (rutis usage
 R4). This table says what each name Dim defines is for.
 
@@ -125,7 +125,7 @@ R4). This table says what each name Dim defines is for.
 | `timelineIdentity` | `branch` | BranchScope | yes | `{sessionId, branchId}` |
 
 The Rust host ports and registries (ToolRegistry, PromptRegistry, ToolHost, ModelHost,
-PrepareModelHost and the others in the [generated services](../architecture/rust-agent/generated/services.md))
+PrepareModelHost and the others in the [generated services](../architecture/README.md#generated-architecture))
 get names and scopes in phase 2. Their public contract follows
 [service faces §2](service-faces.md), including opening receipts and state observations.
 Language bindings preserve the owning service's operations and lifecycle; a private implementation
@@ -321,7 +321,7 @@ The rules a design answers (§6) are conventions. Three things check them:
 
 | Check | What it covers |
 | --- | --- |
-| `xtask graph` / `check` | Crate boundaries, generated assembly graphs, plugin pages against the code, and the [catalog table](../architecture/rust-agent/generated/catalog.md), which also marks which parts are Capabilities (they inject `dispatcher` or `timeline`) |
+| `xtask graph` / `check` | Crate boundaries, generated assembly graphs, plugin pages against the code, and the [catalog table](../architecture/README.md#generated-architecture), which also marks which parts are Capabilities (they inject `dispatcher` or `timeline`) |
 | Review and the pull request template | The Rule check: principles §4 rules 1–9, §1, ADR 002 D1–D5 |
 | Flow tests | Observable behaviour: ordering, rebuild, reload settlement, close |
 

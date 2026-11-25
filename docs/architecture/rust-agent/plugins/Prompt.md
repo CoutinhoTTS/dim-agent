@@ -63,15 +63,6 @@ owners, rule check and complete-candidate concurrency limit.
 `overlapping_load_is_superseded_and_close_joins_cancellation`,
 `startup_opening_dispatch_is_free_and_close_or_deadline_joins_the_host`.
 
-<!-- generated:plugin Prompt — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:ConfigurationPublisher`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:GuideEntries`、`S:InitialPromptConfiguration`、`S:PromptHost`、`S:SessionLifecycle` |
-| 提供 | `B:Prompt`、`B:StateCell<PromptSnapshot>`、`B:dyn ConfigureControl` |
-| 被注入于 | `PromptSourcesBranch`、`SkillsBranch`、`ToolBinding` |
-<!-- /generated -->
-
 ## PromptGuide
 
 Owner: [prompt_guide.rs](../../../../crates/dim-agent-capabilities/src/prompt_guide.rs).
@@ -141,12 +132,3 @@ through the request Loop assembles, never through a request of their own.
 `each_branch_keeps_its_own_entries`, `the_frame_states_the_compaction_handle`;
 [reload.rs](../../../../crates/dim-app-server/tests/transport_flow/reload.rs):
 `an_entry_leaves_with_its_contributor`.
-
-<!-- generated:plugin PromptGuide — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | — |
-| 提供 | `S:GuideEntries`、`S:dyn HostDispatch#guideEntries` |
-| 被注入于 | `BackgroundExec`、`BranchLine`、`ContextPreparation`、`Loop`、`Prompt`、`ShellInput`、`TimelineTree` |
-<!-- /generated -->

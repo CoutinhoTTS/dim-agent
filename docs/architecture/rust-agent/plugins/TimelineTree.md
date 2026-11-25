@@ -99,15 +99,6 @@ Session close, and closing is not deletion of persisted history.
 `each_tree_generation_resolves_its_own_reporting_identity`,
 `a_row_reload_resolves_the_new_tree_reporting_identity`.
 
-<!-- generated:plugin TimelineTree — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:GuideEntries`、`S:SessionIdentity`、`S:TimelineFactory`、`S:dyn TimelineStore` |
-| 提供 | `S:TimelineTree`、`S:TreeCommands`、`S:dyn HostDispatch#treeCommands`、`S:dyn TimelineTreeControl` |
-| 被注入于 | `BranchLine`、`BranchTool`、`InputMethods`、`InputQueue`、`LoopMethods`、`PromptSuggestion`、`Questions`、`Recall`、`ShellInput`、`ToolMethods`、`TreeTimeline`、`Wait`、`WorkspaceTools` |
-<!-- /generated -->
-
 ## TreeTimeline
 
 Owner: [timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs).
@@ -139,12 +130,3 @@ An accepted creation need not survive parent or Session close.
 [branch_flow.rs](../../../../crates/dim-agent-capabilities/tests/branch_flow.rs):
 `parent_close_waits_for_dispatch_before_releasing_branch_reservations`,
 `close_releases_an_unconsumed_create_without_waiting_for_dispatch`.
-
-<!-- generated:plugin TreeTimeline — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:TreeCommands` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->

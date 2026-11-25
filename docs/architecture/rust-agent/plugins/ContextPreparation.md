@@ -92,12 +92,3 @@ nothing and no digest can be written
 `restoring_each_preparation_handoff_settles_without_replaying_work`,
 `before_modified_request_is_budget_checked_before_native_model_invocation`;
 [checkpoint_projection.rs](../../../../crates/dim-agent-capabilities/tests/context_flow/checkpoint_projection.rs).
-
-<!-- generated:plugin ContextPreparation — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:ContextUsage`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:GuideEntries`、`S:HistoryRenderer`、`S:PrepareContextHost` |
-| 提供 | `B:ConfigurationPublisher`、`B:ContextPreparation` |
-| 被注入于 | `Loop`、`ModelProvider`、`Prompt` |
-<!-- /generated -->

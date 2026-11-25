@@ -65,15 +65,6 @@ cancellation token terminates its process tree on close.
 | `S:SessionIdentity` | Name the Session in the payload and `DIM_SESSION_ID`. |
 | `S:SubmitChecks` | Register `hooks`, the `UserPromptSubmit` check the operator-input entries call. |
 
-<!-- generated:plugin HooksSession — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:HookSourcesHost`、`S:SessionConfig`、`S:SessionIdentity`、`S:SubmitChecks` |
-| 提供 | `S:HooksRuntime` |
-| 被注入于 | `HooksBranch` |
-<!-- /generated -->
-
 ## HooksBranch
 
 Owner: [hooks/runner.rs](../../../../crates/dim-agent-capabilities/src/hooks/runner.rs).
@@ -155,15 +146,6 @@ compacted context baseline.
 | `B:Dispatcher` | Follow the events that open each hook point. |
 | `B:Timeline` | Query the specific facts each hook point needs and append output. |
 | `S:ToolRegistry` | Read a tool's declaration for its matcher alias when the branch adopted no tool part. |
-
-<!-- generated:plugin HooksBranch — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Approval`、`B:BranchLifecycle`、`B:Dispatcher`、`B:Permission`、`B:Timeline`、`B:TimelineIdentity`、`S:HooksRuntime`、`S:ToolRegistry` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->
 
 ## Diagnostics
 
