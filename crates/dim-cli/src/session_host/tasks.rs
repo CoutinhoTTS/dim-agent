@@ -2113,6 +2113,30 @@ mod tests {
         );
     }
 
+    /// Opening the line a creation failure already ended does not start its
+    /// window over: the failure is known before the line's row, and the line
+    /// stays terminal instead of queueing a read.
+    #[tokio::test]
+    async fn a_failed_creation_is_not_armed_when_its_line_is_opened() {
+        let (mut worker, _receiver, _sent) =
+            crate::session_host::test_worker(&crate::session_host::TEST_FEATURES).await;
+        worker.session_id = "s1".into();
+        worker.focus = "main".into();
+        worker.task_event("main", create_failed(3, "b-7d"));
+        worker.discover_branch("b-7d");
+
+        worker.line_projection("b-7d");
+
+        assert!(
+            worker.task_history["b-7d"].done,
+            "the failed creation stays terminal"
+        );
+        assert!(
+            !worker.task_history_queue.contains(&"b-7d".to_owned()),
+            "the failed line is not read again on its own"
+        );
+    }
+
     /// A live creation failure the parent's page has not projected yet, or a
     /// page that records the creation and its failure in either order, leaves
     /// the child terminal: `/lines` refuses it, and the parent's finished
@@ -2142,6 +2166,22 @@ mod tests {
             worker.poll_task_history().await.unwrap();
             if live {
                 worker.task_event("b-7c", create_failed(3, "b-7d"));
+                assert!(
+                    !worker
+                        .projection
+                        .line_views()
+                        .iter()
+                        .any(|line| line.id == "b-7d"),
+                    "{page:?}: the page has not projected the child"
+                );
+                worker
+                    .command(Command::FocusLine("b-7d".into()))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    worker.focus, "b-7c",
+                    "{page:?}: the unprojected child is refused"
+                );
             }
             answer(
                 &mut worker,
