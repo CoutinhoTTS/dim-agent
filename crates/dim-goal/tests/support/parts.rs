@@ -17,12 +17,13 @@ use dim_agent_capabilities::{
     timeline_tree::{TimelineTreePlugin, TreeTimelinePlugin},
     tool_registry::{ToolRegistry, ToolRegistryPlugin},
 };
+use dim_agent_runtime::LoopPhase;
 use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BoxFuture, BranchOptions, Dispatcher, Feature,
-    LoopPhase, LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session,
-    SessionConfig, StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey,
-    TimelineQueryDirection, TimelineStore, TimelineTrace,
+    LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session, SessionConfig,
+    StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQueryDirection,
+    TimelineStore, TimelineTrace,
 };
 use dim_agent_types::{
     AgentEvent, BranchSource, DeltaData, EventKind, InputBlock, InputMessageData, InputMode,
