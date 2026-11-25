@@ -2851,8 +2851,8 @@ mod windows {
     use std::{os::windows::ffi::OsStringExt, time::Duration};
     use windows_sys::Win32::{
         Foundation::{
-            CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
-            STILL_ACTIVE,
+            CloseHandle, ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, GetLastError, HANDLE,
+            INVALID_HANDLE_VALUE, STILL_ACTIVE,
         },
         System::{
             Com::CoTaskMemFree,
@@ -2903,10 +2903,20 @@ mod windows {
             let mut entry: PROCESSENTRY32W = std::mem::zeroed();
             entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
             let mut parents = Vec::new();
-            let mut more = Process32FirstW(snapshot, &mut entry) != 0;
-            while more {
+            if Process32FirstW(snapshot, &mut entry) == 0 {
+                let error = GetLastError();
+                CloseHandle(snapshot);
+                return (error == ERROR_NO_MORE_FILES).then(Vec::new);
+            }
+            loop {
                 parents.push((entry.th32ProcessID, entry.th32ParentProcessID));
-                more = Process32NextW(snapshot, &mut entry) != 0;
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    if GetLastError() != ERROR_NO_MORE_FILES {
+                        CloseHandle(snapshot);
+                        return None;
+                    }
+                    break;
+                }
             }
             CloseHandle(snapshot);
             parents
