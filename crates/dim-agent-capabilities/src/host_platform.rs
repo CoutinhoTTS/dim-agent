@@ -3647,7 +3647,7 @@ async fn observe_job_release(
             });
             return;
         }
-        if tree.is_none() && started.elapsed() >= Duration::from_secs(30) {
+        if started.elapsed() >= Duration::from_secs(30) {
             record.finish(Terminal {
                 status: TaskStatus::Failed,
                 exit_code: None,
