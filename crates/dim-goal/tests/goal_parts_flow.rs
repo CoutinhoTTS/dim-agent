@@ -1443,6 +1443,91 @@ async fn a_turn_end_answered_by_a_newer_change_states_no_pause() {
     env.close().await;
 }
 
+/// A turn end whose fact a newer change answered answers its live caller
+/// instead of deciding again: an input deletion takes the deferred decision
+/// once more, and that caller must stop at the answered record rather than
+/// loop between a decision that still pauses and a fold that still calls the
+/// fact stale (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_turn_end_whose_fact_a_newer_change_answered_decides_once() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    let mut writer = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Writer,
+        0,
+        None,
+    );
+    let end = env.tool_turn("main", &[&first]);
+    assert_eq!(
+        writer.arrived().await,
+        end.sequence,
+        "the turn end at {} writes its record",
+        end.sequence
+    );
+
+    env.goal("edit", json!({"objective": "ship the fix"}))
+        .await
+        .expect("the edit writes");
+    env.wait_for("main", r#"op="edit""#).await;
+
+    // Deleting an ordinary input takes the deferred turn-end decision again,
+    // so the answered fact reaches a caller that is still alive.
+    let note = env.emit(
+        "main",
+        message(vec![raw("a note", None, false)], InputMode::Append),
+    );
+    let mut second = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Writer,
+        0,
+        Some(end.sequence),
+    );
+    let mut third = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Writer,
+        0,
+        Some(end.sequence),
+    );
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        0,
+        Some(end.sequence),
+    );
+    env.delete_id("main", &note.id);
+    assert_eq!(
+        second.arrived().await,
+        end.sequence,
+        "the deleted input states the turn end's record once more"
+    );
+    writer.release();
+    second.release();
+
+    tokio::select! {
+        arrived = done.arrived() => assert_eq!(
+            arrived, end.sequence,
+            "the answered record answers its caller at {}",
+            end.sequence
+        ),
+        arrived = third.arrived() => panic!(
+            "the answered record decided again at {arrived}: the live caller loops between the pause and the stale fact"
+        ),
+    }
+    done.release();
+    env.close().await;
+}
+
 /// An ordinary Append that commits between the turn-end decision and the
 /// record's own cutoff leaves the pause unwritten, and the turn end the caller
 /// still owns states its continuation (#2119).
