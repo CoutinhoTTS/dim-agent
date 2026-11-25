@@ -513,18 +513,17 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
 
 Requirements go to other owners:
 
-- **Goal.** Read the mode in force, the value `session.tool_mode.get` reports in `effective`, never
-  the chosen mode. Register the settle handler with the internal tool-mode transition service; on
-  an update, take the pending mode it passes and check its entry tool in the callable set; the
-  general lifecycle reads the effective mode. Take the Session's mode gate around `set` and
-  `resume` and re-check the effective mode at their commit boundary. Settle on
-  every transition to an effective `shell`: on an update, before the record write; on a
-  registration, on the registry's published effective mode. Fan out from the Goal Session part to
-  every branch with an active goal: write `paused` (`mode`), a pause text with a `mode` phrase as an
-  `Append` input, and withdraw the `set`/`resume` trigger and any continuation the InputQueue has
-  not applied. While
-  `shell` is in force, pause new continuations and refuse `session.goal.set` and `resume`; leave
-  resumption to the operator after `shell` leaves. Its owner carries this into
+- **Goal.** Register the settle handler with the internal `ToolModeTransition` service. The
+  handler receives `(mode, cause)` as data — `update` with the pending mode, `registration` with
+  `shell` — and settles on every transition to an effective `shell`, before the record write for an
+  update and before the registry publishes for a registration. It never reads the published value.
+  Fan out from the Goal Session part to every branch with an active goal: write `paused` (`mode`), a
+  pause text with a `mode` phrase as an `Append` input, and withdraw the `set`/`resume` trigger and
+  any continuation the InputQueue has not applied. For the general lifecycle, read the mode in
+  force, the value `session.tool_mode.get` reports in `effective`, never the chosen mode, and take
+  the Session's mode gate around `set` and `resume` to re-check the effective mode at their commit
+  boundary. While `shell` is in force, pause new continuations and refuse `session.goal.set` and
+  `resume`; leave resumption to the operator after `shell` leaves. Its owner carries this into
   [Goal](plugins/Goal.md).
 - **ToolRegistry.** Provide the `ToolModeTransition` service and the Session's mode gate; on a
   registration, call `settle(shell, registration)` under the gate before publishing, and keep the
