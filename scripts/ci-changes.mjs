@@ -8,7 +8,9 @@ const cargoManifest=/(?:^|\/)Cargo\.toml$/;
 // The Windows-only boundary flows no other platform compiles (#2065): the
 // product files behind crates/dim-agent-capabilities/tests/file_storage_flow.rs,
 // tests/host_platform_windows_flow.rs and crates/dim-app-server/tests/named_pipe_flow.rs,
-// the test targets that include them, and the runner that selects them. A file
+// the worktree removal refusal in crates/dim-app-server/src/worktrees.rs and its
+// flow in crates/dim-app-server/tests/worktree_removal_flow.rs, the test targets
+// that include them, and the runner that selects them. A file
 // missing here still reaches the Windows step on the daily sweep, so add it when
 // a Windows branch of those flows moves or gains another file.
 // The same tests are named in scripts/test-windows-native.mjs's `flows`, which
@@ -19,8 +21,8 @@ const cargoManifest=/(?:^|\/)Cargo\.toml$/;
 const windowsNative=[
   /^crates\/dim-agent-capabilities\/src\/(?:file_storage\.rs|file_storage\/|host_platform\.rs|host_platform\/)/,
   /^crates\/dim-agent-capabilities\/tests\/(?:capabilities_flow|file_storage_flow|host_platform_windows_flow)\.rs$/,
-  /^crates\/dim-app-server\/src\/(?:lib|transport|pipe_client|cli)\.rs$/,
-  /^crates\/dim-app-server\/tests\/(?:app_server_flow|named_pipe_flow)\.rs$/,
+  /^crates\/dim-app-server\/src\/(?:lib|transport|pipe_client|cli|worktrees)\.rs$/,
+  /^crates\/dim-app-server\/tests\/(?:app_server_flow|named_pipe_flow|worktree_removal_flow)\.rs$/,
   /^scripts\/test-windows-native\.mjs$/,
 ];
 
