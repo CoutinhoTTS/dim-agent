@@ -61,15 +61,6 @@ with `read` without approval, rejections, a storage failure, a closed Session
 and `unknown_method`), and an unload, a Session record gone before the commit
 and an inactive node at the `sessionMethods` contract.
 
-<!-- generated:plugin Attachments — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:SessionFiles`、`S:SessionIdentity`、`S:SessionMethods` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->
-
 ## File import and image reads
 
 `attachment.import {sessionId, path, name?, image?}` is mutating and drains on

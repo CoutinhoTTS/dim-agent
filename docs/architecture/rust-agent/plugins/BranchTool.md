@@ -85,15 +85,6 @@ specific target from its own `step/tool-use` and `step/tool-result` (design [§6
 `a_read_cursor_survives_a_restore`,
 `an_after_past_the_targets_head_is_refused_and_the_cursor_stays`.
 
-<!-- generated:plugin BranchTool — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:ToolRegistry`、`S:TreeCommands` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->
-
 ## BranchLine
 
 Owner: [timeline_tree.rs](../../../../crates/dim-agent-capabilities/src/timeline_tree.rs).
@@ -209,12 +200,3 @@ BranchLine mounts at the committed Dispatcher cutoff without reading historical 
 `a_host_line_cut_before_it_was_opened_is_not_told_about_the_gap`,
 `a_nested_line_is_told_its_own_parent_at_open`,
 `a_childs_first_system_is_its_parents_at_the_cut`.
-
-<!-- generated:plugin BranchLine — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:GuideEntries`、`S:SessionLifecycle`、`S:TreeCommands` |
-| 提供 | `B:BranchLine`、`B:dyn HostDispatch#branchLine` |
-| 被注入于 | — |
-<!-- /generated -->

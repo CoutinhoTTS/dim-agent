@@ -311,7 +311,7 @@ read, the Session face `collaborationSession.approvalDestination` (§3.1), and o
 Session notice. Their consumers are the leader model, clients rendering its approval, and
 foreign-language Session parts reading the approval destination. The source input is interpreted only by Collaboration. Permission, Approval notifications, command rules and public
 Session input shapes are unchanged. Implementation updates Collaboration's owning architecture
-page and generated assembly/catalog only if the actual dependencies change.
+page if its dependencies change.
 
 | Owner | Requirement and existing mechanism |
 | --- | --- |

@@ -693,7 +693,7 @@ host file path.
 | `on` | A `RUST_LOG` directive string read when the daemon starts; not run-time state (D1) | The start-up rule and its steps; no control |
 | `auto` | None: no daemon-side rule raises its own logging | Deliberately absent, below |
 | Trace archive location | Removed with the diagnostics channel ([ADR 005](../adr/005-observability.md) D2, D5) | `dimcode export` and `daemon.log` named as the read paths |
-| Component and subscription records | Not restored (D2, D4); a failed assembly is `session_build_failed`, and `xtask graph` shows the assembled services | Not shown |
+| Component and subscription records | Not restored (D2, D4); a failed assembly is `session_build_failed` | Not shown |
 | Effective log filter | The daemon does not report it | Not shown |
 
 **User-visible change.** Compared with the legacy page, the Diagnostics page

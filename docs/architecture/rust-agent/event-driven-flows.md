@@ -159,7 +159,7 @@ sequenceDiagram
 | RPC 和通知 | 不增加方法或协议版本；审批请求、取消与应答通知由广播的 `approval/request`、`approval/cancelled`、`approval/respond` 在出站编码时生成（应答通知 `approval.resolved` 仅 v3，v1、v2 通知集合已冻结，[#278](https://github.com/arcships/dim/issues/278)），这些控制事件不进入 `session.event`，其余控制事件不发送到客户端 |
 | 模型历史 | 新增控制事件不渲染成消息；自动唤醒仍通过已有 input 进入上下文；压缩结果仍由既有历史规则采用 |
 | 包边界 | 事件类型由 `dim-agent-types` 定义；审批插件留在 `dim-app-server`，树插件留在 `dim-agent-capabilities`，脱离工作留在各所有者的包内；runtime 不反向依赖它们 |
-| 就绪与图 | 两个新增 Timeline 插件按现有工厂注册，订阅就绪后才启动 Dispatcher；实现时更新 Rust 装配图并运行边界检查 |
+| 装配就绪 | 两个新增 Timeline 插件按现有工厂注册，订阅就绪后才启动 Dispatcher；运行装配边界检查 |
 
 v1 出站转换只在实时通知一处执行。内部 Timeline 仍只有一份事件事实，不建立另一份 v1 历史。
 

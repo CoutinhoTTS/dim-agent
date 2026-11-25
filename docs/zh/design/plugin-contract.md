@@ -89,8 +89,6 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 ## 4. Dim 的服务
 
 下表是 Dim 定义的名称，每个都遵循 [rutis 使用 §3](rutis-usage.md#3-按名字的服务) 的标识与形状规则。
-权威的表是[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)：`xtask graph` 从真实装配
-写出每个名称的组、提供者、方法以及是否跨语言（rutis 使用 R4）。这张表说明 Dim 定义的每个名称的用途。
 
 | 名称 | 作用域 | 提供者 | 今天是否跨语言 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -113,8 +111,7 @@ process (root)                 process parts: storage, catalogs, connections, Ag
 | `branchLifecycle` | `branch` | BranchScope | 是 | `activated`、`closing`；`registerOpening` 登记分支打开时等待的工作 |
 | `timelineIdentity` | `branch` | BranchScope | 是 | `{sessionId, branchId}` |
 
-Rust 宿主端口和注册表（ToolRegistry、PromptRegistry、ToolHost、ModelHost、PrepareModelHost，
-以及[生成的服务](../../architecture/rust-agent/generated/services.md)中的其他项）在阶段 2 获得名称和组。
+Rust 宿主端口和注册表在阶段 2 获得名称和组。
 它们的公开契约遵循[服务面 §2](../../design/service-faces.md)，包括开启回执和状态观察。
 语言绑定保留所属服务的操作及生命周期；私有实现机制不会因为 Rust 类型有一个 key 就成为公开服务。
 
@@ -274,7 +271,7 @@ Dispatcher 处理函数可能在发布（`activated`）之前收到开启阶段�
 
 | 检查 | 覆盖什么 |
 | --- | --- |
-| `xtask graph` / `check` | crate 边界、生成的装配图、插件页面与代码的对照，以及[服务目录表](../../architecture/rust-agent/generated/catalog.md)，它还标出哪些部件是 Capability（它们注入 `dispatcher` 或 `timeline`） |
+| `xtask check` | crate 与模块边界、实际装配中的服务面和插件依赖 |
 | 评审与 PR 模板 | 规则检查：原则 §4 第 1–9 条、§1、ADR 002 D1–D5 |
 | 流程测试 | 可观察的行为：顺序、重建、重载结算、关闭 |
 

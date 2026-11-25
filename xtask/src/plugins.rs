@@ -1,9 +1,4 @@
-//! Local execution profile graph generation for plugin documents under
-//! `docs/architecture/rust-agent/plugins/`.
-//!
-//! `graph` assembles the local execution profile, records its live rutis
-//! diagnostics in `generated/local/services.json`, and delegates generated
-//! block updates and static document checks to `xtask_check::plugin_docs`.
+//! Local execution profile diagnostics for graph generation and plugin documentation checks.
 use dim_agent_capabilities::{
     defaults,
     execution_settings::ExecutionSettingsHost,
@@ -261,19 +256,21 @@ pub async fn local_graph() -> Result<BTreeMap<&'static str, Value>> {
     Ok(graphs)
 }
 
-/// Writes the local graph and rewrites every plugin document's block.
-pub fn write(root: &Path, graphs: &BTreeMap<&'static str, Value>) -> Result<()> {
-    let file = xtask_check::plugin_docs::graph_file(root);
-    std::fs::create_dir_all(file.parent().unwrap())?;
-    std::fs::write(&file, serde_json::to_string_pretty(graphs)? + "\n")?;
-    let mermaid = crate::mermaid(graphs);
-    std::fs::write(file.with_file_name("services.mmd"), &mermaid)?;
+/// Writes the local execution profile under the selected graph directory.
+pub fn write(out: &Path, graphs: &BTreeMap<&'static str, Value>) -> Result<()> {
+    let dir = out.join("local");
+    std::fs::create_dir_all(&dir)?;
     std::fs::write(
-        file.with_file_name("services.md"),
+        dir.join("services.json"),
+        serde_json::to_string_pretty(graphs)? + "\n",
+    )?;
+    let mermaid = crate::mermaid(graphs);
+    std::fs::write(dir.join("services.mmd"), &mermaid)?;
+    std::fs::write(
+        dir.join("services.md"),
         format!(
             "# 本地执行运行组合\n\n由真实 rutis 装配 `defaults::install_local_execution` 生成（模型为脚本化 mock）。重新生成：`cargo run -p xtask -- graph`。\n\n```mermaid\n{mermaid}```\n"
         ),
     )?;
-    xtask_check::plugin_docs::rewrite(root, graphs)?;
     Ok(())
 }

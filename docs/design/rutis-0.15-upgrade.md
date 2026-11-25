@@ -409,7 +409,7 @@ silently wrong.
 | P1 | Kernel event migration: serde derives and payload changes (D5), listener signatures (D6), `on_sync`/`SyncCall`/`Option` (timeline), `serial(Arc)`, `on_pattern(&)`, drop instance keys (D2), topology (D3 contracts). **Blocked on R1** ([#362](https://github.com/arcships/dim/issues/362)): the `SkillsCatalog` watch contract must land before the first `skills.catalog_changed` consumer is removed | `cargo test --workspace --locked` for the affected flows: timeline batch, tool binding, skills, settings, session broadcast |
 | P2 | Bridge/runtime migration: remove `.emits(..)`; replace both `Process::emit` sites with `parallel` dispatched from the agent context (D4); confirm rows join the bus and receive events in a test that loads a real Node row | `cargo test --workspace --locked`; the Node-backed profile tests |
 | P3 | TypeScript: drop `emits: [..]`, replace awaited `emit` with `parallel`, assert failures through `t.reported`; update `docs/typescript-plugin-authoring.md` (version, event semantics) | plugin tests in `runtime/plugins/*`; `runtime/plugin-sdk.test.mjs` |
-| P4 | Tooling and docs: `cargo run --locked -p xtask -- graph` and `check`; update 0.12.1 references (§8); note the scope rule in the architecture docs | `xtask check`; `node --test scripts/*.test.mjs` |
+| P4 | Tooling and docs: update 0.12.1 references (§8); note the scope rule in the architecture docs | `xtask check`; `node --test scripts/*.test.mjs` |
 
 ## 7. Verification
 
@@ -418,9 +418,7 @@ Full sequence at the workspace root (CI order):
 1. `./dev check`
 2. `cargo clippy --workspace --all-targets --locked -- -D warnings`
 3. `cargo test --workspace --locked`
-4. `cargo run --locked -p xtask -- check` and `graph` (assembly and crate
-   dependencies are unchanged, so the snapshots should not move; a diff means the
-   bump changed something it should not)
+4. `cargo run --locked -p xtask -- check`. The upgrade preserves the assembly and crate dependency boundaries.
 5. `node --test scripts/*.test.mjs`
 6. Node bindings, as CI runs them: `npm ci --prefix runtime` and the three plugin
    packages, `npm install --no-save --install-links` for the linked plugins,

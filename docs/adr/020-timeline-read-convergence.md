@@ -36,7 +36,7 @@ Reads of loaded sessions that bypass the service (`Session::local_page` and the 
 
 ## Consequences
 
-- The reads listed in the audit are removed from `Timeline`, `Branch`, `Session` and the Dispatcher as their consumers move; `xtask types` and `xtask graph` regenerate the generated files and nothing else in them changes.
+- The reads listed in the audit are removed from `Timeline`, `Branch`, `Session` and the Dispatcher as their consumers move; only the corresponding TypeScript declarations change when `xtask types` runs.
 - Plugin contract §5.2 describes the replay a rebuilding part receives; it is rewritten with the first rebuild that stops using replay.
 - The shared decoded copy of a branch during opening exists for replay readers and is reconsidered when the last of them moves.
 - Consumers that read to the committed position (goal, file reads, the collaboration rebuild) decide in their own migration whether they need in-flight facts.

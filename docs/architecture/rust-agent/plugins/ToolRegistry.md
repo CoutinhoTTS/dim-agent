@@ -190,12 +190,3 @@ malformed results, retained handlers of an unloaded row, and cancellation withou
 
 None. Registration is [rutis usage R6](../../../design/rutis-usage.md#r6-contributions-register-with-their-owner),
 owned by Dim and built on existing rutis effects and the bridge's calling row.
-
-<!-- generated:plugin ToolRegistry — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:ToolHost` |
-| 提供 | `S:ToolRegistry`、`S:ToolSourcesView`、`S:dyn HostDispatch#toolRegistry`、`S:dyn HostDispatch#toolSourcesView` |
-| 被注入于 | `BranchTool`、`ContextUsage`、`HooksBranch`、`Questions`、`Recall`、`Skills`、`ToolBinding`、`Wait` |
-<!-- /generated -->

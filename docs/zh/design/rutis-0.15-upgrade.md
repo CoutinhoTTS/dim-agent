@@ -359,7 +359,7 @@ tokio::select! {
 | P1 | 内核事件迁移：serde 派生与载荷改动（D5）、监听器签名（D6）、`on_sync`/`SyncCall`/`Option`（时间线）、`serial(Arc)`、`on_pattern(&)`、移除实例键（D2）、拓扑（D3 的两个契约）。**被 R1 阻塞**（[#362](https://github.com/arcships/dim/issues/362)）：必须先落地 `SkillsCatalog` watch 契约，才能移除第一个 `skills.catalog_changed` 消费方 | `cargo test --workspace --locked`，覆盖受影响流程：时间线批写、工具绑定、Skills、Settings、Session 广播 |
 | P2 | bridge/运行时迁移：移除 `.emits(..)`；把两处 `Process::emit` 换成从 agent 上下文使用的 `parallel`（D4）；用一个真实 Node 行的测试确认行加入总线、分支行按 scope 收到事件 | `cargo test --workspace --locked`；Node 相关 profile 测试 |
 | P3 | TypeScript：去掉 `emits: [..]`，把 `await emit` 改为 `parallel`，通过 `t.reported` 断言失败；更新 `docs/typescript-plugin-authoring.md`（版本、事件语义） | `runtime/plugins/*` 插件测试；`runtime/plugin-sdk.test.mjs` |
-| P4 | 工具链与文档：`cargo run --locked -p xtask -- graph` 与 `check`；更新 0.12.1 引用（§8）；在架构文档中记录 scope 规则 | `xtask check`；`node --test scripts/*.test.mjs` |
+| P4 | 工具链与文档：更新 0.12.1 引用（§8）；在架构文档中记录 scope 规则 | `xtask check`；`node --test scripts/*.test.mjs` |
 
 ## 7. 验证
 
@@ -368,8 +368,7 @@ tokio::select! {
 1. `./dev check`
 2. `cargo clippy --workspace --all-targets --locked -- -D warnings`
 3. `cargo test --workspace --locked`
-4. `cargo run --locked -p xtask -- check` 与 `graph`（装配与 crate 依赖不变，快照不应变动；
-   若有 diff 说明这次升级改到了不该改的地方）
+4. `cargo run --locked -p xtask -- check`。本次升级保留装配和 crate 依赖边界。
 5. `node --test scripts/*.test.mjs`
 6. Node 绑定，按 CI 的方式：`npm ci --prefix runtime` 与三个插件包，
    `npm install --no-save --install-links` 链接插件，`node --test runtime/plugin-sdk.test.mjs`，

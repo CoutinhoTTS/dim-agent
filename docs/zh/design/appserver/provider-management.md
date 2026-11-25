@@ -810,7 +810,7 @@ owner，且不包含在持久化静态记录中；执行它需要该 owner 的�
 owner API、回调或 RPC。
 
 **兼容性。** 本合同是建立在已准入类型上的 Rust 模块边界，不是 rutis 服务、RPC 或管理方法。
-它不增加服务名、生成图条目、crate 依赖、持久化或 `PROTOCOL_VERSION` 变更。旧配置导入的结果和
+它不增加服务名、crate 依赖、持久化或 `PROTOCOL_VERSION` 变更。旧配置导入的结果和
 拒绝文本不变，因为选择转换把任何拒绝映射为既有原因，接受的选择写入相同的 provider/model ID。
 回复不包含凭据、header、代理或秘密引用；记录输入就是 Provider 解析器已持有的那一份。
 

@@ -403,7 +403,7 @@ belongs to PluginManager.
 | ToolRegistry and its page | Foreign `register` through its dispatcher, declaration decoding at registration and the calling row's generation token on each foreign handler. Existing ToolBinding, Prompt and ToolExecutor flow is reused. |
 | C1 `methods` module | The Session's method table and its foreign `register` dispatcher, neutral DTO/error decoding and generation-owned foreign handler construction. No Rpc dispatch replacement. |
 | Session broadcast | Rows listen to `session/{sessionId}` themselves, with the id from `sessionIdentity`. C6 retains notices. |
-| Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Regenerate graphs through `xtask graph`, then run `xtask check`. |
+| Dependencies | Existing pinned `rutis-bridge` at the language-boundary owners; no new library or rutis change. Run `xtask check` against the assembly. |
 | Documentation | Owner pages, App Server README and Session-boundary Appendix F updated to the actually implemented subset. |
 | Tests and fixture | One real App Server/Node flow using a disposable home and local Rpc; focused malformed-boundary cases in that flow. |
 

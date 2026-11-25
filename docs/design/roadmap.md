@@ -155,7 +155,6 @@ P3 的 RemoteGateway、Modality、PluginManager 等 P1/P2 落地后，开工前�
 
 ### 3.6 并发规则
 
-- `docs/architecture/rust-agent/generated/` 下的生成文件不手工解冲突：rebase 后重跑 `xtask graph`。
 - 不给还没落地的接口打桩，等接口合入再开工。
 - 同时进行的工作数不超过维护者能确认的设计 PR 和实现 PR 数量。
 

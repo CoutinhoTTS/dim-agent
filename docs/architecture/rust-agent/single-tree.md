@@ -40,7 +40,7 @@ Session 与分支装配通过 loader 的 `instance_rows` 查询本实例当前�
 
 当前 `--database PATH` 装载 `SqliteStoragePlugin` 与 `SessionStorePlugin`，共用一个原生数据库，保存 Agent profile、Session 身份与 Timeline；启动只读目录，Session 按使用装载，未指定数据库时使用内存存储。`--home PATH` 使用 `<home>/dimcode.sqlite` 并授权该文件根；FileStorage 默认授权 `session_defaults.cwd`。SQL/JSON 格式见[原生存储格式](../../design/appserver/native-storage-format.md)。
 
-下图为进程归属树。进程层实际装配见[App Server 生成产物](generated/app-server/services.md)，Session 与分支见[生成产物](generated/services.md)。
+下图为进程归属树。
 
 ```text
 rutis root
@@ -427,4 +427,4 @@ Dispatcher 与 before 的精确名称、`*`、`领域/*` 只过滤同一分支�
 | 关闭回收 | 关闭 Session/分支后子树 driver、注册、索引与父级清理记录归零；多轮创建与关闭不增长 |
 | 规模 | 测 0/100/1000 空 Session、并发创建与关闭、多分支派发延迟；存活申请与创建耗时与原型基线（每空 Session 约 139.3 KiB、16 个任务）同一量级 |
 | 兼容 | 事件序列、Unix/WS 上的 v1/v2 流程（以 [Session 广播](event-driven-flows.md#6-session-广播)修订后的合同为准）、审批与错误码不变；v1/v2 仅增加 `service_reloading`。`session.create` 不再接受 `trace`，结果不再含 `tracePath`（[ADR 005](../../adr/005-observability.md) D5） |
-| 框架合同 | 严格读取在 release 同样拒绝漏声明；分支已提交事件和 before 不越界；卸载等待运行中的监听调用退出；作用域清理期间终态原样提交，Timeline 关闭后拒绝写入；广播接纳失败不被误认为交付成功；生成图取自真实装配 |
+| 框架合同 | 严格读取在 release 同样拒绝漏声明；分支已提交事件和 before 不越界；卸载等待运行中的监听调用退出；作用域清理期间终态原样提交，Timeline 关闭后拒绝写入；广播接纳失败不被误认为交付成功 |
