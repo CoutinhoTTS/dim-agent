@@ -1279,6 +1279,7 @@ impl HostPlatform {
                     let record = task.clone();
                     let job = job.clone();
                     let shutdown = self.command_shutdown.clone();
+                    let workers = self.command_workers.clone();
                     self.command_workers.spawn(async move {
                         let mut pid = job.pid.subscribe();
                         let mut changed = record.changed.subscribe();
@@ -1293,7 +1294,7 @@ impl HostPlatform {
                                 }
                                 if kill_job(pid).await.is_err() {
                                     let shutdown = shutdown.clone();
-                                    tokio::spawn(async move {
+                                    workers.spawn(async move {
                                         observe_job_release(record, job, pid, shutdown).await;
                                     });
                                     return;
@@ -1331,7 +1332,7 @@ impl HostPlatform {
                     let record = task.clone();
                     let job = job.clone();
                     let shutdown = self.command_shutdown.clone();
-                    tokio::spawn(async move {
+                    self.command_workers.spawn(async move {
                         observe_job_release(record, job, pid, shutdown).await;
                     });
                     return Err(HostPlatformError::Failed(error.to_string()));
@@ -1362,9 +1363,6 @@ impl HostPlatform {
         commands.remove(&request.task_id);
         if let TaskKind::Shell(shell) = &task.kind {
             shell.sweep(task.terminal());
-            for child in shell.children_list() {
-                commands.remove(&child.id);
-            }
         }
         Ok(())
     }
@@ -3541,9 +3539,9 @@ async fn observe_job_release(
         if record.is_terminal() {
             return;
         }
-        if kill_job(pid).await.is_ok() {
+        if job_released(pid).await {
             record.finish(Terminal {
-                status: TaskStatus::Failed,
+                status: TaskStatus::Cancelled,
                 exit_code: None,
                 signal: None,
                 duration_ms: record.started.elapsed().as_millis() as u64,
@@ -3573,6 +3571,18 @@ pub async fn kill_job(pid: u32) -> io::Result<()> {
     }
     #[cfg(windows)]
     native::terminate_tree(pid)
+}
+
+async fn job_released(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        wait_job_exit(pid).await.is_ok()
+    }
+    #[cfg(windows)]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 #[cfg(unix)]
