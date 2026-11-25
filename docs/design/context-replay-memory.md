@@ -190,7 +190,7 @@ P3 已经覆盖冷重建：读取按批进行，不再一次物化整段历史�
 | 最终结果 | `context-replay` peak 8.35MB；真实会话 prepare peak 11.53MB；单会话 RSS 50.8MB，双会话 54.6MB，空 daemon 29.7MB |
 | 产品验证 | `dimcode app-server` 加载真实 SQLite session，mock model 跑一轮后测 RSS；allocator 只作为 backstop |
 | 堆高水位 | P0 验证最大会话的堆高水位是否随步数增长；不是断言，是测量 |
-| 兼容 | `cargo test --workspace --locked`；`xtask check` 不需要 `graph` 变更 |
+| 兼容 | `cargo test --workspace --locked`；`xtask check` |
 
 不设 CI 字节阈值；数值写进 PR。
 

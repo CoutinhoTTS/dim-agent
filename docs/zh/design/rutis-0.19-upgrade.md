@@ -287,7 +287,6 @@ loader 把这个名字登记在 Dim 交给它的服务目录里，所以外语�
   - 在 Agent 启动前挂到 root 上的宿主插件改为通过 `AgentBuilder::plugin` 成为行，或通过 `process_value`、`session_value`
     作为值提供。测试里是 `RecoveryHosts`、`AimuxPlugin`、`ConfiguredModelsPlugin` 等；`xtask` 里是 `--model-config` 用的
     `AimuxPlugin` 和 `ConfiguredModelsPlugin`，以及本地图用的 `FileStoragePlugin` 和 `GraphPlatform`。
-  - `xtask` 的图保留原有的作用域；移动的插件成为宿主 loader 里的行，本地图的进程子图会把它们列为行（§6）。
   - 测试在 Agent 运行期间挂上或卸下的宿主插件（`tests/integration/tests/tool_binding.rs` 里的 `EnableContributor`）
     改为在最小宿主的 loader 里增删行。
   - `agents_of_one_builder_mount_only_their_own_plugins_parts`（`tests/integration/tests/part_registry.rs`）改用两个
@@ -370,19 +369,13 @@ daemon 根（LocalId dim-daemon）                   dimcode leaf 根
 - **版本不一致。** 链接协议和 `ui.open` 的回复都变了，所以 `hello` 公布的 feature 从 `ui.leaf` 改为 `ui.leaf.2`。
   无论是旧 CLI 连新 daemon，还是新 CLI 连旧 daemon，Tui §3.6 现有的回退机制都会改为直接运行 TUI。
 - **链接现在承载的内容**（对 [Tui §8](../../design/plugins/Tui.md#8-security) 的更新）：
-  - **规则。** 会话导出所有能跨语言的进程级名字。[生成的服务目录](../../architecture/README.md#generated-architecture)
-    列出了它们；已安装的外语进程行还会加上它们自己提供的名字。
-  - **目前的集合。**
-    - `auxiliaryModel`、`managementMethods`、`partRegistry`、`pluginFiles`、`sessionMetadata`、`sessionPermissions`、
-      `settings`、`workflowFiles`；
-    - `sessions`，它的 `launch`、`input`、`lookup`、`history`、`withdraw`、`stop`、`idle`、`delete` 方法会改动 Session；
-    - 已启用 Scheduler 的 `scheduleJobs`、`wakeups`，及可选 Workflow 的 `workflowRuns`。
+  - **规则。** 会话导出所有能跨语言的进程级名字，包括由已安装的外语进程行提供的服务。
   - **因此 leaf 能做的事。** 它可以操作任何 Session、登记管理方法，还可以登记 Session 部件，而这些部件的副本会
     运行在 leaf 里。
   - **为什么接受。** leaf 只能经由本地 `ui.open` 调用方给出的私有地址连通。这个调用方本来就持有 `daemon.sock` 上的
     本地协议 v3 连接，能操作同样的 Session 和管理方法。它的 `Tui` 只使用协议 v3。信任边界仍是本地用户
     （[ADR 003](../adr/003-approval-scope.md)；AGENTS 规则 11）。
-  - **Tui §8 的改写。** §8 围绕这个集合重写，去掉"leaf 链接不暴露任何 Session 或管理方法"这句话。
+  - **Tui §8 的改写。** §8 说明服务的导出规则，去掉"leaf 链接不暴露任何 Session 或管理方法"这句话。
   - 这些服务没有对 leaf 做隔离，尽管 rutis 对"不应让对端看到的服务"的建议是在提供它的行上设置 `isolate`。它们是
     Dim 共享的跨语言服务，仓库自己的 TypeScript 插件就注入它们。隔离它们会把这些插件一起挡在外面，原因有两个：
     - SessionTitle 的 Session 部件注入了 `sessions`、`settings`、`sessionMetadata` 和 `auxiliaryModel`。它是插件
@@ -448,7 +441,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 
 | 步骤 | 工作 | 门槛 |
 | --- | --- | --- |
-| 0（单独的 pull request，基于 0.17.1） | M6：只保留一个放置 API，提供最小宿主，并把 41 个文件迁到它上面 | `cargo test --workspace --locked`；`xtask check` 和 `graph`，并对照 §6 中步骤 0 的图 diff；§6 中放置的检查 |
+| 0（单独的 pull request，基于 0.17.1） | M6：只保留一个放置 API，提供最小宿主，并把 41 个文件迁到它上面 | `cargo test --workspace --locked`；`xtask check`；§6 中放置的检查 |
 | 1 | 固定版本和锁文件（M1），升到 0.19.3；作者指南的固定版本 | `cargo metadata` 能解析；锁文件写的是 0.19.3 |
 | 2 | 内核与服务目录：M2、M3 | `dim-app-server` 以下各 crate 和 `tests/integration` 的测试（`extensions.rs` 在步骤 3 跟上）；§6 中 Timeline `before` 的检查 |
 | 3 | 运行时：M4、M5、M9 | App Server 和 `tests/integration` 中由 Node、Python 驱动的流程测试 |
@@ -463,15 +456,8 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 1. `cargo deny --locked check advisories licenses`（dependencies 任务）
 2. `cargo build --workspace --locked`、`cargo fmt --all -- --check`、
    `cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`
-3. `cargo run --locked -p xtask -- check`，然后 `graph`。`npm/branch-services.d.ts` 过期时 `check` 也会失败。本地生成的图
-   来自 mock、本地和 App Server 三个装配，它们都不启动语言运行时，所以 M4 删掉的行从不出现在图里。各个 pull request
-   预期的 diff：
-   - 步骤 0（M6）：
-     - `target/architecture/services.json` 和 `target/architecture/app-server/` 预期不变；
-     - `target/architecture/local/` 里，`FileStorage` 和 `HostPlatform` 从 root 下移到宿主 loader 的行里。
-   - 升级：只有 rutis 0.19 自己新增的 fiber。
-
-   每个 pull request 都记录实际测得的 diff，并对照这份清单解释每一处变化。
+3. `cargo run --locked -p xtask -- check`，其中包括 `npm/branch-services.d.ts` 的一致性检查。
+   M6 将本地执行配置的 `FileStorage` 和 `HostPlatform` 移到宿主 loader。mock 与 App Server 配置保留原有放置位置；升级仅增加 rutis 0.19 的 fiber。
 4. `node --test scripts/*.test.mjs`
 5. 实际的 CLI profile：`cargo test --locked -p dimcode --test cli_flow -- --ignored`，带 `DIM_TEST_APP_SERVER` 和
    `DIM_TEST_NPM_WRAPPER`
@@ -546,7 +532,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
   [single-tree](../../architecture/rust-agent/single-tree.md)（也包括 Agent 的放置方式，M6），[lifecycle](../../architecture/rust-agent/lifecycle.md)，
   [插件页面索引](../../architecture/rust-agent/plugins/README.md)和[架构概览](../../architecture/README.md)：
   其中对 0.17 的引用，以及运行时和 leaf 的机制。
-- 已有中文版的，同时更新 `docs/zh/` 下的对应文档。可运行 `xtask graph` 查看本地装配。
+- 已有中文版的，同时更新 `docs/zh/` 下的对应文档。
 
 ## 8. 风险
 
@@ -557,7 +543,7 @@ M6 先行合入，作为一个单独的 pull request，基于 0.17.1。它不改
 | 已安装的插件能拿到导出的服务和 `rutis/loader` | 接受：它们是受信代码（规则 11）；没有可编辑层时，`rutis/loader` 不能增删行（M5） |
 | leaf 建立了会话，但它的 `Tui` 一直不 attach | 在 `START` 之后关闭；替换时在新界面 attach 之前保留旧界面（M8） |
 | 宿主里出现第二个 loader | M6：loader 按宿主划分，Agent 从不自建 loader；App Server 和每个最小宿主各持有一个 |
-| 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 写明了它预期的图 diff |
+| 迁移 159 处调用改变了测试或图所检查的内容 | 每个迁出的测试保留原有断言；M6 单独基于 0.17.1 合入，它的 diff 里没有升级本身的改动；§6 说明受影响的放置位置 |
 | #645 合入 | 它在本次升级之后合入，用的是 0.19.2 公开的 `Loader::instance_rows`，行为不变，因此与固定版本和本次升级都不冲突；它读取的实例行会随 #684 去掉（§3） |
 | rutis 往 TUI 的终端打印内容 | M7 的 sink；rutis-bridge 在会话无法运行插件时自己调用的 `eprintln!`，由终端检查覆盖 |
 | 配置不符合 schema 的 TypeScript 插件现在会失败 | 插件测试和 Node 驱动的流程使用随产品发布的配置运行 |

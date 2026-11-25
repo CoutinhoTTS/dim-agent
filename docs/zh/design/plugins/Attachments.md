@@ -372,7 +372,7 @@ A.2 映射的其余部分也有测试（Q11）。通过 RPC：存储失败（`<d
 1. 非视觉模型：请求中是占位，历史中的输入不变；能力未知：发送图片。原始客户端用 `session.submit` 发送无法解码的图片时，Rpc 接受，请求中换成占位（S11）。
 2. CLI：接受 PNG、JPEG、WebP 和 GIF 并使用嗅探出的媒体类型；标错类型的 JPEG 被纠正；BMP 和 URL 在发送前被拒绝；21 张图片、6 MiB 的图片和 9000 px 的边长在发送前被拒绝；保留草稿。
 
-验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及 `cargo run --locked -p xtask -- graph` 再 `check`，因为装配了新的 Capability。capability 页面是 [architecture/rust-agent/plugins/Attachments](../../../architecture/rust-agent/plugins/Attachments.md)（[roadmap §5.1](../../../design/roadmap.md#51-设计状态)）：xtask 生成本地执行图时按 `serve` 的方式安装 Attachments，`sessionFiles` 换成仅供生成图用、不存储任何文件的替身，因此 `check` 会校验该页面。
+验证：`./dev check`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、`cargo test --workspace --locked`，以及 `cargo run --locked -p xtask -- check`。后者根据本地执行配置校验 [architecture/rust-agent/plugins/Attachments](../../../architecture/rust-agent/plugins/Attachments.md)。
 
 ## 附录 E. 假设
 
@@ -412,7 +412,7 @@ Attachments 用 Rust 实现，放在自己的 crate `dim-agent-attachments` 中�
 | 中立契约 | Rust 绑定 |
 | --- | --- |
 | 插件 | `TypedPlugin`；`Deps = (Keyed<SessionIdentity>, Keyed<SessionFiles>, Keyed<SessionMethods>)` |
-| 安装 | `dim_agent_attachments::install(builder)`：`builder.require_feature(Feature::new("Attachments").session("Attachments", |names| names.part(AttachmentsPlugin)))`，一个登记自己 Session 部件的插件，由装配配置要求。`serve` 在设置了 `native_home` 时调用它；xtask 生成本地执行图时也调用它 |
+| 安装 | `dim_agent_attachments::install(builder)`：`builder.require_feature(Feature::new("Attachments").session("Attachments", |names| names.part(AttachmentsPlugin)))`，一个登记自己 Session 部件的插件，由装配配置要求。`serve` 在设置了 `native_home` 时调用它 |
 | 命名空间 `attachment` | 在 `Keyed<SessionMethods>` 依赖上调用 `methods.register(ctx, "attachment", vec![MethodDecl::new("attachment.put", true, Interruption::Drain)], handler)`（`dim_agent_capabilities::methods`），在 `apply` 中、插件自己的 effect 之后调用。`Handler` 接受 `(method, params, CancellationToken, Progress)`；不使用 `Progress`（`progress: false`） |
 | 参数与回复 | `methods::params::<T>(params)`（形状错误时为 `invalid_params`，包括未知字段）和 `methods::reply(value)` |
 | `sessionFiles.put` | `SessionFiles(Arc<dyn SessionFilesService>)`：`put(session_id, name, content: Vec<u8>, cancel)` 返回 `StoredSessionFile {file_id, path, bytes}` 或 `SessionFileError {code: SessionFileErrorCode, message}`（[Session 文件附录 A](../appserver/session-files.md#附录-a-rust-绑定)）；`session_id` 来自 `SessionIdentity`，`cancel` 是处理函数的令牌 |

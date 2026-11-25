@@ -66,4 +66,4 @@ system 只保存静态内容。Context 与 State 来源的提示词变化由 Pro
 
 公开流程检查关联更新不混版、任一加载或提交失败不半发布、重叠刷新乱序完成不覆盖新版本、取消和初始化回滚等待真实清理、请求与恢复固定来源、分支截点与隔离、工具正文不重复交付、撤销及作用域结束在压缩后仍有效。
 
-在仓库根目录运行 `cargo test --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、格式检查、`cargo run -p xtask -- check` 和 `cargo run -p xtask -- graph`。固定 v1 样本位于 `crates/dim-agent-types/tests/fixtures`，由 `dim-agent-types` 的 wire 合同测试校验。
+在仓库根目录运行 `cargo test --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、格式检查和 `cargo run -p xtask -- check`。固定 v1 样本位于 `crates/dim-agent-types/tests/fixtures`，由 `dim-agent-types` 的 wire 合同测试校验。

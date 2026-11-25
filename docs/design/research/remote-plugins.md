@@ -677,7 +677,7 @@ flowchart TB
 
 远程 PG 是 [#1298](https://github.com/arcships/dim/issues/1298) 的独立里程碑；本路线不包含存储后端、租约或接管。
 
-每个阶段都要跑 `./dev check`、相关 crate 的测试，以及改动作用域的 flow 测试（`host_platform_flow.rs`、`local_execution.rs`、`minimal_execution.rs`、`tests/integration` 里的执行与工具流程）；改装配后跑 `xtask check` / `graph`。
+每个阶段都要跑 `./dev check`、相关 crate 的测试，以及改动作用域的 flow 测试（`host_platform_flow.rs`、`local_execution.rs`、`minimal_execution.rs`、`tests/integration` 里的执行与工具流程）；改装配后跑 `xtask check`。
 
 如果选择 §4.1（搬实例子树），阶段 0 之后直接做“Session 门面 + 依赖闭包装配”的尖刀验证，不经过阶段 1–3 的 exec/FS 数据接口；存储不在本路线，见 #1298。两条路不要同时做。
 
@@ -718,4 +718,3 @@ flowchart TB
 | 文件工具直接用本机 fs | `crates/dim-agent-capabilities/src/workspace_tools/files/*` |
 | Timeline 的写入与发布 | `docs/architecture/rust-agent/timeline-storage.md`；`crates/dim-agent-runtime/src/timeline_store.rs:71` |
 | 多节点与 `resourceNode` 的既有约定 | `docs/design/overview.md:344`–`:356` |
-| 各部件的服务作用域 | [本地装配目录](../../architecture/README.md#generated-architecture) |

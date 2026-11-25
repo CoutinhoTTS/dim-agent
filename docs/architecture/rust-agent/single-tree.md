@@ -40,7 +40,7 @@ Session 与分支装配通过 loader 的 `instance_rows` 查询本实例当前�
 
 当前 `--database PATH` 装载 `SqliteStoragePlugin` 与 `SessionStorePlugin`，共用一个原生数据库，保存 Agent profile、Session 身份与 Timeline；启动只读目录，Session 按使用装载，未指定数据库时使用内存存储。`--home PATH` 使用 `<home>/dimcode.sqlite` 并授权该文件根；FileStorage 默认授权 `session_defaults.cwd`。SQL/JSON 格式见[原生存储格式](../../design/appserver/native-storage-format.md)。
 
-下图为进程归属树。进程层实际装配见[App Server 生成产物](../README.md#generated-architecture)，Session 与分支见[生成产物](../README.md#generated-architecture)。
+下图为进程归属树。
 
 ```text
 rutis root

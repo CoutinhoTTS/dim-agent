@@ -187,8 +187,7 @@ tree shows where their content sits.
 
 - **Fiber tree:** a Session is a child of its Agent's anchor row (`AgentScope`, or `AgentAnchor` in
   the minimal host), a branch of its Session scope, and the mounters of their scope. Skills contents
-  and MCP connections sit under their parts. The `session` and `main` subgraphs of the generated
-  graphs regenerate. The `SessionLoader` service and its edges go; no other service or edge changes.
+  and MCP connections sit under their parts. The `SessionLoader` service and its edges go; no other service or edge changes.
 - **The anchor must not reload.** Today a Session is a sibling of the anchor in the Agent group;
   now it is the anchor's child. A reload of the anchor would dispose every Session of that Agent
   without `Agent::close`'s settlement. It does not reload today: `AgentScope` depends only on the
@@ -264,7 +263,7 @@ instances from its position in the tree, and a host marks its own scopes with `m
   `branch_diagnostics` lists the branch's. `Agent::check_assembly()` reports an unawaited child, as
   today.
 - A withdrawn Session namespace answers `service_reloading`.
-- `xtask graph`: only the `session` and `main` subgraphs change. `xtask measure` before and after.
+- Compare Session creation cost with `xtask measure` before and after the change.
 
 ## 8. Documentation to update with the implementation
 
@@ -300,7 +299,6 @@ instances from its position in the tree, and a host marks its own scopes with `m
   children, which is why it must not reload.
 - The Chinese mirrors: [How Dim uses rutis](../zh/design/rutis-usage.md) `:359` and
   [Plugin contract](../zh/design/plugin-contract.md) `:52`.
-- The generated graphs, through `xtask graph`.
 - #645 landed on 0.19.2 as a follow-up that reads current row handles through the published
   `Loader::instance_rows` ([rutis#941](https://github.com/arcships/rutis/issues/941)), with no
   behavior change. This design still removes the instance rows that read relies on, so that code

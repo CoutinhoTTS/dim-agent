@@ -290,7 +290,7 @@ The request carries no read point. The service passes each segment its bound: an
 - The goal plugin injects the Timeline service instead of `dispatcher` for reads and calls `Timeline.query`. `npm/branch-services.d.ts` already declares `query` on `Timeline`. The `Services` interface in `npm/branch-services.d.ts` lists `timeline: Timeline`, so the name exists. Goal injects dispatcher, timelineIdentity, treeCommands, settings, branchLifecycle and sessionLifecycle today; whether the binding resolves `timeline` for a branch part was not verified. Goal also reads to the committed position (`dispatcher.committed()` :104, `local(turnStart, through)` :176), so it belongs to the same open question as file reads and the collaboration rebuild.
 - The App Server reads a loaded session through `Session::query(branch, query)`, which forwards to `Branch::query` and then to the Timeline service.
 - The App Server reads an unloaded session through `SessionStore`, because no Timeline service exists for it. The page shape matches `query`, so loading a session does not change the protocol.
-- After the reads are deleted, `xtask types` regenerates `npm/branch-services.d.ts`. Only declarations for the affected reads may change. Inspect the assembled methods with `xtask graph` when needed.
+- After the reads are deleted, `xtask types` regenerates `npm/branch-services.d.ts`. Only declarations for the affected reads may change.
 
 ### 6.6 To confirm during development
 

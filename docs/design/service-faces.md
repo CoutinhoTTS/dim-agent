@@ -33,7 +33,7 @@ During migration, an existing entry may carry `internal(reason)`:
 
 ### 2.3 Checks
 
-`xtask graph` and `check` classify the current catalog:
+`xtask check` classifies the current catalog:
 
 - shared + dispatcher → `data`;
 - shared without dispatcher → failure;
@@ -71,7 +71,7 @@ Preserve the owner's cancellation, ordering and lifecycle semantics when moving 
 
 ## 3. 盘点（#1300）
 
-Rust 产品装配的现状以 [生成的 catalog](../architecture/README.md#generated-architecture) 为准。以下按迁移工作分组，每个名字只在盘点表中列一处。批次进度见 [#1292](https://github.com/arcships/dim/issues/1292)。
+以下按迁移工作分组，每个名字只在盘点表中列一处。批次进度见 [#1292](https://github.com/arcships/dim/issues/1292)。
 
 ### 3.1 基础数据面与上游登记
 
@@ -389,10 +389,8 @@ providerService.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 ## 5. 验证
 
 - `xtask check`：按 §2.3 验证当前 catalog，拒绝缺少 dispatcher 的公共 shared 名称。
-- `xtask check` 校验实际装配中的服务面。评审需要逐项查看时，用 `xtask graph` 在本地生成目录。
 - 每个服务：现有 flow 测试 + 一个 loopback session 的跨边界用例；不新增 mock-only 测试。
 - 数量：不改 `cargo test` 的总量要求；按受影响 crate 跑，最终 `cargo test --workspace --locked`。
-- 改装配后跑 `cargo run --locked -p xtask -- check` 与 `graph`。
 
 ## 6. 风险与开放问题
 

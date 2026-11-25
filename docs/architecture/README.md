@@ -102,22 +102,7 @@ Detailed contracts live under [`rust-agent/`](rust-agent/) and are written in Ch
 
 ## Generated architecture
 
-Generate the reports from the workspace root.
-
-```sh
-cargo run --locked -p xtask -- graph
-```
-
-Open the reports under `target/architecture/`.
-
-| File | What it shows |
-| --- | --- |
-| `catalog.md` | Services, providers, faces, methods and Capabilities from the App Server product profile with a Session |
-| `services.md`, `local/services.md`, `app-server/services.md` | Service bindings in the mock, local execution and App Server assemblies |
-| `instances.mmd` | Session and branch instances |
-| `crates.mmd` | Crate dependencies from Cargo metadata |
-
-The graphs also have JSON representations. For module-level dependencies, run `cargo run --locked -p xtask-check -- module-graph target/architecture/modules`. All these reports are local to the checkout. Run `cargo run --locked -p xtask-check` for live crate and module boundary checks. The full `cargo run --locked -p xtask -- check` also validates service faces and plugin documentation against the runtime assembly.
+Run `cargo run --locked -p xtask -- graph` from the workspace root to inspect service bindings, instances, crate dependencies and the service catalog. The reports are written to `target/architecture/`. For module dependencies, run `cargo run --locked -p xtask-check -- module-graph target/architecture/modules`.
 
 `tests/extension-a`, `tests/extension-b` and `tests/integration` verify that independent external capabilities can participate without depending on internal implementation details.
 

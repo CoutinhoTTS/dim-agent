@@ -92,7 +92,7 @@ No Timeline event. The view is process memory on the connection/registry. It is 
 
 None to the runtime or rutis; the per-connection record and its read are new App Server work.
 
-The proposed RPC surfaces carry data under the existing [Session and management boundary](../contracts/session-boundary.md). The `sessionMethods` and `managementMethods` registration services are data faces in the [owner catalog](../../architecture/README.md#generated-architecture); this proposal adds no service face.
+The proposed RPC surfaces carry data under the existing [Session and management boundary](../contracts/session-boundary.md). The `sessionMethods` and `managementMethods` registration services are data faces; this proposal adds no service face.
 
 ## 8. Rule check
 
