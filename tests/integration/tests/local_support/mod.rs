@@ -461,7 +461,7 @@ impl Env {
 }
 
 pub struct Options {
-    pub store: Option<Arc<MemoryTimelineStore>>,
+    pub store: Option<Arc<dyn TimelineStore>>,
     pub settings: Arc<dyn SkillSettings>,
     pub today: Arc<Mutex<String>>,
     pub timezone: &'static str,
@@ -843,7 +843,13 @@ pub async fn run(session: &Session, text: &str) {
 pub struct HoldingStore {
     memory: MemoryTimelineStore,
     selected: Mutex<Option<String>>,
-    held: Mutex<Option<PublishCallback>>,
+    held: Mutex<Vec<PublishCallback>>,
+    /// Holds every environment snapshot batch appended from now on until
+    /// [`Self::release`], and counts them.
+    hold_snapshots: std::sync::atomic::AtomicBool,
+    snapshot_batches: AtomicUsize,
+    /// The snapshots appended while the hold was armed.
+    released_snapshots: Mutex<Option<usize>>,
     /// The branch whose read is held, and how many matching reads pass
     /// before it; `None` when no read hold is armed.
     read_branch: Mutex<Option<(String, usize)>>,
@@ -864,7 +870,10 @@ impl Default for HoldingStore {
         Self {
             memory: MemoryTimelineStore::default(),
             selected: Mutex::new(None),
-            held: Mutex::new(None),
+            held: Mutex::new(Vec::new()),
+            hold_snapshots: std::sync::atomic::AtomicBool::new(false),
+            snapshot_batches: AtomicUsize::new(0),
+            released_snapshots: Mutex::new(None),
             read_branch: Mutex::new(None),
             next_branch_read: Mutex::new(None),
             gate: tokio::sync::Semaphore::new(0),
@@ -875,10 +884,33 @@ impl Default for HoldingStore {
     }
 }
 
+/// Whether the batch is an environment snapshot input: one of the
+/// `<dim-state>` blocks the environment parts append at a line's opening.
+fn environment_snapshot(events: &[StoredEvent]) -> bool {
+    events.iter().any(|record| {
+        matches!(&record.event.kind, EventKind::InputMessage(data)
+            if data.user.is_none()
+                && data.blocks.first().is_some_and(|block| matches!(block,
+                    InputBlock::Raw { text, .. } if text.starts_with("<dim-state source=\""))))
+    })
+}
+
 impl HoldingStore {
     /// Holds the next batch on `branch` that carries a `context/configured`.
     pub fn hold_next_configuration_on(&self, branch: &str) {
         *self.selected.lock().unwrap() = Some(branch.to_string());
+    }
+    /// Holds the publication of every environment snapshot appended from now
+    /// on until [`Self::release`]: a line's opening receipts depend only on
+    /// what the line published, not on what another writer committed later.
+    pub fn hold_opening_snapshots(&self) {
+        self.hold_snapshots
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    /// The snapshot batches appended before [`Self::release`] ended the hold,
+    /// or `None` when the hold was never released.
+    pub fn released_snapshots(&self) -> Option<usize> {
+        *self.released_snapshots.lock().unwrap()
     }
     /// Holds the `nth` read of `branch`'s segments from now (1 is the next):
     /// the caller parks inside an adoption, after it started reading and
@@ -909,10 +941,19 @@ impl HoldingStore {
     pub fn hold_read_of_the_next_branch(&self, nth: usize) {
         *self.next_branch_read.lock().unwrap() = Some(nth.max(1));
     }
-    /// Publishes the held batch; the test calls it once the work it wants
-    /// inside the adoption's window is done.
+    /// Publishes the held batches in commit order and ends the snapshot hold;
+    /// the test calls it once the work it wants inside the opening's window is
+    /// done.
     pub fn release(&self) {
-        if let Some(publish) = self.held.lock().unwrap().take() {
+        if self
+            .hold_snapshots
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            *self.released_snapshots.lock().unwrap() =
+                Some(self.snapshot_batches.load(Ordering::SeqCst));
+        }
+        let held = std::mem::take(&mut *self.held.lock().unwrap());
+        for publish in held {
             publish(Ok(()));
         }
     }
@@ -1021,10 +1062,19 @@ impl TimelineStore for HoldingStore {
             hold
         };
         if !hold {
+            if self.hold_snapshots.load(std::sync::atomic::Ordering::SeqCst)
+                && environment_snapshot(&events)
+            {
+                self.snapshot_batches.fetch_add(1, Ordering::SeqCst);
+                self.memory.append(key, events, Box::new(|_| ()))?;
+                self.held.lock().unwrap().push(publish);
+                self.entered.notify_one();
+                return Ok(());
+            }
             return self.memory.append(key, events, publish);
         }
         self.memory.append(key, events, Box::new(|_| ()))?;
-        *self.held.lock().unwrap() = Some(publish);
+        self.held.lock().unwrap().push(publish);
         self.entered.notify_one();
         Ok(())
     }

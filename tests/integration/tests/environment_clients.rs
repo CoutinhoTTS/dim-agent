@@ -4,7 +4,10 @@ use dim_agent_capabilities::environment_clients::{
     BRANCH_PART, CLIENTS, ClientChannel, ClientPresence, ClientsChanged, SessionPresences,
     clients_changes,
 };
-use dim_agent_runtime::{BranchOptions, Session, testing::branch_events};
+use dim_agent_capabilities::execution_settings::{
+    ExecutionSettings, ExecutionSettingsHost, prompt::SNAPSHOT_SOURCE,
+};
+use dim_agent_runtime::{BranchOptions, Session, SessionConfig, testing::branch_events};
 use dim_agent_types::{BranchSource, EventKind, InputBlock};
 use local_support::*;
 use rutis::host::{CtxHost, FiberState, InstanceId};
@@ -338,6 +341,79 @@ async fn a_part_mounted_after_the_opening_event_dispatched_writes_after_the_iden
     let child = opening.await.unwrap().expect("the line opens");
 
     one_presence_snapshot_after_the_identity_input(&session, &child).await;
+
+    env.agent.close().await.unwrap();
+}
+
+/// An opening receipt decides from its branch's opening fact at the published
+/// head: a later batch that the line committed and has not published yet does
+/// not fail the read, so both environment receipts append their snapshot while
+/// the opening still collects them. Otherwise the receipt that reads after the
+/// other part's append leaves its snapshot to the first pass after activation.
+#[tokio::test]
+async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
+    let dirs = Dirs::new();
+    let cwd = dirs.dir("work");
+    let presence = Arc::new(Presence(Mutex::new(vec![connection(
+        ClientChannel::Tui,
+        Some("eric@laptop"),
+    )])));
+    let store = Arc::new(HoldingStore::default());
+    store.hold_opening_snapshots();
+    let execution = ExecutionSettingsHost::new(Arc::new(|_| {
+        Box::pin(async { Ok(ExecutionSettings::default()) })
+    }));
+    let env = env(
+        &dirs,
+        Options {
+            store: Some(store.clone()),
+            clients: Some(presence.host()),
+            execution: Some(Arc::new(execution)),
+            ..Options::default()
+        },
+    )
+    .await;
+    let opener = env.agent.agent().clone();
+    let creation = opener.create_session(SessionConfig {
+        cwd: cwd.to_string_lossy().into_owned(),
+        tools: Some(vec!["skill".into(), "gate".into()]),
+        ..SessionConfig::default()
+    });
+    tokio::pin!(creation);
+    let session = tokio::select! {
+        _ = &mut creation => panic!("the Session opens before its opening snapshots were held"),
+        () = async {
+            store.entered.notified().await;
+            store.release();
+        } => creation.await.unwrap(),
+    };
+    assert_eq!(
+        store.released_snapshots(),
+        Some(2),
+        "both opening receipts append their snapshot before the opening seals"
+    );
+    let events = branch_events(&session, "main", ..).await.unwrap();
+    for (source, label) in [
+        (CLIENTS, "the client presence snapshot"),
+        (SNAPSHOT_SOURCE, "the execution settings snapshot"),
+    ] {
+        let marker = format!("<dim-state source=\"{source}\">");
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter(|event| {
+                matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.user.is_none()
+                        && data.blocks.iter().any(|block| matches!(block,
+                            InputBlock::Raw { text, .. } if text.starts_with(&marker))))
+            })
+            .collect();
+        assert_eq!(
+            snapshots.len(),
+            1,
+            "{label} is published once: {:?}",
+            events.iter().map(|event| event.kind.key()).collect::<Vec<_>>()
+        );
+    }
 
     env.agent.close().await.unwrap();
 }
