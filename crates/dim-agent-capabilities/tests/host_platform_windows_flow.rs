@@ -33,7 +33,7 @@ fn command(script: &str) -> ConfinedSpec {
 
 #[tokio::test]
 async fn a_helper_without_a_backend_reports_no_confinement_and_keeps_every_limit() {
-    let write = std::env::temp_dir().join(format!("dim-confined-{}", std::process::id()));
+    let write = std::env::temp_dir().join(format!("dim-confined-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&write).unwrap();
     let confinement = |timeout: Duration| Confinement {
         read: vec![],
@@ -105,5 +105,5 @@ async fn a_helper_without_a_backend_reports_no_confinement_and_keeps_every_limit
         "{:?}",
         cancelled.err()
     );
-    std::fs::remove_dir_all(&write).unwrap();
+    let _ = std::fs::remove_dir_all(&write);
 }
