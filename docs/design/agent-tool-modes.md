@@ -209,13 +209,16 @@ owns this projection. Three terms:
 - A Code Mode program discovers and calls exactly the `delegated` set: `tools.list` and
   `tools.describe` project it, and `tools.call` admits inside it. `codemode` itself is never
   delegated, so a program cannot nest one.
-- The Loop holds the turn's mode: a turn pins it when it starts — when its driving input is
-  applied — and every request of the turn uses that pin, together with the callable set ToolBinding
-  pins today. A switch takes effect with
-  the next turn and needs no re-adoption: the branch's configuration, the version pins and the
-  source sets stay as they are. A request retried through its own source (an in-process budget
-  recovery) keeps the pin; a process restart settles the in-flight request as the loop already does
-  and does not reissue it; the request that follows a tool result keeps the turn's pin.
+- The Loop holds the turn's mode: a turn pins it when it starts, before its first request is
+  prepared, not when its input is applied. A turn deferred while compaction runs, or recovered
+  after a restart, therefore starts under the mode in force when it actually starts; the Goal pause
+  is written before the live mode, so a turn that starts in `shell` has it in history. Every request
+  of the turn uses the pin, together with the callable set ToolBinding pins today. A switch takes
+  effect with the next turn and needs no re-adoption: the branch's configuration, the version pins
+  and the source sets stay as they are. A request retried through its own source (an in-process
+  budget recovery) keeps the pin; a process restart settles the in-flight request as the loop
+  already does and does not reissue it; the request that follows a tool result keeps the turn's
+  pin.
 - A tool that is only delegated never appears in a prompt, a declaration or the usage counter;
   `skill` is in both sets.
 - The mount list and an Agent profile's tool list narrow the surface and never widen it. `normal`
@@ -428,6 +431,9 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   request after a tool result in the same turn keeps the turn's pin, an in-process budget recovery
   keeps its pin, a process restart settles the in-flight request without reissuing it, and a call
   already admitted finishes.
+- Flow: a turn whose input is applied but which is deferred for compaction, or recovered after a
+  restart, pins the mode when it starts; a switch in that interval applies to it, and a turn that
+  starts in `shell` has the Goal pause in its history.
 - Flow: fallback — a mode whose entry tool is absent stays chosen in `get` and is reported as not in
   force; the Session declares the `normal` surface.
 - Flow: a member created under `codemode` records it; switching the creator leaves the member
@@ -508,9 +514,9 @@ Requirements go to other owners:
 - **PromptSources.** The environment block follows the surface: while `shell` is in force (the
   `effective` value) it drops the Windows file-encoding guidance about `read`/`edit`/`write`. Its
   owner carries this into [PromptSources](plugins/PromptSources.md).
-- **Loop.** Read the effective mode when the driving input is applied and hold it for the turn;
-  its page gains the turn's mode pin. Its owner carries this into
-  [Loop](../architecture/rust-agent/plugins/Loop.md).
+- **Loop.** Read the effective mode when the turn starts and hold it for the turn, including a
+  turn deferred for compaction or recovered after a restart; its page gains the turn's mode pin.
+  Its owner carries this into [Loop](../architecture/rust-agent/plugins/Loop.md).
 
 Everything else stays within the owners that already exist: ToolRegistry projects its own set and
 holds the live mode, the Loop holds the turn's mode pin, ToolBinding pins the callable set,
