@@ -96,6 +96,14 @@ impl Owner {
         loop {
             let through = self.timeline.committed();
             self.publication(through).await?;
+            #[cfg(feature = "testing")]
+            crate::testing::stage_held(
+                &self.session_id,
+                &self.branch_id,
+                crate::testing::Stage::Query,
+                through,
+            )
+            .await;
             let mut sets = Vec::with_capacity(2);
             for (origin, terminal, inner, outer) in [
                 (

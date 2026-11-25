@@ -2296,3 +2296,86 @@ async fn a_decision_folded_in_the_settlement_window_is_taken() {
         env.close().await;
     }
 }
+
+/// A decision that folds while a Set/Resume loads the current work is refused
+/// admission after the settlement's own drain: the change states it before the
+/// record that supersedes its fact (#2158).
+#[tokio::test]
+async fn a_decision_folded_while_a_change_loads_its_work_is_taken() {
+    for case in ["done", "evaluation_failed"] {
+        let env = Env::start().await;
+        let (evaluation, create) = completion_requested(&env).await;
+        let head = env.timeline("main").committed();
+        env.dispatched("main", head).await;
+
+        // The resume settles the decisions and then loads the branch's current
+        // work, which waits for publication and queries the Timeline. The
+        // window is held there, past the settlement's first drain.
+        let mut query = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Query,
+            head,
+            Some(head),
+        );
+        let resume = env.goal("resume", json!({}));
+        let (resume, fact) = tokio::join!(resume, async {
+            assert_eq!(
+                query.arrived().await,
+                head,
+                "{case}: the resume's current-work load is held at the cutoff it read"
+            );
+            let fact = match case {
+                "done" => {
+                    write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified")
+                }
+                _ => {
+                    env.emit(
+                        "main",
+                        EventKind::BranchEnded(BranchEndedData {
+                            branch: create.branch.clone(),
+                            end_event: 0,
+                            source: BranchSource::Host {
+                                operation_id: "user".into(),
+                            },
+                            ancestor: None,
+                        }),
+                    )
+                    .sequence
+                }
+            };
+            env.dispatched("main", fact).await;
+            query.release();
+            fact
+        });
+        resume.expect("the resume writes");
+        let writes = env.writes("main").await;
+        let expected = match case {
+            "done" => texts::evaluated("main", "ship it", "completed", "verified", fact),
+            _ => texts::evaluated_pause(
+                "main",
+                "ship it",
+                "evaluation_failed",
+                "the evaluator could not check the result",
+                fact,
+            ),
+        };
+        let markers: Vec<&str> = writes.iter().map(|block| block.marker.as_str()).collect();
+        let record = writes.iter().find(|block| block.text == expected).unwrap_or_else(|| {
+            panic!(
+                "{case}: the fact folded at {fact} while the resume loaded its work is decided; writes: {markers:?}"
+            )
+        });
+        let change = writes
+            .iter()
+            .find(|block| block.marker.contains(r#"op="resume""#))
+            .expect("the resume trigger");
+        assert!(
+            record.sequence < change.sequence,
+            "{case}: the decision at {fact} is stated at {} before the change writes at {}",
+            record.sequence,
+            change.sequence
+        );
+        env.close().await;
+    }
+}
