@@ -1478,8 +1478,8 @@ async fn presence_snapshots(session: &dim_agent_runtime::Session) -> usize {
         .count()
 }
 
-/// A child line's own history starts with TimelineTree's identity input, and
-/// the environment snapshots follow it: they append once the line is published,
+/// A child line's own history carries TimelineTree's identity input, and both
+/// environment snapshots follow it: they append once the line is published,
 /// after the input that opens it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_child_line_opens_with_its_identity_input_before_its_environment_snapshots() {
@@ -1544,18 +1544,17 @@ async fn a_child_line_opens_with_its_identity_input_before_its_environment_snaps
         .iter()
         .filter(|event| matches!(event.kind, EventKind::InputMessage(_)))
         .collect();
-    let identity = inputs.first().expect("the line's first input");
+    let identity_marker =
+        format!(r#"<dim-branch-line branch="{child}" parent="main" source="user">"#);
+    let identity = inputs
+        .iter()
+        .find(|event| {
+            matches!(&event.kind, EventKind::InputMessage(data)
+                if data.blocks.first().is_some_and(|block| matches!(block,
+                    dim_agent_types::InputBlock::Raw { text, .. } if text.starts_with(&identity_marker))))
+        })
+        .unwrap_or_else(|| panic!("the line's identity input: {seen:?}"));
     let identity_sequence = identity.sequence;
-    let EventKind::InputMessage(identity) = &identity.kind else {
-        unreachable!("filtered input messages")
-    };
-    let dim_agent_types::InputBlock::Raw { text, .. } = &identity.blocks[0];
-    assert!(
-        text.starts_with(&format!(
-            r#"<dim-branch-line branch="{child}" parent="main" source="user">"#
-        )),
-        "the identity input is the line's first input: {seen:?}"
-    );
     for (source, label) in [
         (CLIENTS, "the client presence snapshot"),
         (SNAPSHOT_SOURCE, "the execution settings snapshot"),
