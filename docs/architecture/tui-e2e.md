@@ -43,8 +43,8 @@ Prerequisites:
 The suite is Unix-only because tmux is. Windows keeps its native boundary checks
 in the `windows-cli` job: `cargo test --locked -p dim-cli --lib`, and the
 Windows-only boundary flows that the same job runs for Windows storage,
-host-platform and named-pipe paths and on full sweeps. The component-level
-terminal tests that do not need tmux also run there.
+host-platform, named-pipe and worktree-removal paths and on full sweeps. The
+component-level terminal tests that do not need tmux also run there.
 
 ## What a case runs
 
