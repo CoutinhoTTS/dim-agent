@@ -2814,6 +2814,85 @@ async fn an_end_that_wins_the_evaluation_request_admission_writes_no_input() {
     env.close().await;
 }
 
+/// A close that starts between the request's drain and its append wins
+/// admission: the request is refused and writes neither its record nor its
+/// trigger (#2172 review).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_close_that_wins_the_evaluation_request_admission_writes_no_input() {
+    let env = Env::start().await;
+    let line = env
+        .open_branch(
+            "main",
+            "line work",
+            BranchSource::Host {
+                operation_id: "test:line".into(),
+            },
+        )
+        .await;
+    env.goal(
+        "set",
+        json!({"objective": "ship it", "judge": "evaluator", "branchId": line}),
+    )
+    .await
+    .expect("set writes");
+    env.wait_for(&line, r#"op="set""#).await;
+    let head = env.timeline(&line).committed();
+    env.dispatched(&line, head).await;
+
+    let mut batch = dim_goal::testing::hold_stage(
+        env.session_id(),
+        &line,
+        dim_goal::testing::Stage::Batch,
+        head,
+        Some(head),
+    );
+    let mut close = dim_agent_runtime::testing::hold_close(env.session_id(), &line);
+    let report = env.tool(
+        &line,
+        json!({"status": "completed", "summary": "all tests pass"}),
+    );
+    let (result, ()) = tokio::join!(report, async {
+        assert_eq!(
+            batch.arrived().await,
+            head,
+            "the request is held at the cutoff it drained"
+        );
+        let branch = env
+            .probe
+            .commands(&line)
+            .get(&line)
+            .expect("the line is open");
+        let closing = tokio::spawn(async move { branch.close().await });
+        close.arrived().await;
+        batch.release();
+        close.release();
+        closing
+            .await
+            .expect("the close task")
+            .expect("the line closes");
+    });
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "the closing branch refuses the evaluation request"
+    );
+    let after: Vec<String> = env
+        .writes(&line)
+        .await
+        .into_iter()
+        .filter(|block| block.sequence > head)
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        after
+            .iter()
+            .all(|marker| !marker.contains(r#"trigger="goal:"#)
+                && !marker.contains(r#"op="completed""#)),
+        "the refused request writes neither its record nor its trigger; writes after {head}: {after:#?}"
+    );
+    env.close().await;
+}
+
 /// Asserts that the decision committed at `fact` has its own state record and
 /// that the request's record keeps it instead of restoring `active`.
 fn assert_decision_and_state(writes: &[Block], markers: &[&str], case: &str, fact: u64) {
