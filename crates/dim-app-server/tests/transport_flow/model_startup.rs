@@ -1727,7 +1727,7 @@ async fn a_reloaded_connection_writes_the_presence_snapshot_once() {
     assert_ok(&created);
     let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
     let session = server.agent().unwrap().get_session(&sid).unwrap();
-    let before = tokio::time::timeout(Duration::from_secs(10), async {
+    let opened = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let count = presence_snapshots(&session).await;
             if count > 0 {
@@ -1736,8 +1736,9 @@ async fn a_reloaded_connection_writes_the_presence_snapshot_once() {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("the opening writes the presence snapshot");
+    .await;
+    assert!(opened.is_ok(), "the opening writes the presence snapshot");
+    let before = opened.unwrap();
 
     server.restart("Connection").await.unwrap();
     let written = tokio::time::timeout(Duration::from_secs(10), async {
