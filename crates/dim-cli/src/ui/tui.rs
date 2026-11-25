@@ -303,7 +303,7 @@ fn run_terminal(
     app.initial = surroundings.initial;
     app.awaiting_window = surroundings.resume.is_some();
     if surroundings.resume.is_some() {
-        app.begin_switch(SwitchKind::Resumed);
+        app.switches.begin(SwitchKind::Resumed);
     }
     app.startup_session = surroundings.resume;
     app.terminal_clipboard =
@@ -2207,22 +2207,6 @@ impl App {
         waiting.then_some(Blocked::Session)
     }
 
-    fn begin_switch(&mut self, kind: SwitchKind) {
-        self.switches.begin(kind);
-    }
-
-    fn begin_delete(&mut self, session_id: &str) {
-        self.switches.begin_delete(session_id);
-    }
-
-    fn end_switch(&mut self, kind: SwitchKind) {
-        self.switches.end(kind);
-    }
-
-    fn end_delete(&mut self, session_id: &str) {
-        self.switches.end_delete(session_id);
-    }
-
     /// Opens the prompt for the first pending approval or question, and
     /// closes one whose request is gone.
     fn sync_prompt(&mut self) {
@@ -3075,7 +3059,7 @@ impl App {
                 } = reply;
                 // A shown Session whose removal failed stays attached, so
                 // this reply is the delete's only ending.
-                self.end_delete(&session_id);
+                self.switches.end_delete(&session_id);
                 let (text, tone) = match &outcome {
                     DeleteOutcome::Deleted => {
                         (tf("Deleted {name}.", &[("name", &name)]), Tone::Muted)
@@ -3102,8 +3086,8 @@ impl App {
                 }
                 self.reports.push(Block::Status { text, tone });
             }
-            Update::ForkFailed => self.end_switch(SwitchKind::Forked),
-            Update::NewSessionDone => self.end_switch(SwitchKind::New),
+            Update::ForkFailed => self.switches.end(SwitchKind::Forked),
+            Update::NewSessionDone => self.switches.end(SwitchKind::New),
             Update::ChatGptProfiles(result) => {
                 if let Some(Prompt::Providers(panel)) = &mut self.prompt {
                     let effect = panel.set_chatgpt_profiles(result);
@@ -4255,7 +4239,7 @@ impl App {
             projection_id: snapshot.projection_id,
             at,
         });
-        self.begin_switch(SwitchKind::Forked);
+        self.switches.begin(SwitchKind::Forked);
         self.fork_draft = Some(text);
     }
 
@@ -4408,7 +4392,7 @@ impl App {
                 });
             }
             Effect::Resume(id) => {
-                self.begin_switch(SwitchKind::Resumed);
+                self.switches.begin(SwitchKind::Resumed);
                 self.host.send(Command::CloseSessions);
                 self.prompt = None;
                 self.composer.clear();
@@ -4416,7 +4400,7 @@ impl App {
             }
             Effect::DeleteSession { session_id, name } => {
                 if session_id == self.session_id {
-                    self.begin_delete(&session_id);
+                    self.switches.begin_delete(&session_id);
                 }
                 self.host.send(Command::DeleteSession { session_id, name });
             }
@@ -5856,7 +5840,7 @@ impl App {
             "new" => {
                 // Every `/new` is one command, Home or not: the host answers
                 // each with its own `NewSessionDone`, and only that ends it.
-                self.begin_switch(SwitchKind::New);
+                self.switches.begin(SwitchKind::New);
                 self.host.send(Command::NewSession);
                 Outcome::Continue
             }
@@ -7637,7 +7621,7 @@ impl App {
         // `/new` ends when the host reports the command done, not when a Home
         // switch happens to pass by: a delete's Home switch is not its ending.
         if kind != SwitchKind::New {
-            self.end_switch(kind);
+            self.switches.end(kind);
         }
         self.report_error = None;
         self.release_compaction_details();
@@ -10834,7 +10818,7 @@ mod tests {
 
             let mut startup = Drawn::new((80, 24), None, true);
             startup.app.fullscreen = fullscreen;
-            startup.app.begin_switch(SwitchKind::Resumed);
+            startup.app.switches.begin(SwitchKind::Resumed);
             startup.app.apply(Update::Upgrade(update_offer()));
             assert!(
                 matches!(enter(&mut startup), Outcome::Continue),
