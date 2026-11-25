@@ -15,6 +15,8 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use dim_agent_capabilities::steer::REPLACED_BY_STEER;
+
 use crate::model::shell::ShellRun;
 use crate::model::view::{
     ApprovalView, CompactionDetail, CompactionDetailState, CompactionPart, CompactionPartSize,
@@ -37,6 +39,8 @@ struct OpenThought {
     /// When the block's first durable `step/thinking` arrived; the block's
     /// start. `None` while only progress shows it.
     started_at: Option<u64>,
+    /// The progress block's identity, as the notice named it.
+    part_id: Option<String>,
 }
 
 #[derive(Default)]
@@ -44,10 +48,24 @@ pub struct Projection {
     owner: String,
     /// The lines of the Session, as `main` recorded them (design §14).
     lines: Vec<LineView>,
+    /// Lines whose creation failed. The fact outruns the line's row: a
+    /// `branch/create-failed` the parent's page has not projected a
+    /// `branch/create` for is still terminal.
+    creation_failed: HashSet<String>,
     /// Each line's own user messages, by input id and submission sequence,
-    /// to count where a line was cut (timeline UI §6); a withdrawn one is
-    /// dropped.
+    /// to count where a line was cut (timeline UI §6); a withdrawn message
+    /// stays, and `withdrawals` decides which cuts still count it.
     messages: HashMap<String, Vec<(String, u64)>>,
+    /// Each line's user messages withdrawn later, by input id and the sequence
+    /// that withdrew them: a cut before that sequence still counts the
+    /// message, whichever page carried the input or the withdrawal.
+    withdrawals: HashMap<String, HashMap<String, u64>>,
+    /// Lines whose loaded history starts after the line's own start: a cut
+    /// that counts one of them has no count until an earlier read reaches it.
+    incomplete: HashSet<String>,
+    /// Where each line was cut from its parent, until the parent's history
+    /// lets its count be folded.
+    cuts: HashMap<String, u64>,
     /// Shared with the published snapshots: a snapshot copies pointers, and
     /// a row is copied only when it changes while a snapshot still holds it
     /// (in practice the one that is streaming).
@@ -80,6 +98,10 @@ pub struct Projection {
     ended: Option<(u64, TurnEnd)>,
     /// Requests whose text, thinking or tool row already showed.
     showed: HashSet<String>,
+    /// Requests whose only visible output so far is progress thinking.
+    showed_thinking: HashSet<String>,
+    /// Names each thinking row; a rebuilt row gets a new one.
+    thinking_seq: u64,
     /// The `error` of a model failure already shown this turn: the turn's
     /// repeat of it prints nothing.
     shown_failure: Option<String>,
@@ -113,21 +135,23 @@ impl Projection {
             }
     }
 
-    /// Folds one line's creation or end into the Session's lines, whichever
-    /// line recorded it: `parent` is the line whose history holds the fact
-    /// (design §14).
-    fn lines(&mut self, parent: &str, event: &Event) {
+    /// Folds one line's creation or end, or a user message a cut counts, into
+    /// the Session's lines, whichever line recorded it: `parent` is the line
+    /// whose history holds the fact (design §14).
+    pub fn line_event(&mut self, parent: &str, event: &Event) {
         match &event.content {
             EventContent::Input(data) if data.user.is_some() => {
-                self.messages
-                    .entry(parent.to_owned())
-                    .or_default()
-                    .push((event.id.clone(), event.sequence));
+                let messages = self.messages.entry(parent.to_owned()).or_default();
+                if !messages.iter().any(|(id, _)| *id == event.id) {
+                    messages.push((event.id.clone(), event.sequence));
+                }
             }
             EventContent::InputDeleted(data) => {
-                if let Some(messages) = self.messages.get_mut(parent) {
-                    messages.retain(|(id, _)| *id != data.input_id);
-                }
+                let withdrawals = self.withdrawals.entry(parent.to_owned()).or_default();
+                withdrawals
+                    .entry(data.input_id.clone())
+                    .and_modify(|at| *at = (*at).min(event.sequence))
+                    .or_insert(event.sequence);
             }
             EventContent::BranchCreate(data) => {
                 let purpose = data
@@ -137,32 +161,32 @@ impl Projection {
                     .unwrap_or_default()
                     .trim()
                     .to_owned();
-                if !self.lines.iter().any(|line| line.id == data.branch) {
-                    let sequence = match data.at {
-                        BranchCreateAt::Sequence { sequence } => sequence,
-                        BranchCreateAt::Create {} => event.sequence,
-                    };
-                    let inherited = self
-                        .lines
-                        .iter()
-                        .find(|line| line.id == parent)
-                        .and_then(|line| line.cut)
-                        .map_or(0, |cut| cut.messages);
-                    let own = self.messages.get(parent).map_or(0, |messages| {
-                        messages
-                            .iter()
-                            .take_while(|(_, at)| *at <= sequence)
-                            .count()
-                    });
+                let sequence = match data.at {
+                    BranchCreateAt::Sequence { sequence } => sequence,
+                    BranchCreateAt::Create {} => event.sequence,
+                };
+                self.cuts.insert(data.branch.clone(), sequence);
+                let cut = self
+                    .cut_count(parent, sequence)
+                    .map(|messages| LineCut { sequence, messages });
+                if let Some(line) = self.lines.iter_mut().find(|line| line.id == data.branch) {
+                    // The directory lists a line before its parent's history
+                    // arrives; the creation fold supplies the count then.
+                    line.branch_point = Some(sequence);
+                    line.cut = line.cut.or(cut);
+                } else {
                     self.lines.push(LineView {
                         id: data.branch.clone(),
                         parent: Some(parent.to_owned()),
                         purpose,
-                        state: LineState::Waiting,
-                        cut: Some(LineCut {
-                            sequence,
-                            messages: inherited + own,
-                        }),
+                        state: if self.creation_failed.contains(&data.branch) {
+                            LineState::CreationFailed
+                        } else {
+                            LineState::Waiting
+                        },
+                        running: None,
+                        branch_point: Some(sequence),
+                        cut,
                     });
                 }
             }
@@ -171,6 +195,7 @@ impl Projection {
                     BranchCreateFailedData::Failed { branch, .. }
                     | BranchCreateFailedData::Cancelled { branch, .. } => branch,
                 };
+                self.creation_failed.insert(branch.clone());
                 if let Some(line) = self.lines.iter_mut().find(|line| line.id == *branch) {
                     line.state = LineState::CreationFailed;
                 }
@@ -188,6 +213,89 @@ impl Projection {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// The user messages a cut inherits: the parent's own up to `sequence`,
+    /// its inherited ones included, and `None` while a line it counts is
+    /// missing the start of its history.
+    fn cut_count(&self, branch: &str, sequence: u64) -> Option<usize> {
+        if self.incomplete.contains(branch) {
+            return None;
+        }
+        let inherited = match self.lines.iter().find(|line| line.id == branch) {
+            Some(line) => self.cut_count(line.parent.as_deref()?, *self.cuts.get(branch)?)?,
+            None if branch == ROOT_BRANCH_ID => 0,
+            None => return None,
+        };
+        let own = self.messages.get(branch).map_or(0, |messages| {
+            messages
+                .iter()
+                .filter(|(id, at)| {
+                    *at <= sequence
+                        && self
+                            .withdrawals
+                            .get(branch)
+                            .and_then(|withdrawals| withdrawals.get(id))
+                            .is_none_or(|withdrawn| *withdrawn > sequence)
+                })
+                .count()
+        });
+        Some(inherited + own)
+    }
+
+    /// Records that the loaded history of `branch` starts after the branch's
+    /// own start: the cuts that count it show nothing until a later read
+    /// reaches the start, and the counts folded until now stop counting it.
+    pub fn missing_history(&mut self, branch: &str) {
+        if !self.incomplete.insert(branch.to_owned()) {
+            return;
+        }
+        for index in 0..self.lines.len() {
+            if self.counts(index, branch) {
+                self.lines[index].cut = None;
+            }
+        }
+    }
+
+    /// Whether the line at `index` counts `branch` through its parent chain.
+    fn counts(&self, index: usize, branch: &str) -> bool {
+        let mut parent = self.lines[index].parent.as_deref();
+        while let Some(id) = parent {
+            if id == branch {
+                return true;
+            }
+            parent = self
+                .lines
+                .iter()
+                .find(|line| line.id == id)
+                .and_then(|line| line.parent.as_deref());
+        }
+        false
+    }
+
+    /// Records that the loaded history of `branch` reaches its own start, and
+    /// folds the counts of the cuts that were waiting for it.
+    pub fn whole_history(&mut self, branch: &str) {
+        if self.incomplete.remove(branch) {
+            self.resolve_cuts();
+        }
+    }
+
+    /// Fills the count of a cut that waited for the parent history an earlier
+    /// read brought.
+    fn resolve_cuts(&mut self) {
+        for index in 0..self.lines.len() {
+            if self.lines[index].cut.is_some() {
+                continue;
+            }
+            let parent = self.lines[index].parent.clone();
+            let sequence = self.cuts.get(&self.lines[index].id).copied();
+            if let (Some(parent), Some(sequence)) = (parent, sequence)
+                && let Some(messages) = self.cut_count(&parent, sequence)
+            {
+                self.lines[index].cut = Some(LineCut { sequence, messages });
+            }
         }
     }
 
@@ -263,7 +371,7 @@ impl Projection {
             }
             _ => {}
         }
-        self.lines(branch_id, event);
+        self.line_event(branch_id, event);
         if !self.owns(branch_id)
             && !matches!(
                 &event.content,
@@ -422,6 +530,10 @@ impl Projection {
                     .entry(data.request_id.clone())
                     .or_default() += data.delta.chars().count() as u64;
                 self.showed.insert(data.request_id.clone());
+                self.showed_thinking.remove(&data.request_id);
+                if self.replaced_thought(&data.request_id, &event.id) {
+                    self.discard_thinking(&data.request_id);
+                }
                 let index = self.open_thinking(&data.request_id);
                 let thought = self
                     .thinking_rows
@@ -429,6 +541,9 @@ impl Projection {
                     .expect("opened above");
                 let first = thought.written.is_empty();
                 thought.started_at.get_or_insert(event.create_at);
+                if first && !event.id.is_empty() {
+                    thought.part_id = Some(event.id.clone());
+                }
                 thought.written.push_str(&data.delta);
                 thought.excerpt.push(&data.delta);
                 let excerpt = thought.excerpt.text();
@@ -445,7 +560,12 @@ impl Projection {
             }
             EventContent::Text(data) => {
                 self.showed.insert(data.request_id.clone());
-                self.close_thinking(&data.request_id, event.create_at);
+                self.showed_thinking.remove(&data.request_id);
+                if self.empty_thought(&data.request_id) {
+                    self.discard_thinking(&data.request_id);
+                } else {
+                    self.close_thinking(&data.request_id, event.create_at);
+                }
                 let index = match self.assistant_rows.get(&data.request_id) {
                     Some(index) => *index,
                     None => {
@@ -463,7 +583,12 @@ impl Projection {
             }
             EventContent::ToolUse(data) => {
                 self.showed.insert(data.request_id.clone());
-                self.close_thinking(&data.request_id, event.create_at);
+                self.showed_thinking.remove(&data.request_id);
+                if self.empty_thought(&data.request_id) {
+                    self.discard_thinking(&data.request_id);
+                } else {
+                    self.close_thinking(&data.request_id, event.create_at);
+                }
                 self.close_assistant(&data.request_id);
                 let row_id = serde_json::to_string(&(&data.request_id, &data.call.id))
                     .expect("tool identity is JSON");
@@ -479,7 +604,14 @@ impl Projection {
                     .insert((data.request_id.clone(), data.call.id.clone()), index);
             }
             EventContent::ToolUseStart(data) => {
-                self.close_thinking(&data.request_id, event.create_at);
+                if self.empty_thought(&data.request_id) {
+                    self.discard_thinking(&data.request_id);
+                    if self.showed_thinking.remove(&data.request_id) {
+                        self.showed.remove(&data.request_id);
+                    }
+                } else {
+                    self.close_thinking(&data.request_id, event.create_at);
+                }
             }
             EventContent::ToolCompleted(data) => {
                 self.complete_tool(&data.request_id, &data.call_id, &data.result, true);
@@ -528,8 +660,31 @@ impl Projection {
                 );
             }
             EventContent::ModelEnd(data) => {
+                let replaced = self.empty_thought(&data.request_id)
+                    && match &data.outcome {
+                        ModelOutputOutcome::Failed {
+                            failure: Some(failure),
+                            ..
+                        } => {
+                            failure.retried
+                                && self
+                                    .thinking_rows
+                                    .get(&data.request_id)
+                                    .and_then(|thought| thought.part_id.as_ref())
+                                    != failure.thinking_part_id.as_ref()
+                        }
+                        ModelOutputOutcome::Cancelled { reason } => reason == REPLACED_BY_STEER,
+                        _ => false,
+                    };
+                if replaced {
+                    self.discard_thinking(&data.request_id);
+                    if self.showed_thinking.remove(&data.request_id) {
+                        self.showed.remove(&data.request_id);
+                    }
+                }
                 self.thinking_characters.remove(&data.request_id);
                 let incomplete = self.showed.remove(&data.request_id);
+                self.showed_thinking.remove(&data.request_id);
                 self.close_thinking(&data.request_id, event.create_at);
                 self.close_assistant(&data.request_id);
                 self.retry = None;
@@ -668,13 +823,16 @@ impl Projection {
         }
     }
 
-    /// The content of a held operator message for user queue actions.
-    pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
+    fn user_queue(&self) -> impl Iterator<Item = &dim_agent_types::PendingInput> {
         self.inputs
             .iter()
-            .find(|input| {
-                input.input_id == input_id && !input.applied && input.has_raw_blocks == Some(false)
-            })
+            .filter(|input| input.mode != InputMode::Steer && input.has_raw_blocks == Some(false))
+    }
+
+    /// The content of a held operator message for user queue actions.
+    pub fn held_input(&self, input_id: &str) -> Option<&UserInput> {
+        self.user_queue()
+            .find(|input| input.input_id == input_id && !input.applied)
             .and_then(|input| input.user.as_ref())
     }
 
@@ -745,11 +903,10 @@ impl Projection {
     }
 
     pub fn snapshot(&self) -> ViewSnapshot {
-        let mut pending: Vec<_> = self.inputs.iter().collect();
+        let mut pending: Vec<_> = self.user_queue().collect();
         pending.sort_by_key(|input| (!input.applied, input.sequence));
         let queued = pending
             .into_iter()
-            .filter(|input| input.has_raw_blocks == Some(false))
             .filter_map(|input| {
                 let user = input.user.as_ref()?;
                 Some(QueuedInput {
@@ -1291,11 +1448,6 @@ impl Projection {
             .map(|row| row.text.clone())
     }
 
-    /// Whether this transcript's turn runs.
-    pub fn running(&self) -> bool {
-        self.running
-    }
-
     pub fn missing_tool(&self) -> Option<(String, String)> {
         self.rows.iter().find_map(|row| {
             if row.kind != RowKind::ToolCall || row.tool_lookup_done {
@@ -1361,15 +1513,21 @@ impl Projection {
             } else {
                 LineState::Waiting
             },
-            cut: entry
+            running: None,
+            branch_point: entry
                 .branch_point
-                .zip(entry.cut_messages)
-                .map(|(sequence, messages)| LineCut {
+                .or_else(|| previous.and_then(|index| self.lines[index].branch_point)),
+            // The server does not calculate the count; the creation fold owns
+            // it, and a row with no count of its own must not drop it.
+            cut: match entry.cut_messages {
+                Some(messages) => entry.branch_point.map(|sequence| LineCut {
                     sequence,
                     messages: messages
                         .try_into()
                         .expect("message count fits the client address space"),
                 }),
+                None => previous.and_then(|index| self.lines[index].cut),
+            },
         };
         if let Some(index) = previous {
             self.lines[index] = view;
@@ -1380,6 +1538,12 @@ impl Projection {
 
     pub fn line_views(&self) -> &[LineView] {
         &self.lines
+    }
+
+    /// Whether `branch`'s creation failed, whether or not its row is
+    /// projected yet: the line is terminal from the fact.
+    pub fn creation_failed(&self, branch: &str) -> bool {
+        self.creation_failed.contains(branch)
     }
 
     pub fn approvals(&self) -> Vec<ApprovalView> {
@@ -1777,13 +1941,34 @@ impl Projection {
         let Some(request_id) = &progress.request_id else {
             return;
         };
-        if !progress.thinking.is_empty() || !progress.text.is_empty() {
+        if self.thinking_rows.get(request_id).is_some_and(|thought| {
+            thought.written.is_empty()
+                && (progress.thinking.is_empty() && progress.thinking_offset == 0
+                    || progress.thinking_part_id.is_some()
+                        && progress.thinking_part_id != thought.part_id)
+        }) {
+            self.discard_thinking(request_id);
+            if self.showed_thinking.remove(request_id) {
+                self.showed.remove(request_id);
+            }
+        }
+        if !progress.thinking.is_empty() && self.showed.insert(request_id.clone()) {
+            self.showed_thinking.insert(request_id.clone());
+        }
+        if !progress.text.is_empty() {
             self.showed.insert(request_id.clone());
+            self.showed_thinking.remove(request_id);
         }
         if progress.thinking.is_empty() {
             return;
         }
         let index = self.open_thinking(request_id);
+        if progress.thinking_part_id.is_some() {
+            self.thinking_rows
+                .get_mut(request_id)
+                .expect("opened above")
+                .part_id = progress.thinking_part_id.clone();
+        }
         if let Some(started_at) = progress.thinking_started_at {
             self.thinking_rows
                 .get_mut(request_id)
@@ -1815,10 +2000,11 @@ impl Projection {
             return thought.index;
         }
         let index = self.push(
-            format!("thinking-{request_id}-{}", self.rows.len()),
+            format!("thinking-{request_id}-{}", self.thinking_seq),
             RowKind::Thinking,
             String::new(),
         );
+        self.thinking_seq += 1;
         self.row(index).streaming = true;
         self.thinking_rows.insert(
             request_id.to_owned(),
@@ -1827,9 +2013,67 @@ impl Projection {
                 written: String::new(),
                 excerpt: thinking::Excerpt::default(),
                 started_at: None,
+                part_id: None,
             },
         );
         index
+    }
+
+    /// Whether a thought row is still only what progress showed: it has no
+    /// committed delta yet.
+    fn empty_thought(&self, request_id: &str) -> bool {
+        self.thinking_rows
+            .get(request_id)
+            .is_some_and(|thought| thought.written.is_empty())
+    }
+
+    /// Whether a durable thought belongs to an attempt other than the one the
+    /// open row's progress named. Both identities must be present: an event
+    /// without an id, like a row that never carried one, keeps the row.
+    fn replaced_thought(&self, request_id: &str, event_id: &str) -> bool {
+        !event_id.is_empty()
+            && self.thinking_rows.get(request_id).is_some_and(|thought| {
+                thought.written.is_empty()
+                    && thought
+                        .part_id
+                        .as_deref()
+                        .is_some_and(|part_id| !part_id.is_empty() && part_id != event_id)
+            })
+    }
+
+    /// Drops a thought a replaced attempt opened; none of it was committed.
+    fn discard_thinking(&mut self, request_id: &str) {
+        let Some(thought) = self.thinking_rows.remove(request_id) else {
+            return;
+        };
+        self.remove_row(thought.index);
+    }
+
+    fn remove_row(&mut self, index: usize) {
+        self.rows.remove(index);
+        let shift = |value: &mut usize| {
+            if *value > index {
+                *value -= 1;
+            }
+        };
+        for value in self.assistant_rows.values_mut() {
+            shift(value);
+        }
+        for thought in self.thinking_rows.values_mut() {
+            shift(&mut thought.index);
+        }
+        for value in self.tool_rows.values_mut() {
+            shift(value);
+        }
+        for value in self.compaction_rows.values_mut() {
+            shift(value);
+        }
+        for value in self.input_rows.values_mut() {
+            shift(value);
+        }
+        for value in self.cards.values_mut() {
+            shift(value);
+        }
     }
 
     /// A thought settles when the request moves on, as the Timeline holds
@@ -2166,8 +2410,7 @@ pub(crate) fn raw_input_line(blocks: &[dim_agent_types::InputBlock]) -> Option<S
     })
 }
 
-/// The one line that names a loaded Skill, in the interface language: the
-/// message's presentation and the plain log both say it.
+/// The plain log's localized record of a loaded Skill.
 pub(crate) fn skill_loaded_label(name: &str) -> String {
     crate::ui::i18n::tf("Skill loaded: {name}", &[("name", name)])
 }
@@ -2252,37 +2495,21 @@ fn loaded_skill(index: usize, block: &ContentBlock) -> Option<String> {
     })
 }
 
-/// The presentation of an operator message: its words with an image marker per
-/// image and one line per loaded Skill; `None` when its words are the message.
+/// The operator's words interleaved with image markers; `None` for text alone.
 fn user_display(blocks: &[ContentBlock]) -> Option<String> {
     let mut images = 0;
-    let mut skills = Vec::new();
     let mut lines = Vec::new();
     for (index, block) in blocks.iter().enumerate() {
         match block {
-            ContentBlock::Text { text } => match loaded_skill(index, block) {
-                Some(name) => skills.push(name),
-                None if markup::runtime_context(index, text) => {}
-                None => lines.push(text.clone()),
-            },
+            ContentBlock::Text { text } if markup::runtime_context(index, text) => {}
+            ContentBlock::Text { text } => lines.push(text.clone()),
             ContentBlock::Image { .. } => {
                 images += 1;
                 lines.push(crate::images::marker(images, ""));
             }
         }
     }
-    if images == 0 && skills.is_empty() {
-        return None;
-    }
-    let mut display = lines.join("\n");
-    for skill in skills {
-        let line = skill_loaded_label(&skill);
-        if !display.is_empty() {
-            display.push('\n');
-        }
-        display.push_str(&line);
-    }
-    Some(display)
+    (images != 0).then(|| lines.join("\n"))
 }
 
 /// A provider presentation's line, as today: its own words, prefixed.
@@ -2386,6 +2613,12 @@ mod tests {
         })
     }
 
+    fn step_with_id(sequence: u64, id: &str, name: &str, delta: &str) -> serde_json::Value {
+        let mut step = step(sequence, name, delta);
+        step["id"] = id.into();
+        step
+    }
+
     /// The strategy-neutral diagnostics every compaction record carries.
     fn diagnostics() -> serde_json::Value {
         serde_json::json!({
@@ -2448,6 +2681,25 @@ mod tests {
             "sessionId": "s", "branchId": "main", "requestId": "r1",
             "text": "", "textOffset": 0,
             "thinking": thinking, "thinkingOffset": offset,
+        }))
+        .unwrap()
+    }
+
+    fn part_progress(thinking: &str, part_id: &str, started_at: u64) -> Progress {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0,
+            "thinking": thinking, "thinkingOffset": 0,
+            "thinkingPartId": part_id,
+            "thinkingStartedAt": started_at,
+        }))
+        .unwrap()
+    }
+
+    fn empty_progress() -> Progress {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "s", "branchId": "main", "requestId": "r1",
+            "text": "", "textOffset": 0, "thinking": "", "thinkingOffset": 0,
         }))
         .unwrap()
     }
@@ -2760,6 +3012,345 @@ mod tests {
         })
     }
 
+    fn user_says(sequence: u64, text: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": format!("in-{sequence}"), "sequence": sequence, "create_at": sequence * 1000,
+            "type": "input", "name": "message",
+            "data": {"user": {"content": [{"type": "text", "text": text}]}},
+        })
+    }
+
+    fn line_created(sequence: u64, branch: &str, at: u64) -> serde_json::Value {
+        line_event(
+            sequence,
+            "create",
+            serde_json::json!({
+                "at": {"kind": "sequence", "sequence": at},
+                "source": {"kind": "tool", "turn_id": "t1", "request_id": "r1", "call_id": "c1"},
+                "branch": branch,
+                "prompt": "parser race",
+            }),
+        )
+    }
+
+    #[test]
+    fn opening_a_line_keeps_the_cut_folded_from_its_creation() {
+        let mut main = Projection::default();
+        apply(
+            &mut main,
+            &[
+                user_says(1, "find the leak"),
+                user_says(2, "try the parser"),
+                line_created(3, "b-7c", 2),
+            ],
+        );
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 2,
+                messages: 2,
+            })
+        );
+        main.directory(&dim_client::wire::BranchEntry {
+            purpose: Some("parser race".into()),
+            cut_messages: None,
+            end: None,
+            branch_id: "b-7c".into(),
+            parent_branch_id: Some("main".into()),
+            branch_point: Some(2),
+            state: "open".into(),
+            head: 3,
+        });
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 2,
+                messages: 2,
+            }),
+            "a detail row with no count does not drop the folded one"
+        );
+    }
+
+    #[test]
+    fn a_directory_row_gains_the_cut_when_the_parent_history_arrives() {
+        let mut main = Projection::default();
+        main.directory(&dim_client::wire::BranchEntry {
+            purpose: None,
+            cut_messages: None,
+            end: None,
+            branch_id: "b-7c".into(),
+            parent_branch_id: Some("main".into()),
+            branch_point: Some(2),
+            state: "open".into(),
+            head: 3,
+        });
+        assert_eq!(main.line_views()[0].cut, None);
+        for event in [
+            user_says(1, "find the leak"),
+            user_says(2, "try the parser"),
+            line_created(3, "b-7c", 2),
+        ] {
+            let event: Event = serde_json::from_value(event).unwrap();
+            main.replay("main", &event);
+        }
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 2,
+                messages: 2,
+            }),
+            "attach counts the parent's messages at the line's creation"
+        );
+    }
+
+    #[test]
+    fn a_cut_of_a_line_the_list_does_not_hold_shows_no_count() {
+        let mut main = Projection::default();
+        let create: Event = serde_json::from_value(line_created(12, "b-90", 10)).unwrap();
+        main.apply("b-7c", &create);
+        assert_eq!(
+            main.line_views()[0].cut,
+            None,
+            "b-7c is not listed, so what b-90 inherits is unknown"
+        );
+    }
+
+    #[test]
+    fn a_cut_counts_the_history_a_window_holds_without_the_branch_start() {
+        let mut main = Projection::default();
+        apply(
+            &mut main,
+            &[user_says(2, "try the parser"), line_created(3, "b-7c", 2)],
+        );
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 2,
+                messages: 1,
+            }),
+            "a transcript page leaves the branch start out, and still counts"
+        );
+    }
+
+    #[test]
+    fn a_cut_counts_nothing_while_the_parent_history_misses_its_start() {
+        let mut main = Projection::default();
+        main.missing_history("main");
+        apply(
+            &mut main,
+            &[user_says(2, "try the parser"), line_created(3, "b-7c", 1)],
+        );
+        assert_eq!(
+            main.line_views()[0].cut,
+            None,
+            "the parent's first message is outside the loaded window"
+        );
+    }
+
+    #[test]
+    fn an_earlier_read_that_reaches_the_start_completes_the_count_of_a_cut() {
+        let mut main = Projection::default();
+        main.missing_history("main");
+        apply(
+            &mut main,
+            &[user_says(5, "carry on"), line_created(6, "b-7c", 5)],
+        );
+        assert_eq!(main.line_views()[0].cut, None);
+        let older: Event = serde_json::from_value(user_says(2, "find the leak")).unwrap();
+        main.line_event("main", &older);
+        main.whole_history("main");
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 5,
+                messages: 2,
+            }),
+            "the page that reaches the branch start completes the count"
+        );
+    }
+
+    #[test]
+    fn history_read_later_counts_a_line_the_directory_already_listed() {
+        let mut main = Projection::default();
+        main.directory(&dim_client::wire::BranchEntry {
+            purpose: None,
+            cut_messages: None,
+            end: None,
+            branch_id: "b-7c".into(),
+            parent_branch_id: Some("main".into()),
+            branch_point: Some(5),
+            state: "open".into(),
+            head: 6,
+        });
+        main.missing_history("main");
+        apply(&mut main, &[user_says(6, "carry on")]);
+        assert_eq!(main.line_views()[0].cut, None);
+        for event in [user_says(2, "find the leak"), line_created(5, "b-7c", 5)] {
+            let event: Event = serde_json::from_value(event).unwrap();
+            main.line_event("main", &event);
+        }
+        main.whole_history("main");
+        assert_eq!(
+            main.line_views()[0].cut,
+            Some(LineCut {
+                sequence: 5,
+                messages: 1,
+            }),
+            "history read later counts a line the directory already listed"
+        );
+    }
+
+    /// Every order of `pages`, each page a range of event indices.
+    fn page_orders(pages: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>> {
+        if pages.len() <= 1 {
+            return vec![pages.to_vec()];
+        }
+        let mut orders = Vec::new();
+        for (index, page) in pages.iter().enumerate() {
+            let mut rest = pages.to_vec();
+            rest.remove(index);
+            for mut order in page_orders(&rest) {
+                order.insert(0, *page);
+                orders.push(order);
+            }
+        }
+        orders
+    }
+
+    /// A cut counts what a complete chronological read counts, however the
+    /// history is split into pages and whichever page arrives first,
+    /// overlapping and repeated pages included. A withdrawal before a cut
+    /// leaves its input out of that cut; one after the cut keeps it in.
+    #[test]
+    fn a_cut_counts_the_same_however_its_history_is_paged() {
+        let withdrawal = |sequence: u64, input: &str| {
+            serde_json::json!({
+                "id": format!("deleted-{sequence}"), "sequence": sequence,
+                "create_at": sequence * 1000, "type": "input", "name": "deleted",
+                "data": {"input_id": input},
+            })
+        };
+        let events: Vec<Event> = [
+            user_says(1, "first ask"),
+            user_says(2, "second ask"),
+            line_created(3, "b-a", 2),
+            withdrawal(4, "in-1"),
+            line_created(5, "b-b", 4),
+        ]
+        .into_iter()
+        .map(|event| serde_json::from_value(event).expect("an event"))
+        .collect();
+
+        let counted = |projection: &Projection| {
+            ["b-a", "b-b"].map(|id| {
+                projection
+                    .line_views()
+                    .iter()
+                    .find(|line| line.id == id)
+                    .and_then(|line| line.cut)
+            })
+        };
+        let mut whole = Projection::default();
+        for event in &events {
+            whole.apply("main", event);
+        }
+        let expected = counted(&whole);
+        assert_eq!(
+            expected,
+            [
+                Some(LineCut {
+                    sequence: 2,
+                    messages: 2,
+                }),
+                Some(LineCut {
+                    sequence: 4,
+                    messages: 1,
+                }),
+            ],
+            "the first cut keeps the later-withdrawn message; the second leaves the earlier-withdrawn one out"
+        );
+
+        let run = |pages: &[(usize, usize)]| {
+            let mut projection = Projection::default();
+            projection.missing_history("main");
+            for &(start, end) in pages {
+                for event in &events[start..=end] {
+                    projection.line_event("main", event);
+                }
+            }
+            projection.whole_history("main");
+            assert_eq!(
+                counted(&projection),
+                expected,
+                "pages {pages:?} count what a complete read counts"
+            );
+            for &(start, end) in pages {
+                for event in &events[start..=end] {
+                    projection.line_event("main", event);
+                }
+            }
+            assert_eq!(
+                counted(&projection),
+                expected,
+                "the pages {pages:?} again count nothing twice"
+            );
+            projection.missing_history("main");
+            assert_eq!(
+                counted(&projection),
+                [None, None],
+                "a history that lost a page counts every cut as unknown"
+            );
+            for &(start, end) in pages {
+                for event in &events[start..=end] {
+                    projection.line_event("main", event);
+                }
+            }
+            projection.whole_history("main");
+            assert_eq!(
+                counted(&projection),
+                expected,
+                "the pages that fill the gap count what a complete read counts"
+            );
+        };
+
+        let ranges: Vec<(usize, usize)> = (0..events.len())
+            .flat_map(|start| (start..events.len()).map(move |end| (start, end)))
+            .collect();
+        let mut deliveries = 0;
+        for boundaries in 0u32..(1 << (events.len() - 1)) {
+            let mut pages = Vec::new();
+            let mut start = 0;
+            for end in 0..events.len() {
+                if end == events.len() - 1 || boundaries & (1 << end) != 0 {
+                    pages.push((start, end));
+                    start = end + 1;
+                }
+            }
+            for order in page_orders(&pages) {
+                run(&order);
+                deliveries += 1;
+            }
+        }
+        for first in &ranges {
+            for second in &ranges {
+                for third in &ranges {
+                    let pages = [*first, *second, *third];
+                    if !(0..events.len())
+                        .all(|at| pages.iter().any(|(start, end)| *start <= at && at <= *end))
+                    {
+                        continue;
+                    }
+                    run(&pages);
+                    deliveries += 1;
+                }
+            }
+        }
+        assert_eq!(
+            deliveries, 1642,
+            "every split in every order, plus every delivery of up to three overlapping or repeated pages"
+        );
+    }
+
     #[test]
     fn a_message_is_received_by_the_line_it_names_and_shown_once() {
         let mut line = Projection::for_branch("b-7c");
@@ -2859,6 +3450,8 @@ mod tests {
                 parent: Some("main".into()),
                 purpose: "parser race hypothesis".into(),
                 state: LineState::Waiting,
+                running: None,
+                branch_point: Some(5),
                 cut: Some(LineCut {
                     sequence: 5,
                     messages: 2,
@@ -2943,6 +3536,8 @@ mod tests {
                 parent: Some("b-7c".into()),
                 purpose: "review the change".into(),
                 state: LineState::Waiting,
+                running: None,
+                branch_point: Some(12),
                 cut: Some(LineCut {
                     sequence: 12,
                     messages: 3,
@@ -3081,11 +3676,8 @@ mod tests {
         crate::ui::i18n::set(previous);
     }
 
-    /// A loaded Skill block (Skills §9) is one line under the operator's
-    /// message, never its instructions; the editable text stays the
-    /// operator's own words.
     #[test]
-    fn a_loaded_skill_shows_as_one_line_under_the_message() {
+    fn loaded_skills_do_not_change_the_visible_message() {
         let previous = crate::ui::i18n::active();
         crate::ui::i18n::set(crate::ui::i18n::Locale::En);
         let image = serde_json::json!({
@@ -3158,25 +3750,16 @@ mod tests {
         );
         let rows = projection.snapshot().rows;
         assert_eq!(rows[0].text, "one $skill: checkin please");
-        assert_eq!(
-            rows[0].display.as_deref(),
-            Some("one $skill: checkin please\nSkill loaded: checkin")
-        );
+        assert_eq!(rows[0].display, None);
         assert_eq!(rows[1].text, "two");
-        assert_eq!(
-            rows[1].display.as_deref(),
-            Some("two\nSkill loaded: alpha\nSkill loaded: beta")
-        );
+        assert_eq!(rows[1].display, None);
         assert_eq!(
             rows[2].text, "<dim-skill name=\"mine\">as typed",
             "a first block is the operator's own text, shown as typed"
         );
         assert_eq!(rows[2].display, None);
         assert_eq!(rows[3].text, "look");
-        assert_eq!(
-            rows[3].display.as_deref(),
-            Some("look\n[Image #1]\nSkill loaded: checkin")
-        );
+        assert_eq!(rows[3].display.as_deref(), Some("look\n[Image #1]"));
         crate::ui::i18n::set(previous);
     }
 
@@ -3546,6 +4129,7 @@ mod tests {
                 input(1, "in-5", "withdrawn", "queue"),
                 control(2, "deleted", "in-5"),
                 input(3, "in-6", "sent later", "queue"),
+                input(4, "in-7", "change course", "steer"),
             ],
         );
         assert!(
@@ -3554,6 +4138,10 @@ mod tests {
         );
         assert_eq!(replay.snapshot().queued[0].id, "in-6");
         assert!(replay.snapshot().queued[0].held);
+        assert_eq!(replay.snapshot().queued.len(), 1);
+        assert!(replay.held_input("in-7").is_none());
+        apply(&mut replay, &[control(5, "applied", "in-7")]);
+        assert_eq!(replay.snapshot().rows[0].text, "change course");
     }
 
     #[test]
@@ -4125,5 +4713,342 @@ mod tests {
         .unwrap();
         projection.progress(&done);
         assert!(projection.snapshot().retry.is_none());
+    }
+
+    /// The clear between the two attempts can be coalesced away; the new
+    /// attempt's block identity still rebuilds the row, and its span starts
+    /// there rather than at the replaced attempt's block.
+    #[test]
+    fn a_coalesced_clear_rebuilds_the_thought_row_from_the_new_attempt() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        let first = projection.snapshot().rows[0].row_id.clone();
+        projection.progress(&part_progress(
+            "a longer successful thought",
+            "second",
+            5000,
+        ));
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the replaced attempt leaves one thought row: {rows:?}"
+        );
+        assert_ne!(
+            rows[0].row_id, first,
+            "the rebuilt thought row has a new identity"
+        );
+        assert_eq!(rows[0].text, "a longer successful thought");
+        apply(
+            &mut projection,
+            &[
+                step_with_id(5, "second", "thinking", "a longer successful thought"),
+                step(6, "text", "Done."),
+            ],
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows[0].elapsed_ms,
+            Some(1000),
+            "the span starts at the new attempt: {rows:?}"
+        );
+    }
+
+    /// A retry that never shows a thought leaves no empty thought row, and
+    /// the replaced attempt's thought does not make the failure claim that a
+    /// response is incomplete.
+    #[test]
+    fn a_retry_without_thinking_leaves_no_empty_thought_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        projection.progress(&empty_progress());
+        apply(
+            &mut projection,
+            &[model_end(
+                2,
+                failure_data(serde_json::json!({"failure": failure_fact()})),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert!(
+            !row.text.starts_with("The response above is incomplete."),
+            "nothing showed above the failure: {}",
+            row.text
+        );
+    }
+
+    /// A clear that a coalesced notice dropped is still detected from the new
+    /// attempt's text: the replaced thought leaves no empty row.
+    #[test]
+    fn a_coalesced_clear_before_text_leaves_no_empty_thought_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        projection.progress(
+            &serde_json::from_value(serde_json::json!({
+                "sessionId": "s", "branchId": "main", "requestId": "r1",
+                "text": "partial answer", "textOffset": 0,
+                "thinking": "", "thinkingOffset": 0,
+            }))
+            .unwrap(),
+        );
+        apply(&mut projection, &[step(2, "text", "partial answer")]);
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.text == "partial answer"),
+            "the new attempt's text shows: {rows:?}"
+        );
+    }
+
+    /// The App Server batches progress notices and sends durable events at
+    /// once, so a retry's first committed thought can arrive before the notice
+    /// that would reset the replaced attempt's row.
+    #[test]
+    fn a_durable_thought_before_the_retry_notice_rebuilds_the_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        let replaced = projection.snapshot().rows[0].row_id.clone();
+        apply(
+            &mut projection,
+            &[step_with_id(
+                5,
+                "second",
+                "thinking",
+                "a longer successful thought",
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows.len(),
+            1,
+            "the replaced attempt leaves one thought row: {rows:?}"
+        );
+        assert_ne!(
+            rows[0].row_id, replaced,
+            "the rebuilt thought row has a new identity"
+        );
+        assert_eq!(rows[0].text, "a longer successful thought");
+        apply(&mut projection, &[step(6, "text", "Done.")]);
+        let rows = projection.snapshot().rows;
+        assert_eq!(
+            rows[0].elapsed_ms,
+            Some(1000),
+            "the span starts at the new attempt, not the replaced one: {rows:?}"
+        );
+    }
+
+    /// A retry whose first committed output is text drops the replaced
+    /// attempt's row instead of settling it empty.
+    #[test]
+    fn a_durable_text_before_the_retry_notice_leaves_no_empty_thought_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        apply(&mut projection, &[step(5, "text", "answer")]);
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        assert!(
+            rows.iter().any(|row| row.text == "answer"),
+            "the new attempt's text shows: {rows:?}"
+        );
+    }
+
+    /// A retry whose first committed output is a tool event drops the replaced
+    /// attempt's row instead of settling it empty, and the failure that follows
+    /// does not claim a response is incomplete.
+    #[test]
+    fn a_durable_tool_event_before_the_retry_notice_leaves_no_empty_thought_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "id": "tool-start-1",
+                "sequence": 5,
+                "create_at": 5000,
+                "type": "step",
+                "name": "tool-use-start",
+                "data": {"turn_id": "t1", "request_id": "r1", "call_id": "call", "name": "echo"},
+            })],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        apply(
+            &mut projection,
+            &[model_end(
+                6,
+                failure_data(serde_json::json!({"failure": failure_fact()})),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert!(
+            !row.text.starts_with("The response above is incomplete."),
+            "nothing showed above the failure: {}",
+            row.text
+        );
+
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        apply(
+            &mut projection,
+            &[serde_json::json!({
+                "id": "tool-1",
+                "sequence": 5,
+                "create_at": 5000,
+                "type": "step",
+                "name": "tool-use",
+                "data": {"turn_id": "t1", "request_id": "r1",
+                    "call": {"id": "call", "name": "echo", "input": {}}},
+            })],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the tool use drops the replaced row: {rows:?}"
+        );
+    }
+
+    /// The empty progress frame between two attempts can be coalesced away,
+    /// so the terminal fact carries the retry boundary: a retry that stops
+    /// without output takes the replaced attempt's thought row with it.
+    #[test]
+    fn a_retry_terminal_takes_the_replaced_thought_without_an_empty_row() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        let end = model_end(
+            2,
+            failure_data(serde_json::json!({
+                "failure": {
+                    "kind": "server_error",
+                    "cause": [],
+                    "attempts": 2,
+                    "waitedMs": 0,
+                    "retried": true,
+                },
+            })),
+        );
+        let decoded = serde_json::from_value::<Event>(end.clone());
+        assert!(
+            decoded.is_ok(),
+            "the terminal fact carries its retry boundary: {} ({:?})",
+            serde_json::to_string(&end).unwrap(),
+            decoded.as_ref().err()
+        );
+        apply(&mut projection, &[end]);
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert!(
+            !row.text.starts_with("The response above is incomplete."),
+            "nothing showed above the failure: {}",
+            row.text
+        );
+    }
+
+    /// The final attempt showed a thought of its own: its row stays and the
+    /// failure still says the response is incomplete.
+    #[test]
+    fn a_retry_terminal_keeps_the_final_attempts_own_thought() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        projection.progress(&part_progress("final thought", "second", 2000));
+        let end = model_end(
+            2,
+            failure_data(serde_json::json!({
+                "failure": {
+                    "kind": "server_error",
+                    "cause": [],
+                    "attempts": 2,
+                    "waitedMs": 0,
+                    "retried": true,
+                    "thinkingPartId": "second",
+                },
+            })),
+        );
+        let decoded = serde_json::from_value::<Event>(end.clone());
+        assert!(
+            decoded.is_ok(),
+            "the terminal fact names the final attempt's block: {} ({:?})",
+            serde_json::to_string(&end).unwrap(),
+            decoded.as_ref().err()
+        );
+        apply(&mut projection, &[end]);
+        let rows = projection.snapshot().rows;
+        let thought = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Thinking)
+            .expect("the final attempt keeps its thought");
+        assert!(!thought.streaming);
+        assert_eq!(thought.text, "", "only progress showed it");
+        let row = rows
+            .iter()
+            .find(|row| row.kind == RowKind::Error)
+            .expect("a failure row");
+        assert!(
+            row.text.starts_with("The response above is incomplete."),
+            "the final attempt showed a response above the failure: {}",
+            row.text
+        );
+    }
+
+    /// A retry reopened the request and a steer replaced it before any output:
+    /// the row it left belongs to the replaced attempt and goes with it.
+    #[test]
+    fn a_retry_terminal_takes_the_replaced_thought_when_a_steer_cancels_it() {
+        let mut projection = Projection::default();
+        apply(&mut projection, &[model_start(1)]);
+        projection.progress(&part_progress("failed attempt", "first", 1000));
+        apply(
+            &mut projection,
+            &[model_end(
+                2,
+                serde_json::json!({
+                    "turn_id": "t1",
+                    "request_id": "r1",
+                    "status": "cancelled",
+                    "reason": "replaced by steer",
+                }),
+            )],
+        );
+        let rows = projection.snapshot().rows;
+        assert!(
+            !rows.iter().any(|row| row.kind == RowKind::Thinking),
+            "the replaced thought leaves no empty row: {rows:?}"
+        );
     }
 }

@@ -456,7 +456,7 @@ fn tui_skills_panel_reads_again_after_a_failed_read() {
     terminal.write(b"/skills\r");
     terminal.until("catalog unavailable");
     terminal.raw(b"\x12");
-    terminal.until("Writes commit messages");
+    terminal.until("commit");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));
     terminal.write(b"/exit\r");
@@ -465,7 +465,7 @@ fn tui_skills_panel_reads_again_after_a_failed_read() {
     daemon.join().unwrap();
 }
 
-/// `/skills` opens the panel on the catalog and Enter toggles the selected
+/// `/skills` opens the panel on the catalog and Tab toggles the selected
 /// entry; `/reload-skills` rescans without a panel and reports what it found.
 #[test]
 fn tui_skills_panel_lists_toggles_and_reloads() {
@@ -531,8 +531,7 @@ fn tui_skills_panel_lists_toggles_and_reloads() {
     shown.send(()).unwrap();
     terminal.write(b"/skills\r");
     terminal.until("/w/.agents/skills/old/SKILL.md: no name");
-    terminal.until("Writes commit messages");
-    terminal.raw(b"\r");
+    terminal.raw(b"\t");
     terminal.until("Disabled commit.");
     terminal.raw(b"\x1b");
     // Esc alone stands: a byte arriving within the escape window would read
@@ -607,7 +606,7 @@ fn tui_skills_panel_reloads_an_empty_catalog() {
     terminal.write(b"/skills\r");
     terminal.until("No entries.");
     terminal.raw(b"\x12");
-    terminal.until("Writes commit messages");
+    terminal.until("commit");
     terminal.until("Reloaded.");
     terminal.raw(b"\x1b");
     thread::sleep(Duration::from_millis(200));

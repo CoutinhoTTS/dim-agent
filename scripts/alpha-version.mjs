@@ -93,6 +93,10 @@ export function assertReleaseVersion(root, version) {
 
 export function setAlphaVersion(version) {
   assert(alphaVersion.test(version), 'Expected an alpha version');
+  stampBuildVersion(version);
+}
+
+export function stampBuildVersion(version) {
   if (version === currentVersion) return;
   const edit = (file, change) => writeFileSync(path.join(repo, file), change(readFileSync(path.join(repo, file), 'utf8')));
   const json = (file, change) => edit(file, (text) => {

@@ -255,8 +255,7 @@ The full CI sequence at the workspace root, in CI order:
 1. `./dev check`
 2. `cargo clippy --workspace --all-targets --locked -- -D warnings`
 3. `cargo test --workspace --locked`
-4. `cargo run --locked -p xtask -- check` and `graph`. Assembly and crate dependencies do not change,
-   so the snapshots should not move; a diff means the upgrade changed something it should not
+4. `cargo run --locked -p xtask -- check`. The upgrade preserves the assembly and crate dependency boundaries.
 5. `node --test scripts/*.test.mjs`
 6. The Node bindings as CI runs them, including `runtime/plugin-sdk.test.mjs`, the plugin tests, the
    `tsc` checks and `git diff --exit-code -- npm/branch-services.d.ts`

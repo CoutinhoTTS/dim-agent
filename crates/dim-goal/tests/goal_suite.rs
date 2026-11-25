@@ -1,5 +1,6 @@
 mod support;
 
+mod goal_beta_flow;
 mod goal_cases_flow;
 mod goal_evaluator_flow;
 mod goal_flow;

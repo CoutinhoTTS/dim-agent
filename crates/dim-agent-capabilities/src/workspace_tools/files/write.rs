@@ -3,6 +3,8 @@
 use super::super::file_reads::{
     Bom, EncodingSource, FileReads, TextEncoding, TextFileBinding, WriteBinding,
 };
+#[cfg(unix)]
+use super::NewFile;
 use super::codec;
 use super::edit::unified_diff;
 use super::{
@@ -10,6 +12,8 @@ use super::{
     failed, field, hex, invalid_input, not_regular, refused, resolve_path, revision, wrote,
 };
 use crate::host::HostError;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use dim_agent_types::ToolContent;
 use dim_agent_types::{JsonObject, ToolEffect, ToolResult};
 use serde_json::{Value, json};
 use std::{
@@ -84,7 +88,11 @@ pub(super) async fn run(
         tools.boundary.is_some(),
     );
     #[cfg(test)]
-    let hook = tools.before_commit.clone();
+    let hooks = super::MutationHooks {
+        before_commit: tools.before_commit.clone(),
+        #[cfg(unix)]
+        before_sync: tools.before_sync.clone(),
+    };
     let (_lock, written) = blocking(move || {
         let written = write_locked(
             &target,
@@ -94,7 +102,7 @@ pub(super) async fn run(
             binding,
             &cancel,
             #[cfg(test)]
-            hook,
+            hooks,
         );
         (_lock, written)
     })
@@ -113,7 +121,7 @@ fn write_locked(
     content: &str,
     binding: WriteBinding,
     cancel: &CancellationToken,
-    #[cfg(test)] hook: Option<super::CommitHook>,
+    #[cfg(test)] hooks: super::MutationHooks,
 ) -> Result<(ToolResult, Option<TextFileBinding>), Cancelled> {
     let done = |result| Ok((result, None));
     let target = match Target::for_mutation(path, bounded, true) {
@@ -232,7 +240,7 @@ fn write_locked(
         &binding.raw_revision,
         cancel,
         #[cfg(test)]
-        hook,
+        hooks,
     )?;
     if let Err(result) = written {
         return done(result);
@@ -284,6 +292,60 @@ fn validated_bytes(
     }
 }
 
+/// A named staged sibling. Its drop removes the name only while it still
+/// resolves to this file, so it never deletes an entry another writer created.
+struct Temporary<'a> {
+    target: &'a Target,
+    /// The new file's held parent; `None` on the replacement path, which
+    /// stages and removes the sibling by the target's path.
+    #[cfg(target_os = "linux")]
+    below: Option<&'a NewFile<'a>>,
+    name: std::ffi::OsString,
+    file: std::fs::File,
+}
+impl Temporary<'_> {
+    fn staged_owned(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        if let Some(new_file) = self.below {
+            return new_file.staged_owned(&self.name, &self.file);
+        }
+        self.target.staged_owned(&self.name, &self.file)
+    }
+
+    fn remove_staged(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(new_file) = self.below {
+            new_file.remove_staged(&self.name);
+            return;
+        }
+        self.target.remove_staged(&self.name);
+    }
+
+    /// Removes the staging name now, before the directory sync, while the open
+    /// file stays available to check which path the publication reached.
+    #[cfg(unix)]
+    fn remove_name(&self) {
+        if !self.staged_owned() {
+            return;
+        }
+        self.remove_staged();
+    }
+}
+impl Drop for Temporary<'_> {
+    fn drop(&mut self) {
+        if !self.staged_owned() {
+            return;
+        }
+        #[cfg(windows)]
+        if let Ok(metadata) = self.file.metadata() {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            let _ = self.file.set_permissions(permissions);
+        }
+        self.remove_staged();
+    }
+}
+
 /// Stages complete bytes before touching the destination. Verification is not
 /// portable CAS: uncoordinated path/parent renames or metadata changes can still
 /// race the final syscall. Windows installs the owned handle, not a temp name.
@@ -300,8 +362,19 @@ pub(super) fn write_target(
     original: Option<&std::fs::File>,
     expected: &[u8; 32],
     cancel: &CancellationToken,
-    #[cfg(test)] hook: Option<super::CommitHook>,
+    #[cfg(test)] hooks: super::MutationHooks,
 ) -> Result<Result<(), ToolResult>, Cancelled> {
+    #[cfg(unix)]
+    if original.is_none() {
+        return write_new_file(
+            target,
+            bytes,
+            display,
+            cancel,
+            #[cfg(test)]
+            hooks,
+        );
+    }
     let path = target.path();
     if let Some(original) = original {
         let writable = match target.open_writable() {
@@ -328,24 +401,6 @@ pub(super) fn write_target(
             false,
         )));
     }
-    struct Temporary<'a> {
-        target: &'a Target,
-        name: std::ffi::OsString,
-        file: std::fs::File,
-    }
-    impl Drop for Temporary<'_> {
-        fn drop(&mut self) {
-            if self.target.staged_owned(&self.name, &self.file) {
-                #[cfg(windows)]
-                if let Ok(metadata) = self.file.metadata() {
-                    let mut permissions = metadata.permissions();
-                    permissions.set_readonly(false);
-                    let _ = self.file.set_permissions(permissions);
-                }
-                self.target.remove_staged(&self.name);
-            }
-        }
-    }
     let staged = std::ffi::OsString::from(format!(".dim-write-{}", uuid::Uuid::new_v4()));
     let file = match target.create_staged(&staged) {
         Ok(file) => file,
@@ -354,6 +409,8 @@ pub(super) fn write_target(
     };
     let mut temporary = Temporary {
         target,
+        #[cfg(target_os = "linux")]
+        below: None,
         name: staged.clone(),
         file,
     };
@@ -384,7 +441,7 @@ pub(super) fn write_target(
         return Ok(Err(write_failure(&error, display, false)));
     }
     #[cfg(test)]
-    if let Some(hook) = hook {
+    if let Some(hook) = &hooks.before_commit {
         hook(path);
     }
     Cancelled::check(cancel)?;
@@ -446,13 +503,272 @@ pub(super) fn write_target(
     }
     drop(temporary);
     #[cfg(unix)]
-    if let Err(error) = target.sync_parent() {
+    return sync_parent(target, path, display);
+    #[cfg(not(unix))]
+    Ok(Ok(()))
+}
+
+/// Publishes a new file. Linux stages it as an unnamed `O_TMPFILE` inode and
+/// links it into place, so preparation has no directory entry; the fallback,
+/// and every other Unix platform, stages a named 0600 sibling and gives it the
+/// creation mode immediately before publication. Every step uses the one
+/// [`NewFile`] parent handle, so a parent swap cannot split the file from the
+/// directory that gave it its metadata.
+#[cfg(unix)]
+fn write_new_file(
+    target: &Target,
+    bytes: &[u8],
+    display: &str,
+    cancel: &CancellationToken,
+    #[cfg(test)] hooks: super::MutationHooks,
+) -> Result<Result<(), ToolResult>, Cancelled> {
+    let path = target.path();
+    let new_file = match NewFile::new(target) {
+        Ok(new_file) => new_file,
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
+    };
+    #[cfg(all(test, target_os = "linux"))]
+    let mut hooks = hooks;
+    #[cfg(target_os = "linux")]
+    match new_file.create_anonymous() {
+        Ok(Some(file)) => {
+            let publication = match publish_anonymous_new(
+                &new_file,
+                file,
+                bytes,
+                display,
+                cancel,
+                #[cfg(test)]
+                super::MutationHooks {
+                    before_commit: hooks.before_commit.take(),
+                    before_sync: hooks.before_sync.clone(),
+                },
+            )? {
+                Ok(publication) => publication,
+                Err(result) => return Ok(Err(result)),
+            };
+            if let AnonymousPublication::Published = publication {
+                return Ok(Ok(()));
+            }
+        }
+        Ok(None) => {}
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
+    }
+    publish_named_new(
+        &new_file,
+        bytes,
+        display,
+        cancel,
+        #[cfg(test)]
+        hooks,
+    )
+}
+
+/// The outcome of publishing a new file from an anonymous inode.
+#[cfg(target_os = "linux")]
+enum AnonymousPublication {
+    /// The inode is linked under the target's name.
+    Published,
+    /// The filesystem or the process cannot link an anonymous inode through
+    /// `/proc/self/fd`; the named fallback publishes instead.
+    Unsupported,
+}
+
+/// Whether a failed anonymous publication means the anonymous inode cannot be
+/// published at all, so the named fallback can take over. An existing target
+/// or an access failure is not unsupported and stays a failure.
+#[cfg(target_os = "linux")]
+fn anonymous_publication_unsupported(error: &std::io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EOPNOTSUPP | libc::EXDEV | libc::EINVAL | libc::ENOENT)
+    )
+}
+
+/// Publishes a new file from an anonymous inode: write, sync, then link the
+/// inode under the target's name. The link never replaces an entry, and the
+/// inode disappears with its descriptor if the call fails or is cancelled.
+/// An unsupported link returns [`AnonymousPublication::Unsupported`] so the
+/// named fallback can publish the same bytes.
+#[cfg(target_os = "linux")]
+fn publish_anonymous_new(
+    new_file: &NewFile<'_>,
+    mut file: std::fs::File,
+    bytes: &[u8],
+    display: &str,
+    cancel: &CancellationToken,
+    #[cfg(test)] hooks: super::MutationHooks,
+) -> Result<Result<AnonymousPublication, ToolResult>, Cancelled> {
+    let path = new_file.path();
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        return Ok(Err(write_failure(&error, display, false)));
+    }
+    #[cfg(test)]
+    if let Some(hook) = hooks.before_commit {
+        hook(path);
+    }
+    Cancelled::check(cancel)?;
+    if let Err(error) = new_file.strip_tmpfile_umask(&file) {
         return Ok(Err(match error {
             TargetError::Refused => refused(path),
-            TargetError::Io(error) => write_failure(&error, display, true),
+            TargetError::Io(error) => write_failure(&error, display, false),
         }));
     }
+    match new_file.publish_anonymous(&file) {
+        Ok(()) => {}
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
+        Err(TargetError::Io(error)) if error.kind() == ErrorKind::AlreadyExists => {
+            return Ok(Err(failed(
+                "Read the existing file before overwriting it.",
+                json!({"code": "text_binding_required"}),
+            )));
+        }
+        Err(TargetError::Io(error)) if anonymous_publication_unsupported(&error) => {
+            return Ok(Ok(AnonymousPublication::Unsupported));
+        }
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
+    }
+    #[cfg(test)]
+    if let Some(hook) = hooks.before_sync {
+        hook(path);
+    }
+    let synced = new_file.sync();
+    if !new_file.published_at_target(&file) {
+        return Ok(Err(path_not_written(display)));
+    }
+    if let Err(error) = synced {
+        return Ok(Err(sync_failure(error, path, display)));
+    }
+    Ok(Ok(AnonymousPublication::Published))
+}
+
+/// Publishes a new file from a named 0600 sibling, the form every platform
+/// shares when no anonymous inode is available. A failed publication restores
+/// the sibling's private mode, so a parent that refuses the cleanup unlink
+/// cannot leave unpublished content with the wider creation mode.
+#[cfg(unix)]
+fn publish_named_new(
+    new_file: &NewFile<'_>,
+    bytes: &[u8],
+    display: &str,
+    cancel: &CancellationToken,
+    #[cfg(test)] hooks: super::MutationHooks,
+) -> Result<Result<(), ToolResult>, Cancelled> {
+    let path = new_file.path();
+    let staged = std::ffi::OsString::from(format!(".dim-write-{}", uuid::Uuid::new_v4()));
+    let file = match new_file.create_staged(&staged) {
+        Ok(file) => file,
+        Err(TargetError::Refused) => return Ok(Err(refused(path))),
+        Err(TargetError::Io(error)) => return Ok(Err(write_failure(&error, display, false))),
+    };
+    let mut temporary = Temporary {
+        target: new_file.target,
+        #[cfg(target_os = "linux")]
+        below: Some(new_file),
+        name: staged.clone(),
+        file,
+    };
+    if let Err(error) = temporary
+        .file
+        .write_all(bytes)
+        .and_then(|()| temporary.file.sync_all())
+    {
+        return Ok(Err(write_failure(&error, display, false)));
+    }
+    #[cfg(test)]
+    if let Some(hook) = hooks.before_commit {
+        hook(path);
+    }
+    Cancelled::check(cancel)?;
+    if !new_file.staged_owned(&staged, &temporary.file) {
+        return Ok(Err(failed(
+            "Staged file was replaced during preparation.",
+            json!({"code": "write_error"}),
+        )));
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let replaced = match new_file.prepare(&temporary.file) {
+        Ok(replaced) => replaced,
+        Err(error) => {
+            return Ok(Err(match error {
+                TargetError::Refused => refused(path),
+                TargetError::Io(error) => write_failure(&error, display, false),
+            }));
+        }
+    };
+    if let Err(error) = new_file.install(&staged, &temporary.file) {
+        let mut result = match error {
+            TargetError::Refused => refused(path),
+            TargetError::Io(error) if error.kind() == ErrorKind::AlreadyExists => failed(
+                "Read the existing file before overwriting it.",
+                json!({"code": "text_binding_required"}),
+            ),
+            TargetError::Io(error) => write_failure(&error, display, false),
+        };
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        if let Some(replaced) = replaced
+            && let Err(error) = new_file.restore_staging_mode(&temporary.file, replaced)
+            && let ToolContent::Text(content) = &mut result.content
+        {
+            content.push_str(&format!(
+                "\nThe staging entry could not be restored to its starting mode: {error}"
+            ));
+        }
+        return Ok(Err(result));
+    }
+    temporary.remove_name();
+    #[cfg(test)]
+    if let Some(hook) = hooks.before_sync {
+        hook(path);
+    }
+    let synced = new_file.sync();
+    if !new_file.published_at_target(&temporary.file) {
+        return Ok(Err(path_not_written(display)));
+    }
+    drop(temporary);
+    if let Err(error) = synced {
+        return Ok(Err(sync_failure(error, path, display)));
+    }
     Ok(Ok(()))
+}
+
+/// The failure for a publication that succeeded below the held parent while
+/// the requested path no longer names the written file, as after a parent
+/// rename: the call must not report or bind that path as written.
+#[cfg(unix)]
+fn path_not_written(display: &str) -> ToolResult {
+    failed(
+        format!(
+            "The parent directory was renamed during the write, so the file was not published at {display}. Write the file again."
+        ),
+        json!({ "code": "write_error" }),
+    )
+}
+
+/// Maps a failed directory sync: the entry is already published, so the
+/// result warns that the file may have been partially written.
+#[cfg(unix)]
+fn sync_failure(error: TargetError, path: &Path, display: &str) -> ToolResult {
+    match error {
+        TargetError::Refused => refused(path),
+        TargetError::Io(error) => write_failure(&error, display, true),
+    }
+}
+
+/// Flushes the published directory entry. A failure here warns that the file
+/// may have been partially written, as the replacement path does.
+#[cfg(unix)]
+fn sync_parent(
+    target: &Target,
+    path: &Path,
+    display: &str,
+) -> Result<Result<(), ToolResult>, Cancelled> {
+    match target.sync_parent() {
+        Ok(()) => Ok(Ok(())),
+        Err(error) => Ok(Err(sync_failure(error, path, display))),
+    }
 }
 
 #[cfg(unix)]

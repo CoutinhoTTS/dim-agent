@@ -5,18 +5,23 @@
 //!
 //! ```text
 //! cargo run --locked -p xtask -- scenario-eval --scenarios DIR --text ID
-//!     --candidate FILE [--text ID --candidate FILE]... --model PROVIDER/MODEL
-//!     --judge PROVIDER/MODEL --runs N --out DIR [--jobs N]
-//!     [--model-config FILE]
+//!     --baseline FILE --candidate FILE [--text ID --baseline FILE
+//!     --candidate FILE]... --model PROVIDER/MODEL --judge PROVIDER/MODEL
+//!     --runs N --out DIR [--jobs N] [--model-config FILE]
 //! ```
 //!
-//! Both arms run the shipped assembly: `current` with the product's own texts
-//! and `candidate` with each candidate file in place of the text its `--text`
-//! id names. Every `--text ID --candidate FILE` pair replaces one text, a
-//! pair reads in either order, a text named twice is an error, and the report
-//! gives each candidate text's own token cost. The runs are interleaved: for
-//! each run index and scenario the `current` run is scheduled before the
-//! `candidate` one, so a drift in
+//! Both arms run the same assembly with each text named by a `--text` id put
+//! in place of the assembly's: `current` with the baseline file and
+//! `candidate` with the candidate file. A pair names both files, so an
+//! evaluation compares two texts it was given and never the candidate with the
+//! copy the checkout ships; a pair whose baseline and candidate hold the same
+//! bytes is refused, as is one with a file missing. A pair reads in either
+//! order, a text named twice is an error, and the report gives each candidate
+//! text's own token cost. The report and `runs.jsonl` also record the
+//! configured texts each arm was given, as each text's id, length and
+//! fingerprint. The runs are
+//! interleaved: for each run index and scenario the `current` run is scheduled
+//! before the `candidate` one, so a drift in
 //! the endpoint lands on both arms alike, and the records come out in that
 //! order whatever order the runs complete in. `--jobs N` (default 1) runs N
 //! runs at once; each run keeps its own workspace copy, Dim home, local
@@ -58,7 +63,10 @@
 //!
 //! The judge's window is read from the judge's selection snapshot or from the
 //! `--model-config` file, and an evaluation whose judge declares no window
-//! fails before its first call. A run's view is judged in one call, and a
+//! fails before its first call. The view keeps every event in order, gives
+//! each request against the previous request of its line, and renders a
+//! request's consecutive thinking deltas as one line with their text joined.
+//! A run's view is judged in one call, and a
 //! view that does not fit the window less the reply's `maxTokens` leaves the
 //! run unjudged without a call: there is no judging in parts, because a probe
 //! that counts, orders or holds over a whole run cannot be answered from one
@@ -83,8 +91,8 @@
 //!   "providers": [
 //!     {"id": "run", "kind": "openai-chat", "apiKeyEnv": "MODEL_KEY",
 //!      "baseUrl": "https://example.invalid/v1",
-//!      "models": [{"id": "model-a", "contextWindow": 16000,
-//!                  "maxOutputTokens": 1024, "config": {"maxTokens": 1024}}]},
+//!      "models": [{"id": "model-a", "contextWindow": 29000,
+//!                  "maxOutputTokens": 8192, "config": {"maxTokens": 8192}}]},
 //!     {"id": "judge", "kind": "openai-chat", "apiKeyEnv": "MODEL_KEY",
 //!      "baseUrl": "https://example.invalid/v1",
 //!      "models": [{"id": "model-a", "contextWindow": 1048576,
@@ -93,7 +101,7 @@
 //! }
 //! ```
 //!
-//! The run model above is declared for the scenarios' 16,000-token window and
+//! The run model above is declared for the scenarios' 29,000-token window and
 //! the same upstream model judges with its own 1,048,576-token window, so
 //! `--judge judge/model-a` reads a view of that size in one call.
 //!
@@ -163,7 +171,20 @@
 //!   after it is created and before the message. The runner resolves the
 //!   Session id into `params.sessionId`; a branch defaults to `main` the
 //!   way the methods treat it. A call that fails fails the run, and the
-//!   error names the method.
+//!   error names the method. Such a run stopped at `setup_failed`: it ran
+//!   before the message, so no request of it saw the configured text. It is
+//!   a failed run, enters no probe rate, and the report lists it apart from a
+//!   run that failed later.
+//! - `afterIdle` is the step a scenario runs after its first idle: every one
+//!   of the scenario's lines — `main` and the line a `calls` step opened —
+//!   with no `completed` compaction of this run is compacted with
+//!   `session.context.compact`, then each line is asked `request`. A
+//!   compaction that does not complete fails the run there, so the requests
+//!   after it are only judged when a compaction happened. A run the turn cap
+//!   stops before that step, or before a submitted request ran on its line,
+//!   is an incomplete fixture: it is neither failed nor judged and enters no
+//!   probe rate. A run its wall clock stops is failed, and a run that ends
+//!   idle is scored for what its export holds.
 //! - `sources` declares the event producers a scenario runs with and the
 //!   Session's subscription to them. One producer row is installed, only
 //!   when `sources` is present, and it declares every source through the
@@ -303,7 +324,7 @@ use rutis::Ctx;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::{OsStr, OsString},
     path::{Component, Path, PathBuf},
     process::Stdio,
@@ -321,8 +342,75 @@ const QUIET: Duration = Duration::from_secs(1);
 /// How long one `session.idle` call may take before its line counts as busy.
 const IDLE_WAIT: Duration = Duration::from_secs(1);
 /// How long a failed run waits for its cancelled siblings to settle before
-/// their futures are dropped (and their children's groups killed with them).
+/// their futures are dropped (and their children's groups killed with them),
+/// and how long the parent gives its read of a child's output after the child
+/// exited.
 const SETTLE_BOUND: Duration = Duration::from_secs(30);
+/// How long a run that stopped on its wall clock has for everything after that
+/// moment: the remaining `session.stop` calls, the deferred window read, the
+/// close, the Timeline export, the judge, and the child's server shutdown and
+/// join. The moment the wall clock stops fixes one deadline; every step runs
+/// under it, so the cleanup is bounded as a whole rather than step by step
+/// (model-prompts §8.1).
+const CLEANUP_BUDGET: Duration = Duration::from_secs(30);
+/// The budget of one run's judge phase: its first call, the retry without a
+/// temperature, and two re-asks, each under the product's own retry policy. A
+/// run that did not stop on its wall clock is not under [`CLEANUP_BUDGET`], so
+/// its judge phase has this budget instead, and the parent's hard bound on its
+/// child covers it.
+const JUDGE_PHASE_BUDGET: Duration = Duration::from_secs(600);
+/// How long a run's serve child may take before the parent kills its process
+/// group: the child's startup before its wall clock starts — its server, its
+/// connect, the plugin wait (60 s), the model and judge selections, the
+/// preflight and `session.create` — is twice the longest of those waits, so a
+/// child that never reaches its own cleanup has an end as well.
+const STARTUP_BOUND: Duration = Duration::from_secs(120);
+/// The cleanup grace a run with the `stall_cleanup` test hook gives its
+/// close, its server's shutdown and the parent's read of its child's output:
+/// short enough for a test to reach the bound without a real wait, and
+/// unsignalled by the product.
+const STALLED_CLEANUP_GRACE: Duration = Duration::from_millis(200);
+/// How long the parent waits for its read of a killed child's output to reach
+/// EOF: every writer in the child's group is dead, so the read ends at once;
+/// the grace only turns a stuck reader into a dropped one.
+const KILLED_READ_GRACE: Duration = Duration::from_secs(1);
+/// The outer hang guard of the tests that run a real serve child through the
+/// supervisor: a wait that never ends fails the guard instead of holding the
+/// suite.
+const SUBPROCESS_EVAL_GUARD: Duration = Duration::from_secs(60);
+/// How long a test hook's provider holds an answer, and how long the
+/// stdout-holder member keeps the write end open: past the guard, so a flow
+/// that waits on either fails its guard instead of passing.
+const HELD_PAST_GUARD: Duration = Duration::from_secs(90);
+const _: () = assert!(HELD_PAST_GUARD.as_secs() > SUBPROCESS_EVAL_GUARD.as_secs());
+
+/// The cleanup grace of a run's close, its server's shutdown and the parent's
+/// read of its child's output: [`SETTLE_BOUND`], or the test hook's shorter
+/// grace.
+fn settle_bound(stall_cleanup: bool) -> Duration {
+    if stall_cleanup {
+        STALLED_CLEANUP_GRACE
+    } else {
+        SETTLE_BOUND
+    }
+}
+
+/// The whole budget a run that stopped on its wall clock has for everything
+/// after that moment: [`CLEANUP_BUDGET`], the test hook's shorter grace, or
+/// the hook's given milliseconds.
+fn cleanup_budget(stall_cleanup: bool, given_ms: Option<u64>) -> Duration {
+    if stall_cleanup {
+        STALLED_CLEANUP_GRACE
+    } else {
+        given_ms.map_or(CLEANUP_BUDGET, Duration::from_millis)
+    }
+}
+
+/// The budget of one run's judge phase: [`JUDGE_PHASE_BUDGET`], or the test
+/// hook's given milliseconds.
+fn judge_phase_budget(given_ms: Option<u64>) -> Duration {
+    given_ms.map_or(JUDGE_PHASE_BUDGET, Duration::from_millis)
+}
 
 const JUDGE_SYSTEM: &str = "You check statements against the exported Timeline of a coding session. The Timeline is JSONL: a header line, one branch line per line of the Session, one event line per event, and an end line. A context/prepare or model/call event carries its request: addedMessages are the messages added since that line's previous request, with messageCount the whole request's count, and messages is the whole list when the history changed; every other field of the request appears in full only when it changed, and otherwise reads {\"unchanged\": true}. For each statement answer \"present\" when the run shows it and \"absent\" when it does not. Add the Timeline events that support the verdict as a short quote. Answer with a JSON array only, one object per statement: {\"id\": \"<statement id>\", \"verdict\": \"present|absent\", \"quote\": \"<Timeline evidence>\"}.";
 
@@ -384,7 +472,7 @@ pub(crate) fn tool_call(name: &str, arguments: &str) -> Value {
 /// credential, constrained by neither the sandbox nor the file-tool
 /// boundary. No run's Session offers it.
 const PLUGIN_TOOL: &str = "plugin";
-/// The tools a run's Sessions declare: the served assembly's whole set —
+/// The tools a run's Sessions mount: the served assembly's whole set —
 /// the workspace host's tools and every part's contributed tools — without
 /// `plugin`. A Session's mount list fixes what it declares, in this order;
 /// without one it declares every host tool and every tool a part registers
@@ -399,8 +487,12 @@ const PLUGIN_TOOL: &str = "plugin";
 /// stored profile, a scheduled launch, a branch). The `tools-product`
 /// preflight check compares the probe Session's declared set with this
 /// list at run time, so an addition or removal surfaces as a failed check,
-/// not a silent drift in what an evaluation offers the model under test;
-/// the fixture pin asserts the mounted order of the set.
+/// not a silent drift in the set the probes serve; the fixture pin asserts
+/// the mounted order of the static set. `web_search` is offered by Web's
+/// dynamic source only while a search service is usable: the probes are
+/// served a keyed stub adapter and declare it, while the service is cleared
+/// before the run's own Sessions, which mount the name but do not declare or
+/// call it, so their judged Timeline carries no source adoption.
 const RUN_TOOLS: &[&str] = &[
     "read",
     "write",
@@ -442,6 +534,51 @@ fn session_tools(scenario: &Scenario) -> Vec<String> {
         }
     }
     tools
+}
+
+/// Writes the `web` Settings source a probe home serves: a keyed search
+/// adapter, so the assembly declares `web_search` while `RUN_TOOLS` names it.
+/// The declaration reads this configuration only; nothing dials the endpoint,
+/// and no scenario calls `web_search`.
+fn configure_search(home: &Path) -> Result<()> {
+    private_directory(home)?;
+    std::fs::write(
+        home.join("web.json"),
+        serde_json::to_vec_pretty(&search_document())?,
+    )?;
+    Ok(())
+}
+
+/// The search service the probes are served. Its endpoint is a stub no run
+/// reaches; only the declaration reads it.
+fn search_document() -> Value {
+    json!({
+        "searchService": {
+            "kind": "brave",
+            "endpoint": "http://127.0.0.1:1/search",
+            "apiKey": "scenario-eval"
+        }
+    })
+}
+
+/// Replaces the running Settings service's user `web` source. The run's
+/// preflight probes are served [`search_document`]; the run's own Sessions are
+/// served an empty one, so a configured dynamic source does not add a
+/// configuration event to the judged Timeline.
+async fn update_web(client: &mut Client, document: Value) -> Result<()> {
+    let revision = client
+        .rpc("settings.read", json!({"source":"web","scope":"user"}))
+        .await
+        .map_err(|error| error.to_string())?["revision"]
+        .clone();
+    client
+        .rpc(
+            "settings.update",
+            json!({"source":"web","scope":"user","expectedRevision":revision,"document":document}),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// The offered tool names of a model request body, in declaration order.
@@ -603,8 +740,20 @@ const TEXTS: &[(&str, TextMember)] = &[
         TextMember::Rust(|overrides, text| overrides.branch_description = Some(text)),
     ),
     (
+        "timeline-tree/default-note",
+        TextMember::Rust(|overrides, text| overrides.default_note = Some(text)),
+    ),
+    (
+        "timeline-tree/former-default-note",
+        TextMember::Rust(|overrides, text| overrides.former_default_note = Some(text)),
+    ),
+    (
         "timeline-tree/roster-closing",
         TextMember::Rust(|overrides, text| overrides.roster_closing = Some(text)),
+    ),
+    (
+        "timeline-tree/user-default-note",
+        TextMember::Rust(|overrides, text| overrides.user_default_note = Some(text)),
     ),
     (
         "goal/objective",
@@ -666,7 +815,7 @@ async fn evaluate(options: &Options) -> Result<String> {
         }
     }
     let candidate = overrides(&options.texts)?;
-    let current = Overrides::default();
+    let baseline = overrides(&options.baseline)?;
     let scenarios = read_scenarios(&options.scenarios)?;
     // A live evaluation is isolated: the run's server must come from a
     // model configuration, which also names the credential its calls use.
@@ -693,7 +842,7 @@ async fn evaluate(options: &Options) -> Result<String> {
         .map(|(index, &(arm, scenario, run))| {
             let mut measured = instrument.clone();
             let overrides = match arm {
-                "current" => &current,
+                "current" => &baseline,
                 _ => &candidate,
             };
             let native = &native;
@@ -764,6 +913,7 @@ async fn rejudge(
         .map_err(|error| format!("--rejudge {}: {error}", source.display()))?;
     let saved = read_saved_runs(&source)?;
     let selected = select_saved(&saved, &options.select)?;
+    one_saved_texts_per_arm(&selected, "--rejudge")?;
     let scenarios = read_scenarios(&options.scenarios)?;
     let mut plan = Vec::with_capacity(selected.len());
     for run in selected {
@@ -808,6 +958,7 @@ async fn pooled(options: &Options, observe: impl Fn(&mut AgentBuilder)) -> Resul
         directories.push((source, read.len()));
         records.extend(read);
     }
+    one_texts_per_arm(&records, "--pool")?;
     let cancel = CancellationToken::new();
     let server = served(options, observe).await?;
     let resolved = async {
@@ -903,6 +1054,71 @@ fn read_pooled_runs(source: &Path, scenarios: &[Scenario]) -> Result<Vec<RunReco
         .collect()
 }
 
+/// A report states one configured set of texts for each arm, so the runs of
+/// one arm must all name the same set or all name none: a report that stated
+/// one set for runs whose texts only some of them recorded would be wrong.
+fn one_texts_per_arm(records: &[RunRecord], flag: &str) -> Result<()> {
+    for arm in ["current", "candidate"] {
+        one_text_set(
+            flag,
+            arm,
+            records
+                .iter()
+                .filter(|record| record.arm == arm)
+                .map(|record| record.texts.as_slice()),
+        )?;
+    }
+    Ok(())
+}
+
+/// The same rule over a rejudge source's saved runs, checked before any judge
+/// call.
+fn one_saved_texts_per_arm(runs: &[&SavedRun], flag: &str) -> Result<()> {
+    for arm in ["current", "candidate"] {
+        one_text_set(
+            flag,
+            arm,
+            runs.iter()
+                .filter(|run| run.arm == arm)
+                .map(|run| run.texts.as_slice()),
+        )?;
+    }
+    Ok(())
+}
+
+fn one_text_set<'a>(
+    flag: &str,
+    arm: &str,
+    runs: impl Iterator<Item = &'a [ConfiguredText]>,
+) -> Result<()> {
+    let mut recorded: Option<&'a [ConfiguredText]> = None;
+    let mut unrecorded = false;
+    for texts in runs {
+        if texts.is_empty() {
+            unrecorded = true;
+            continue;
+        }
+        if recorded.is_some_and(|recorded| recorded != texts) {
+            return Err(format!(
+                "{flag}: the {arm} runs recorded different texts; a report states one set per \
+                 arm, so pool evaluations that were given the same texts or report them \
+                 separately"
+            )
+            .into());
+        }
+        recorded.get_or_insert(texts);
+    }
+    if unrecorded && recorded.is_some() {
+        return Err(format!(
+            "{flag}: the {arm} runs mix records that name their configured texts with records \
+             written before the runner recorded them; a report states one set per arm, so report \
+             the runs that name their texts and the older runs separately"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// One pooled run as the report reads it: each probe keeps the kind its
 /// source recorded, checked against the scenario's, so a probe that changed
 /// kind since is refused rather than reinterpreted, and a record naming a
@@ -966,12 +1182,14 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
         arm: arm_name(&run.arm)?,
         scenario: run.scenario,
         run: run.run,
+        texts: run.texts,
         session: run.session,
         stop: stop_name(&run.stop)?,
         turns: run.turns,
         window: run.window,
         duration_ms: run.duration_ms,
         failed: run.failed,
+        incomplete: run.incomplete,
         judge_outcome: run.judge_outcome,
         error: run.error,
         judge_error: run.judge_error,
@@ -979,6 +1197,7 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
         judge_calls: run.judge_calls,
         temperature_dropped: run.temperature_dropped,
         decline_retries: run.decline_retries,
+        switch_retries: run.switch_retries,
         events: run.events,
         reply_calls: run.reply_calls,
         probes,
@@ -1046,7 +1265,9 @@ async fn rejudge_one(
     limits: JudgeWindow,
     cancel: &CancellationToken,
 ) -> Result<RunRecord> {
-    let judging = if saved.judge_outcome == JudgeOutcome::NotAsked {
+    let judging = if saved.incomplete.is_some() {
+        Judging::unobserved(scenario)
+    } else if saved.judge_outcome == JudgeOutcome::NotAsked {
         Judging::not_asked(scenario, saved.judge_error.clone())
     } else {
         let path = source
@@ -1063,12 +1284,14 @@ async fn rejudge_one(
         arm: arm_name(&saved.arm)?,
         scenario: saved.scenario.clone(),
         run: saved.run,
+        texts: saved.texts.clone(),
         session: saved.session.clone(),
         stop,
         turns: saved.turns,
         window: saved.window,
         duration_ms: saved.duration_ms,
         failed: failed(stop, saved.error.as_deref(), judging.outcome),
+        incomplete: saved.incomplete.clone(),
         judge_outcome: judging.outcome,
         error: saved.error.clone(),
         judge_error: judging.error,
@@ -1076,6 +1299,7 @@ async fn rejudge_one(
         judge_calls: judging.calls,
         temperature_dropped: Some(judging.temperature_dropped),
         decline_retries: saved.decline_retries,
+        switch_retries: saved.switch_retries,
         events: saved.events.clone(),
         reply_calls: saved.reply_calls.clone(),
         probes: judging.probes,
@@ -1102,6 +1326,10 @@ struct SavedRun {
     duration_ms: f64,
     #[serde(default)]
     failed: bool,
+    /// Why the harness never produced a request the scenario's probe reads;
+    /// `None` in a record written before the runner wrote it.
+    #[serde(default)]
+    incomplete: Option<String>,
     judge_outcome: JudgeOutcome,
     #[serde(default)]
     error: Option<String>,
@@ -1111,6 +1339,10 @@ struct SavedRun {
     judge_reasks: u32,
     #[serde(default)]
     judge_calls: Vec<JudgeCall>,
+    /// The texts the arm was given; empty in a record written before the
+    /// runner recorded them.
+    #[serde(default)]
+    texts: Vec<ConfiguredText>,
     /// `None` in a record written before the runner wrote this fact.
     #[serde(default)]
     temperature_dropped: Option<bool>,
@@ -1118,6 +1350,11 @@ struct SavedRun {
     /// before the runner recorded it.
     #[serde(default)]
     decline_retries: Option<u32>,
+    /// How many times the runner moved again after the target line answered
+    /// `unknown_branch`; `None` in a record written before the runner
+    /// recorded it.
+    #[serde(default)]
+    switch_retries: Option<u32>,
     /// The events the run published, as the run recorded them; `None` in a
     /// record written before the runner published any.
     #[serde(default)]
@@ -1215,6 +1452,12 @@ fn stop_name(stop: &str) -> Result<&'static str> {
         "idle" => Ok("idle"),
         "turns" => Ok("turns"),
         "seconds" => Ok("seconds"),
+        "setup_failed" => Ok("setup_failed"),
+        "switch_target_not_reached" => Ok("switch_target_not_reached"),
+        "switch_target_ended" => Ok("switch_target_ended"),
+        "switch_target_unknown" => Ok("switch_target_unknown"),
+        "switch_note_missing" => Ok("switch_note_missing"),
+        "switch_incomplete" => Ok("switch_incomplete"),
         "error" => Ok("error"),
         other => Err(format!("the saved run has an unknown stop {other}").into()),
     }
@@ -1249,8 +1492,64 @@ fn schedule(runs: usize, scenarios: usize) -> Vec<(&'static str, usize, usize)> 
     schedule
 }
 
+/// A test hook: a run's child stalls after writing its marker, and the
+/// parent's hard bound counts from that marker. The product and the ordinary
+/// tests leave it unset.
+struct Stall {
+    /// The arm and scenario whose child stalls; `None` stalls every run.
+    run: Option<(String, String)>,
+    point: StallPoint,
+    /// The parent's hard bound after the marker, in milliseconds.
+    bound_ms: u64,
+}
+impl Stall {
+    /// Where this run's child stalls, when the hook names it.
+    fn point_for(&self, arm: &str, scenario: &str) -> Option<StallPoint> {
+        match &self.run {
+            Some((arm_name, scenario_name)) => {
+                (arm_name == arm && scenario_name == scenario).then_some(self.point)
+            }
+            None => Some(self.point),
+        }
+    }
+}
+
+/// Where a stalled child stops: before it prints anything (a startup stall),
+/// after it printed its outcome (a child that cannot exit), after its run
+/// stopped on its wall clock (a cleanup that never settles), or before its
+/// served App Server's join finishes (a shutdown that never settles).
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum StallPoint {
+    BeforeOutcome,
+    AfterOutcome,
+    AfterWallClock,
+    AfterShutdown,
+}
+
+/// A test hook: how a run's child ends before its outcome line.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum BrokenOutcome {
+    /// It exits without printing a line.
+    Silent,
+    /// It prints a line that names the outcome but is not JSON.
+    Garbled,
+}
+
+/// A test hook: the run whose child ends before its outcome line.
+struct BrokenRun {
+    /// The arm and scenario of the run.
+    run: (String, String),
+    outcome: BrokenOutcome,
+}
+
 struct Options {
     scenarios: PathBuf,
+    /// The `--text ID --baseline FILE` pairs, in the order given: the text each
+    /// candidate replaces, put in place of the assembly's in the `current`
+    /// arm.
+    baseline: Vec<(String, Arc<str>)>,
     /// The `--text ID --candidate FILE` pairs, in the order given.
     texts: Vec<(String, Arc<str>)>,
     model: ModelId,
@@ -1284,6 +1583,31 @@ struct Options {
     /// child's standard output instead of detaching it, so only killing the
     /// child's group lets the parent's read reach EOF.
     fail_child_holds_stdout: bool,
+    /// A test hook: the run's child leaves a member of its group behind after
+    /// it exits; the bool makes that member inherit the child's standard
+    /// output, so only killing the group lets the parent's read reach EOF.
+    /// The member's pid goes beside the marker.
+    leave_member: Option<(bool, PathBuf)>,
+    /// A test hook: a timed-out run's Session close and its server's
+    /// shutdown never settle, to exercise a child that must still return its
+    /// outcome and free the worker that runs it.
+    stall_cleanup: bool,
+    /// A test hook: a timed-out run's whole cleanup budget, in milliseconds,
+    /// in place of [`CLEANUP_BUDGET`].
+    cleanup_budget_ms: Option<u64>,
+    /// A test hook: this scenario's Timeline export never completes, to
+    /// exercise a run that keeps its wall-clock stop without an export.
+    stall_export: Option<String>,
+    /// A test hook: a run's child stalls at `point` after writing its marker,
+    /// and the parent's hard bound counts from that marker, so a slow start
+    /// does not spend the bound under test.
+    stall: Option<Stall>,
+    /// A test hook: the run whose child ends before its outcome line,
+    /// silently or with a garbled one.
+    broken: Option<BrokenRun>,
+    /// A test hook: the judge phase's budget in milliseconds, in place of
+    /// [`JUDGE_PHASE_BUDGET`].
+    judge_budget_ms: Option<u64>,
     /// The default plugin configuration file both arms load; `None` serves
     /// the assembly without the product's plugins.
     defaults: Option<PathBuf>,
@@ -1309,10 +1633,12 @@ impl Options {
     /// absolute, as `session.create` requires of the cwd.
     fn parse_from(args: impl IntoIterator<Item = String>) -> Result<Self> {
         let usage = "usage: cargo run -p xtask -- scenario-eval --scenarios DIR \
-                     --text ID --candidate FILE [--text ID --candidate FILE]... \
+                     --text ID --baseline FILE --candidate FILE [--text ID \
+                     --baseline FILE --candidate FILE]... \
                      --model PROVIDER/MODEL --judge PROVIDER/MODEL --runs N \
                      --out DIR [--jobs N] [--model-config FILE] \
-                     [--defaults FILE]; a text named twice is an error, and a \
+                     [--defaults FILE]; every text names the baseline it replaces \
+                     and its candidate, a text named twice is an error, and a \
                      run whose view does not fit the judge's own declared \
                      window is unjudged, so a model configuration narrowed for \
                      the scenarios declares the judge under its own provider \
@@ -1327,12 +1653,16 @@ impl Options {
         // names another default configuration file.
         let mut args = args.into_iter();
         let (mut scenarios, mut out) = (None, None);
-        let (mut text, mut candidate, mut model, mut judge) = (None, None, None, None);
+        let (mut model, mut judge) = (None, None);
         let (mut runs, mut jobs, mut model_config, mut defaults) = (None, None, None, None);
         let mut rejudge = None;
         let mut select: Vec<String> = Vec::new();
         let mut pool: Vec<PathBuf> = Vec::new();
+        let mut baseline: Vec<(String, Arc<str>)> = Vec::new();
         let mut texts: Vec<(String, Arc<str>)> = Vec::new();
+        // The pair whose files are being read: each `--text ID` opens one and
+        // the two roles fill it, in either order.
+        let mut pending = PendingText::default();
         while let Some(flag) = args.next() {
             let value = args.next().ok_or(format!("{flag} requires a value"))?;
             match flag.as_str() {
@@ -1350,23 +1680,43 @@ impl Options {
                 }
                 "--pool" => pool.push(PathBuf::from(value)),
                 "--text" => {
-                    if let Some(pending) = &text {
-                        return Err(format!("--text {pending} has no --candidate").into());
+                    if let Some(open) = &pending.id {
+                        return Err(
+                            format!("--text {open} has no --baseline and no --candidate").into(),
+                        );
                     }
-                    if texts.iter().any(|(given, _)| *given == value) {
+                    if baseline.iter().any(|(given, _)| *given == value)
+                        || texts.iter().any(|(given, _)| *given == value)
+                    {
                         return Err(format!("--text {value} is named twice").into());
                     }
-                    match candidate.take() {
-                        Some(prompt) => texts.push((value, prompt)),
-                        None => text = Some(value),
-                    }
+                    pending.id = Some(value);
                 }
-                "--candidate" => {
-                    let prompt = candidate_prompt(Path::new(&value))?;
-                    match text.take() {
-                        Some(id) => texts.push((id, prompt)),
-                        None if candidate.is_none() => candidate = Some(prompt),
-                        None => return Err("--candidate has no --text".into()),
+                "--baseline" | "--candidate" => {
+                    let is_baseline = flag == "--baseline";
+                    let filled = if is_baseline {
+                        pending.baseline.is_some()
+                    } else {
+                        pending.candidate.is_some()
+                    };
+                    if pending.id.is_none()
+                        && (pending.baseline.is_some() || pending.candidate.is_some())
+                    {
+                        return Err(format!("{flag} has no --text").into());
+                    }
+                    if filled {
+                        return Err(format!("{flag} is given twice for one --text").into());
+                    }
+                    let text = candidate_prompt(Path::new(&value), &flag)?;
+                    if is_baseline {
+                        pending.baseline = Some(text);
+                    } else {
+                        pending.candidate = Some(text);
+                    }
+                    if pending.baseline.is_some() && pending.candidate.is_some() {
+                        let id = pending.id.take().expect("a filled pair names its text");
+                        baseline.push((id.clone(), pending.baseline.take().expect("filled")));
+                        texts.push((id, pending.candidate.take().expect("filled")));
                     }
                 }
                 "--model" => model = Some(target(&value)?),
@@ -1380,11 +1730,35 @@ impl Options {
                 _ => return Err(usage.into()),
             }
         }
-        if let Some(text) = &text {
-            return Err(format!("--text {text} has no --candidate").into());
+        if let Some(open) = pending.id {
+            let missing = if pending.baseline.is_none() {
+                "--baseline"
+            } else {
+                "--candidate"
+            };
+            return Err(format!("--text {open} has no {missing}").into());
         }
-        if candidate.is_some() {
-            return Err("--candidate has no --text".into());
+        for (role, flag) in [
+            (&pending.baseline, "--baseline"),
+            (&pending.candidate, "--candidate"),
+        ] {
+            if role.is_some() {
+                return Err(format!("{flag} has no --text").into());
+            }
+        }
+        for (id, candidate) in &texts {
+            let replaced = &baseline
+                .iter()
+                .find(|(given, _)| given == id)
+                .expect("every pair carries its baseline")
+                .1;
+            if replaced == candidate {
+                return Err(format!(
+                    "--text {id}: the baseline and the candidate are the same text, so the \
+                     evaluation would compare the text with itself"
+                )
+                .into());
+            }
         }
         if texts.is_empty() && rejudge.is_none() && pool.is_empty() {
             return Err(usage.into());
@@ -1410,7 +1784,7 @@ impl Options {
         if finished && (!texts.is_empty() || runs.is_some() || defaults.is_some()) {
             return Err(
                 "--rejudge and --pool read finished evaluations' saved runs: --text, \
-                 --candidate, --runs and --defaults belong to a new evaluation"
+                 --baseline, --candidate, --runs and --defaults belong to a new evaluation"
                     .into(),
             );
         }
@@ -1433,6 +1807,7 @@ impl Options {
             .map_err(|error| format!("--out {}: {error}", out.display()))?;
         Ok(Self {
             scenarios,
+            baseline,
             texts,
             model,
             judge,
@@ -1449,11 +1824,42 @@ impl Options {
             extra_tool: false,
             fail_child: None,
             fail_child_holds_stdout: false,
+            leave_member: None,
+            stall_cleanup: false,
+            cleanup_budget_ms: None,
+            stall_export: None,
+            stall: None,
+            broken: None,
+            judge_budget_ms: None,
             rejudge,
             select,
             pool,
         })
     }
+
+    /// The texts one arm puts in place of the assembly's, in the order the
+    /// evaluation was given them: `current` is each pair's baseline and
+    /// `candidate` its candidate.
+    fn arm_texts(&self, arm: &str) -> Vec<ConfiguredText> {
+        let texts = if arm == "current" {
+            &self.baseline
+        } else {
+            &self.texts
+        };
+        texts
+            .iter()
+            .map(|(id, text)| ConfiguredText::of(id, text))
+            .collect()
+    }
+}
+
+/// One `--text ID` pair while its files are read: each `--text ID` opens the
+/// pair and `--baseline` and `--candidate` fill it, in either order.
+#[derive(Default)]
+struct PendingText {
+    id: Option<String>,
+    baseline: Option<Arc<str>>,
+    candidate: Option<Arc<str>>,
 }
 
 /// A path from the environment: the TypeScript plugin rows run in Node,
@@ -1570,11 +1976,11 @@ fn refuse_output_inside_sources(
     Ok(())
 }
 
-fn candidate_prompt(path: &Path) -> Result<Arc<str>> {
+fn candidate_prompt(path: &Path, flag: &str) -> Result<Arc<str>> {
     let bytes =
-        std::fs::read(path).map_err(|error| format!("--candidate {}: {error}", path.display()))?;
+        std::fs::read(path).map_err(|error| format!("{flag} {}: {error}", path.display()))?;
     let text = String::from_utf8(bytes)
-        .map_err(|_| format!("--candidate {}: not UTF-8 text", path.display()))?;
+        .map_err(|_| format!("{flag} {}: not UTF-8 text", path.display()))?;
     Ok(Arc::from(text))
 }
 
@@ -1670,9 +2076,363 @@ struct ScenarioFile {
     events: Vec<EventSpec>,
     #[serde(default)]
     steers: Vec<Steer>,
+    /// The mid-run move of the default branch, when the scenario runs one.
+    #[serde(default)]
+    switch: Option<Switch>,
+    /// The mid-run moves of the default branch, in order, when the scenario
+    /// runs more than one: the first waits for its target line's first
+    /// `turn/start` like `switch`, and each later one moves right after the
+    /// one before it. `switch` stays the one-move spelling the committed
+    /// scenarios use.
+    #[serde(default)]
+    moves: Vec<Switch>,
     budget: Budget,
+    /// The step after the run's first idle, when the scenario runs one.
+    #[serde(default)]
+    after_idle: Option<AfterIdle>,
     probes: Vec<Probe>,
 }
+
+/// A scenario's mid-run move of the Session's default branch: at the
+/// target line's first `turn/start`, the runner calls
+/// `session.branch_set_default` and then sends the next input. A scenario
+/// without the step runs as before.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Switch {
+    /// The line to move to.
+    pub(crate) to: SwitchTarget,
+    /// The input sent after the move. It carries no mode and is queued, like
+    /// the operator's first message.
+    pub(crate) message: String,
+    /// The line the next input names. Omitted, the input lands on the line
+    /// that just became the default branch; `main` names the root after a
+    /// switch.
+    #[serde(default)]
+    pub(crate) branch_id: Option<String>,
+    /// An input sent to the line this move moved away from, after the move
+    /// and the next input. The note a move writes goes in as `append` input,
+    /// and an append input never starts a turn, so an idle line that lost the
+    /// default branch needs this input to answer at all.
+    #[serde(default)]
+    pub(crate) former_message: Option<String>,
+}
+
+/// The line a [`Switch`] moves to, by role or by id.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum SwitchTarget {
+    Role(SwitchRole),
+    Id(String),
+}
+
+/// The role a [`SwitchTarget`] names. A tool line is a line the branch tool
+/// opened; the latest one is the line most recently opened that way. A user
+/// line is the line the scenario's last `session.branch_create` call opened.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SwitchRole {
+    LatestToolLine,
+    UserLine,
+}
+
+/// How many further moves a switch makes while the target line is not
+/// registered yet (`unknown_branch`): its first input starts the line's first
+/// turn before the line is marked ready.
+const UNKNOWN_BRANCH_RETRIES: u32 = 3;
+
+/// The `at` a `session.branch_create` call writes to start where the Session
+/// did: `drive` replaces it with the sequence `session.create` returned.
+const SESSION_OPEN: &str = "session_open";
+
+/// The tool line a `branch/create` notice opened: the branch tool's line, which
+/// [`SwitchRole::LatestToolLine`] names. Any other notice answers `None`.
+fn tool_line(event: &Value) -> Option<&str> {
+    if event["type"] != "branch" || event["name"] != "create" {
+        return None;
+    }
+    if event["data"]["source"]["kind"] != "tool" {
+        return None;
+    }
+    event["data"]["branch"].as_str()
+}
+
+/// A [`Switch`] as the run drives it: the target the role currently names,
+/// kept current while the switch is pending and that target has not started.
+struct PendingSwitch {
+    switch: Switch,
+    line: Option<String>,
+    /// The target line's first `turn/start` has been seen: the move and the
+    /// next input happen now, or on a retry while the line is not ready. A
+    /// chained move is due once the input before it has been consumed.
+    triggered: bool,
+    /// The further attempts left while the move answers `unknown_branch`.
+    retries_left: u32,
+    /// `session.branch_set_default` answered: the follow-ups this move sends
+    /// wait for the notes it writes on the lines that answer them.
+    moved: bool,
+    /// The line the move left once it answered.
+    former: Option<String>,
+    /// The note the move wrote on the target line, and on the line it left.
+    target_note: Option<NoteSeen>,
+    former_note: Option<NoteSeen>,
+    /// A line the move owes a note ended before it wrote one: the line can
+    /// answer no follow-up.
+    ended: Option<(String, String)>,
+    /// The input the move before this one sent, and the line that took it: a
+    /// chained move fires once that line consumed it.
+    previous: Option<(String, String)>,
+}
+impl PendingSwitch {
+    /// `chained` switches do not wait for their target's first `turn/start`:
+    /// a second move runs on a line that may have started its first turn
+    /// before the run reached it. Such a move fires once the input the move
+    /// before it sent has been consumed, so the note the previous move wrote
+    /// on its target cannot be retired before that target answers.
+    fn new(switch: Switch, user_line: Option<&str>, chained: bool) -> Self {
+        let line = match &switch.to {
+            SwitchTarget::Id(id) => Some(id.clone()),
+            SwitchTarget::Role(SwitchRole::UserLine) => user_line.map(str::to_owned),
+            SwitchTarget::Role(SwitchRole::LatestToolLine) => None,
+        };
+        Self {
+            switch,
+            line,
+            triggered: chained,
+            retries_left: UNKNOWN_BRANCH_RETRIES,
+            moved: false,
+            former: None,
+            target_note: None,
+            former_note: None,
+            ended: None,
+            previous: None,
+        }
+    }
+
+    /// Reads one notice: a tool `branch/create` renames the role's target, the
+    /// target's first `turn/start` is when a single move and the next input
+    /// happen, a `branch:line` message is a note the move wrote, and a chained
+    /// move moves on when the input before it has been consumed. Once that
+    /// turn has started the target is fixed: a line opened afterwards has its
+    /// own purpose, and the move and the input after it stay with the line
+    /// that started.
+    fn notice(&mut self, branch: &str, event: &Value) {
+        if event["type"] == "branch" && matches!(event["name"].as_str(), Some("end" | "ended")) {
+            if Some(branch) == self.line.as_deref() || self.former.as_deref() == Some(branch) {
+                self.ended = Some((
+                    branch.to_owned(),
+                    format!("line {branch} ended before its move note was written"),
+                ));
+            }
+            if self
+                .previous
+                .as_ref()
+                .is_some_and(|(line, _)| line == branch)
+            {
+                self.previous = None;
+                self.triggered = true;
+            }
+            return;
+        }
+        if event["type"] == "input"
+            && event["name"] == "consumed"
+            && let Some((_, input)) = &self.previous
+            && event["data"]["input_id"].as_str() == Some(input.as_str())
+        {
+            self.previous = None;
+            self.triggered = true;
+            return;
+        }
+        if let Some(note) = branch_line_note(event, branch) {
+            if Some(branch) == self.line.as_deref() {
+                self.target_note = Some(note);
+            } else if self.former.as_deref() == Some(branch) {
+                self.former_note = Some(note);
+            }
+            return;
+        }
+        if let Some(line) = tool_line(event) {
+            if (!self.triggered || self.line.is_none())
+                && matches!(
+                    &self.switch.to,
+                    SwitchTarget::Role(SwitchRole::LatestToolLine)
+                )
+            {
+                self.line = Some(line.to_owned());
+            }
+            return;
+        }
+        if event["type"] == "turn"
+            && event["name"] == "start"
+            && self.line.as_deref() == Some(branch)
+        {
+            self.triggered = true;
+        }
+    }
+
+    /// Activates a chained move: it fires once the input the move before it
+    /// sent is consumed, so that move's target answers with its note in
+    /// effect. A move to the latest tool line takes the line the run has
+    /// recorded; one without a line keeps waiting for a `branch/create`
+    /// notice, as a single move does. A Session that named no input (the
+    /// move's answer carried no id) leaves the move due at once.
+    fn activated(&mut self, latest_tool_line: Option<&str>, previous: Option<(String, String)>) {
+        self.triggered = previous.is_none();
+        self.previous = previous;
+        if self.line.is_none()
+            && matches!(
+                &self.switch.to,
+                SwitchTarget::Role(SwitchRole::LatestToolLine)
+            )
+        {
+            self.line = latest_tool_line.map(str::to_owned);
+        }
+    }
+
+    /// The notes this move's follow-ups need: one for each line that answers
+    /// one, when that line takes the move's role and is not the root, which
+    /// writes no note (design §12.1).
+    fn notes(&self, target: &str, former: &str) -> Vec<(String, bool, String)> {
+        let mut notes = Vec::new();
+        let message_line = self.switch.branch_id.as_deref().unwrap_or(target);
+        if message_line == target && target != "main" {
+            notes.push((target.to_owned(), true, former.to_owned()));
+        } else if message_line == former && former != "main" {
+            notes.push((former.to_owned(), false, target.to_owned()));
+        }
+        if self.switch.former_message.is_some() && former != "main" {
+            notes.push((former.to_owned(), false, target.to_owned()));
+        }
+        notes
+    }
+
+    /// Whether the note the move wrote on `line` is in: the role it states and
+    /// the participant it names.
+    fn saw_note(&self, line: &str, default: bool, other: &str) -> bool {
+        let note = if Some(line) == self.line.as_deref() {
+            &self.target_note
+        } else if self.former.as_deref() == Some(line) {
+            &self.former_note
+        } else {
+            return false;
+        };
+        note.as_ref().is_some_and(|note| {
+            note.default == default && note.text.contains(&note_marker(default, other))
+        })
+    }
+}
+
+/// A move's status note as a line published it: whether the line became the
+/// default, and the note's text, which names the other participant.
+struct NoteSeen {
+    default: bool,
+    text: String,
+}
+
+/// The sentence a move's note states for role `default` and participant
+/// `other`: the fixed words around the line id (design §12.1).
+fn note_marker(default: bool, other: &str) -> String {
+    if default {
+        format!("switched from line {other}.")
+    } else {
+        format!("moved from this line to line {other}.")
+    }
+}
+
+/// The status note a `branch:line` message carries for `branch`: the role it
+/// states and its text. A message without that block, or for another line,
+/// answers `None` (design §5, §12.1).
+fn branch_line_note(event: &Value, branch: &str) -> Option<NoteSeen> {
+    if event["type"] != "input" || event["name"] != "message" {
+        return None;
+    }
+    for block in event["data"]["blocks"].as_array()? {
+        if block["key"] != "branch:line" {
+            continue;
+        }
+        let text = block["text"].as_str()?;
+        let tag = text.split_once('>')?.0;
+        if note_attribute(tag, "branch") != Some(branch) {
+            continue;
+        }
+        let default = match note_attribute(tag, "default") {
+            Some("true") => true,
+            Some("false") => false,
+            _ => continue,
+        };
+        return Some(NoteSeen {
+            default,
+            text: text.to_owned(),
+        });
+    }
+    None
+}
+
+/// One attribute of a `<dim-branch-line ...>` tag.
+fn note_attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    tag.split(' ').find_map(|attribute| {
+        let (key, value) = attribute.split_once("=\"")?;
+        (key == name).then(|| value.strip_suffix('"')).flatten()
+    })
+}
+
+/// One follow-up a move sent and the note its line must have written before
+/// the request that consumes it: the line, the input the Session wrote, and
+/// the note's role and other participant.
+struct SwitchNote {
+    line: String,
+    input: String,
+    default: bool,
+    other: String,
+}
+
+/// The run's switch follow-ups and the notes they must follow: a move waits
+/// for each note before it submits the input its line answers, and the run is
+/// not judged when a request consumed an input without its note. Every input
+/// the move submitted is a receipt like the message's, whether or not its line
+/// owes a note.
+#[derive(Default)]
+struct SwitchNotes {
+    expected: Vec<SwitchNote>,
+    inputs: Vec<FixtureInput>,
+}
+
+/// The step a scenario runs after its first idle: every line that did not
+/// compact on its own is compacted by the runner, and each line then answers
+/// one request that sees the compacted context (Timeline branches §12.3). The
+/// lines are the Session's `main` and the one the `calls` step opened, and
+/// what a step does with them is fixed: a line without a completed compaction
+/// of this run gets `session.context.compact`, then both lines get `request`.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AfterIdle {
+    pub(crate) request: String,
+}
+
+/// One input the runner submitted on the fixture's behalf. A run that its own
+/// budget stopped before a request carried the input to the model did not run
+/// the fixture its probe reads: it is incomplete, not scored (model-prompts
+/// §8.1).
+struct FixtureInput {
+    /// What the input is, named in the report when it was not observed.
+    what: &'static str,
+    /// The line the input was submitted to.
+    line: String,
+    /// The input id the Session answered; `None` when its reply named none.
+    input: Option<String>,
+}
+
+/// The scenario's own message.
+const MESSAGE_INPUT: &str = "the message";
+/// One of the requests the step after the first idle submitted.
+const AFTER_IDLE_INPUT: &str = "the request after the idle";
+/// The input a move sends to the line it moved to.
+const SWITCH_INPUT: &str = "the switch's follow-up";
+/// The input a move sends to the line it moved away from.
+const FORMER_INPUT: &str = "the former line's request after the switch";
+/// A steer the fixture scheduled.
+const STEER_INPUT: &str = "the steer";
+
 /// One source a scenario declares through the `eventHub` service, and
 /// optionally subscribes its Session's `main` branch to (EventHub design A.1,
 /// A.3). Without `subscribe` the source starts unsubscribed, for a scenario
@@ -1740,6 +2500,10 @@ pub(crate) struct EventSpec {
     #[serde(skip)]
     pub(crate) declared_mode: InputMode,
 }
+/// One call the runner makes before the message. A `session.branch_create`
+/// whose `parentBranchId` is `main` may set `at` to `"session_open"` instead
+/// of a sequence: the runner replaces it with the sequence `session.create`
+/// returned, so the line starts where the Session did.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Call {
@@ -1802,7 +2566,16 @@ pub(crate) struct Scenario {
     pub(crate) sources: Vec<Source>,
     pub(crate) events: Vec<EventSpec>,
     pub(crate) steers: Vec<Steer>,
+    /// The mid-run move of the default branch, when the scenario runs one.
+    #[serde(default)]
+    pub(crate) switch: Option<Switch>,
+    /// The mid-run moves after `switch`, in order.
+    #[serde(default)]
+    pub(crate) moves: Vec<Switch>,
     pub(crate) budget: Budget,
+    /// The step after the run's first idle, when the scenario runs one.
+    #[serde(default)]
+    pub(crate) after_idle: Option<AfterIdle>,
     probes: Vec<Probe>,
 }
 
@@ -1866,12 +2639,64 @@ fn into_scenario(
             }
         }
     }
+    for switch in raw.switch.iter().chain(&raw.moves) {
+        if switch.message.trim().is_empty() {
+            return Err("a switch needs the input to send after the move".into());
+        }
+        if let SwitchTarget::Id(id) = &switch.to
+            && id.trim().is_empty()
+        {
+            return Err("a switch target id is empty".into());
+        }
+        if switch
+            .branch_id
+            .as_deref()
+            .is_some_and(|branch| branch.trim().is_empty())
+        {
+            return Err("a switch names an empty branch for its input".into());
+        }
+        if switch
+            .former_message
+            .as_deref()
+            .is_some_and(|message| message.trim().is_empty())
+        {
+            return Err("a switch's former-default input is empty".into());
+        }
+    }
+    if !raw
+        .calls
+        .iter()
+        .any(|call| call.method == "session.branch_create")
+        && raw
+            .switch
+            .iter()
+            .chain(&raw.moves)
+            .any(|switch| matches!(switch.to, SwitchTarget::Role(SwitchRole::UserLine)))
+    {
+        return Err(
+            "a switch to the user line needs a session.branch_create call before the message"
+                .into(),
+        );
+    }
     for call in &raw.calls {
         if call.method.trim().is_empty() {
             return Err("a call needs a method".into());
         }
         if !call.params.is_object() && !call.params.is_null() {
             return Err(format!("call {}: params must be an object", call.method));
+        }
+        if call.params.get("at").and_then(Value::as_str) == Some(SESSION_OPEN) {
+            if call.method != "session.branch_create" {
+                return Err(format!(
+                    "call {}: {SESSION_OPEN} is only for session.branch_create",
+                    call.method
+                ));
+            }
+            if call.params.get("parentBranchId").and_then(Value::as_str) != Some("main") {
+                return Err(format!(
+                    "session.branch_create: {SESSION_OPEN} needs parentBranchId main"
+                ));
+            }
         }
     }
     if raw.sources.is_empty() && !raw.events.is_empty() {
@@ -1983,6 +2808,9 @@ fn into_scenario(
         sources: raw.sources,
         events: raw.events,
         steers: raw.steers,
+        switch: raw.switch,
+        moves: raw.moves,
+        after_idle: raw.after_idle,
         budget: raw.budget,
         probes: raw.probes,
     })
@@ -1995,8 +2823,18 @@ struct RunRecord {
     arm: &'static str,
     scenario: String,
     run: usize,
+    /// The texts the arm was given, in the order the evaluation was given
+    /// them: each is a configured input in place of the text its id names. A
+    /// record states what the arm was configured with, not that every text was
+    /// emitted.
+    texts: Vec<ConfiguredText>,
     session: Option<String>,
-    /// `idle`, `turns`, `seconds` or `error`.
+    /// `idle`, `turns`, `seconds`, `setup_failed`,
+    /// `switch_target_not_reached`, `switch_target_ended`,
+    /// `switch_target_unknown`, `switch_note_missing`, `switch_incomplete` or
+    /// `error`. `setup_failed` is the `calls` step before the first submit: no
+    /// model request of that run saw the configured text (Timeline branches
+    /// §12.3).
     stop: &'static str,
     turns: u32,
     window: Option<f64>,
@@ -2004,6 +2842,10 @@ struct RunRecord {
     /// Whether the run is a failed run, set once when the record is built
     /// (model-prompts §8.1).
     failed: bool,
+    /// Why the harness never produced a request the scenario's probe reads,
+    /// when it did not: the run is neither failed nor judged, enters no probe
+    /// rate, and does not count toward the floor.
+    incomplete: Option<String>,
     /// How the run's judging ended (model-prompts §8.1).
     judge_outcome: JudgeOutcome,
     error: Option<String>,
@@ -2021,6 +2863,10 @@ struct RunRecord {
     /// How many declines the runner sent again after `question_not_pending`;
     /// `None` in a record written before the runner recorded it.
     decline_retries: Option<u32>,
+    /// How many times the runner moved again after the target line answered
+    /// `unknown_branch`; `None` in a record written before the runner
+    /// recorded it.
+    switch_retries: Option<u32>,
     /// One entry per event the run published, in order: the receipt EventHub
     /// answered (EventHub design A.2). A receipt that is not `delivered`
     /// fails the run and is recorded here as it came.
@@ -2043,11 +2889,44 @@ impl RunRecord {
             )
     }
     /// Whether the run is judged (model-prompts §8.1): it failed neither on
-    /// its own nor on its judging, and the judge answered every call with
-    /// usable verdicts. Only such a run counts toward the floor.
+    /// its own nor on its judging, the fixture was observed, and the judge
+    /// answered every call with usable verdicts. Only such a run counts
+    /// toward the floor.
     fn judged(&self) -> bool {
-        !self.failed && self.judge_outcome == JudgeOutcome::Judged
+        !self.failed && self.incomplete.is_none() && self.judge_outcome == JudgeOutcome::Judged
     }
+}
+
+/// One text an arm was given: the id naming the text it replaced, the text's
+/// length in bytes, and a fingerprint of its bytes, so a report states which
+/// configured text each arm ran without carrying the text itself.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfiguredText {
+    id: String,
+    bytes: usize,
+    fingerprint: String,
+}
+impl ConfiguredText {
+    fn of(id: &str, text: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            bytes: text.len(),
+            fingerprint: fingerprint(text),
+        }
+    }
+}
+
+/// A text's fingerprint: FNV-1a 64 over its bytes, in lowercase hex. It tells
+/// the texts an evaluation compares apart in its records and report; it is not
+/// a security digest.
+fn fingerprint(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2074,8 +2953,9 @@ enum JudgeOutcome {
     /// The judge answered every call, and its verdicts are usable.
     Judged,
     /// A judge call failed: a window overflow, a transport or an HTTP error,
-    /// or a reply cut off at its output cap, on the first call, on its retry,
-    /// or on a re-ask.
+    /// a reply cut off at its output cap, or a call that did not finish
+    /// within the cleanup grace after a timed-out run, on the first call, on
+    /// its retry, or on a re-ask.
     CallFailed,
     /// The judge was never asked: the run left no export, the profile has no
     /// model host for the judge, or the run failed before the judge ran.
@@ -2083,6 +2963,10 @@ enum JudgeOutcome {
     /// The judge was never asked: the view of the run's export does not fit
     /// the judge's budget. The run is unjudged.
     Unfit,
+    /// The judge was never asked: the harness stopped the run before a request
+    /// its probes read existed, so the run is an incomplete fixture, not a
+    /// scored one.
+    Unobserved,
     /// The judge answered every call and gave no usable verdicts after the
     /// re-asks.
     Unreadable,
@@ -2134,6 +3018,14 @@ impl JudgeCall {
             thinking_bytes: 0,
         }
     }
+}
+
+/// A stalled child's marker and where it stalls.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChildStall {
+    point: StallPoint,
+    marker: PathBuf,
 }
 
 /// One run's serve child: the App Server of the run, served in its own
@@ -2207,6 +3099,37 @@ struct ChildParams {
     /// child's group lets the parent's read reach EOF.
     #[serde(default)]
     fail_child_holds_stdout: bool,
+    /// A test hook: this child leaves a member of its group behind after it
+    /// exits; the bool makes that member inherit this child's standard
+    /// output, so only killing the group lets the parent's read reach EOF.
+    /// The member's pid goes beside the marker.
+    #[serde(default)]
+    leave_member: Option<(bool, PathBuf)>,
+    /// A test hook: a timed-out run's Session close and its server's
+    /// shutdown never settle, to exercise a child that must still return its
+    /// outcome and free the worker that runs it.
+    #[serde(default)]
+    stall_cleanup: bool,
+    /// A test hook: a timed-out run's whole cleanup budget in milliseconds, in
+    /// place of [`CLEANUP_BUDGET`].
+    #[serde(default)]
+    cleanup_budget_ms: Option<u64>,
+    /// A test hook: this scenario's Timeline export never completes, to
+    /// exercise a run that keeps its wall-clock stop without an export.
+    #[serde(default)]
+    stall_export: Option<String>,
+    /// A test hook: where this child stalls, the marker it writes, and the
+    /// parent's hard bound after that marker.
+    #[serde(default)]
+    stall: Option<ChildStall>,
+    /// A test hook: this child ends before its outcome line, silently or with
+    /// a line that is not JSON.
+    #[serde(default)]
+    broken: Option<BrokenOutcome>,
+    /// A test hook: the judge phase's budget in milliseconds, in place of
+    /// [`JUDGE_PHASE_BUDGET`].
+    #[serde(default)]
+    judge_budget_ms: Option<u64>,
     /// The native probe's declared set: the assembly served without the
     /// plugin defaults. Each run's `tools-product` check reads its own
     /// declared set against it.
@@ -2244,11 +3167,18 @@ struct ChildOutcome {
     view: Option<String>,
     session: Option<String>,
     stop: String,
+    /// The run stopped because its wall-clock budget ran out.
+    timed_out: bool,
     turns: u32,
     window: Option<f64>,
     duration_ms: f64,
     decline_retries: u32,
+    switch_retries: u32,
     error: Option<String>,
+    /// Why the harness never produced a request the scenario's probe reads;
+    /// `None` when the fixture was observed.
+    #[serde(default)]
+    incomplete: Option<String>,
     judge_outcome: JudgeOutcome,
     judge_error: Option<String>,
     judge_reasks: u32,
@@ -2264,6 +3194,8 @@ struct ChildOutcome {
     /// The reasoning effort and service tier the run's requests carried.
     model_configuration: Option<(Option<String>, Option<String>)>,
     judge_configuration: Option<(Option<String>, Option<String>)>,
+    /// The judge's declared window and output cap: `(0, 0)` when the child
+    /// never resolved them, as a run the parent killed has not.
     judge_window: (u64, u64),
 }
 
@@ -2276,11 +3208,14 @@ fn harness_outcome(error: String, preflight: Vec<PreflightCheck>) -> ChildOutcom
         view: None,
         session: None,
         stop: "error".into(),
+        timed_out: false,
         turns: 0,
         window: None,
         duration_ms: 0.,
         decline_retries: 0,
+        switch_retries: 0,
         error: None,
+        incomplete: None,
         judge_outcome: JudgeOutcome::NotAsked,
         judge_error: None,
         judge_reasks: 0,
@@ -2313,6 +3248,11 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
     augment_model_config(&params.model_config, &preflight_url, &config_path)?;
     let mut params = params;
     params.model_config = config_path;
+    if let Some(stall) = &params.stall
+        && stall.point == StallPoint::BeforeOutcome
+    {
+        stall_here(stall, "before its outcome")?;
+    }
     // A test hook: the test writes `marker` once the sibling arm's model
     // call is held; this child waits for that event, bounded, then exits
     // non-zero. The wait's outcome is printed on a line of its own, so the
@@ -2374,10 +3314,62 @@ pub(crate) async fn serve_entry(params_path: Option<String>) -> Result<()> {
         );
         return Ok(());
     }
+    if let Some((holds_stdout, marker)) = &params.leave_member {
+        // A test hook: a member of this child's group outlives it; with
+        // `holds_stdout` it keeps the child's standard output open, so the
+        // parent's read of the outcome can only end at its bound. Its pid is
+        // appended beside the marker for the test to check the group is gone.
+        let mut member = std::process::Command::new("sleep");
+        member
+            .arg(HELD_PAST_GUARD.as_secs().to_string())
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .stdout(if *holds_stdout {
+                Stdio::inherit()
+            } else {
+                Stdio::null()
+            });
+        let member = member.spawn().map_err(|error| {
+            format!("the leaving-member test hook cannot start its member: {error}")
+        })?;
+        use std::io::Write as _;
+        let mut recorded = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(marker.with_extension("member"))
+            .map_err(|error| {
+                format!("the leaving-member test hook cannot record its member: {error}")
+            })?;
+        writeln!(recorded, "{}", member.id()).map_err(|error| {
+            format!("the leaving-member test hook cannot record its member: {error}")
+        })?;
+    }
+    if let Some(broken) = params.broken {
+        // A test hook: the child ends before its outcome line, with the
+        // leaving member — if any — still holding its standard output.
+        match broken {
+            BrokenOutcome::Silent => {}
+            BrokenOutcome::Garbled => println!("{{\"judgeOutcome\": "),
+        }
+        return Ok(());
+    }
     println!(
         "{}",
         serde_json::to_string(&child_outcome(&params, &provider).await)?
     );
+    if let Some(stall) = &params.stall
+        && stall.point == StallPoint::AfterOutcome
+    {
+        stall_here(stall, "after its outcome")?;
+    }
+    Ok(())
+}
+
+/// The test hook's stall: the marker the parent's hard bound counts from,
+/// then a wait no timer of the child's ends.
+fn stall_here(stall: &ChildStall, note: &str) -> Result<()> {
+    std::fs::write(&stall.marker, note)?;
+    std::thread::sleep(Duration::from_secs(600));
     Ok(())
 }
 
@@ -2412,6 +3404,10 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
         js_runtime: params.js_runtime.clone(),
         boundary: params.boundary.clone(),
         plugin_tools: false,
+        stall_cleanup: params.stall_cleanup,
+        cleanup_budget_ms: params.cleanup_budget_ms,
+        stall_export: params.stall_export.clone(),
+        judge_budget_ms: params.judge_budget_ms,
     };
     // The scenario's event producers run in the child, whose process
     // publishes what the run's Session subscribes to (EventHub design A.1).
@@ -2441,16 +3437,92 @@ async fn child_outcome(params: &ChildParams, preflight: &Arc<Provider>) -> Child
         }
     };
     let started = Instant::now();
+    let mut cleanup_deadline = None;
     let outcome = child_drive(
-        &server, &settings, params, &scenario, &unparsed, &producer, preflight,
+        &server,
+        &settings,
+        params,
+        &scenario,
+        &unparsed,
+        &producer,
+        preflight,
+        &mut cleanup_deadline,
     )
     .await;
     let duration_ms = started.elapsed().as_secs_f64() * 1000.;
     server.shutdown();
-    let _ = server.join().await;
+    // A run that stopped on its wall clock runs its served App Server's join
+    // under the one deadline the wall-clock stop fixed: the tree close waits
+    // for the move the run stopped waiting on, and the child must print its
+    // outcome and exit so the parent's worker is released (model-prompts
+    // §8.1). Every other run's join gets the settle grace, or the test hook's
+    // shorter grace, and a join that outlives it is attached to the outcome
+    // as a teardown failure instead of holding the child before it prints.
+    let teardown = match cleanup_deadline {
+        Some(deadline) => {
+            if settings.stall_cleanup {
+                // The hook's stand-in for a server that never finishes
+                // shutting down: the real join runs, and the wait after it
+                // does not return.
+                let stalled = async move {
+                    let _ = server.join().await;
+                    std::future::pending::<()>().await;
+                };
+                let _ = tokio::time::timeout_at(deadline, stalled).await;
+            } else {
+                let _ = tokio::time::timeout_at(deadline, server.join()).await;
+            }
+            None
+        }
+        None => {
+            let settle = settle_bound(settings.stall_cleanup);
+            let stalled = params
+                .stall
+                .as_ref()
+                .filter(|stall| stall.point == StallPoint::AfterShutdown);
+            if let Some(stall) = stalled {
+                // The hook's stand-in for a server that never finishes
+                // shutting down: the real join runs, and the wait after it
+                // does not return. The marker proves the child reached the
+                // shutdown under test.
+                let _ = std::fs::write(&stall.marker, "before its server's shutdown settles");
+            }
+            let join = async move {
+                if stalled.is_some() {
+                    let _ = server.join().await;
+                    std::future::pending().await
+                } else {
+                    server.join().await
+                }
+            };
+            match tokio::time::timeout(settle, join).await {
+                Ok(Ok(_)) => None,
+                Ok(Err(error)) => {
+                    Some(format!("the run's serve server did not shut down: {error}"))
+                }
+                Err(_) => Some(format!(
+                    "the run's serve server did not finish shutting down within {}s",
+                    settle.as_secs_f64()
+                )),
+            }
+        }
+    };
     let mut outcome = outcome.unwrap_or_else(|error| {
         harness_outcome(format!("the run failed to finish: {error}"), Vec::new())
     });
+    if let Some(teardown) = teardown {
+        // The run's own ending stands; the teardown failure marks the run
+        // failed (model-prompts §8.1).
+        if let Some(harness) = outcome.harness.as_mut() {
+            harness.push_str("; ");
+            harness.push_str(&teardown);
+        } else if let Some(error) = outcome.error.as_mut() {
+            error.push_str("; ");
+            error.push_str(&teardown);
+        } else {
+            outcome.error = Some(teardown);
+        }
+    }
     if outcome.duration_ms == 0. {
         outcome.duration_ms = duration_ms;
     }
@@ -2475,6 +3547,10 @@ fn native_probe_settings(
         js_runtime: None,
         boundary,
         plugin_tools: false,
+        stall_cleanup: false,
+        cleanup_budget_ms: None,
+        stall_export: None,
+        judge_budget_ms: None,
     }
 }
 
@@ -2523,11 +3599,18 @@ async fn native_probe_child(params: &ChildParams) -> Result<Vec<(String, ToolSou
     }
     .await;
     server.shutdown();
-    let _ = server.join().await;
+    // The probe's set is in hand: a join that outlives the settle grace must
+    // not keep the set from the parent, whose own startup bound ends the
+    // child anyway.
+    let _ = tokio::time::timeout(SETTLE_BOUND, server.join()).await;
     Ok(connected?)
 }
 
 /// The drive half of the child, after the run's server is up.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per part of the run the child serves, and the deadline its cleanup runs under"
+)]
 async fn child_drive(
     server: &RunningServer,
     settings: &RunSettings,
@@ -2536,6 +3619,7 @@ async fn child_drive(
     unparsed: &[ProbeRecord],
     producer: &ProducerState,
     preflight: &Arc<Provider>,
+    cleanup_deadline: &mut Option<tokio::time::Instant>,
 ) -> std::result::Result<ChildOutcome, Box<dyn std::error::Error>> {
     let cancel = CancellationToken::new();
     let socket = settings
@@ -2649,6 +3733,7 @@ async fn child_drive(
             producer,
             (!params.offer_plugin)
                 .then(|| ceiling.clone().unwrap_or_else(|| session_tools(scenario))),
+            params.stall.as_ref(),
         )
         .await
         {
@@ -2660,6 +3745,7 @@ async fn child_drive(
         }
     };
     let driven = finished.driven;
+    *cleanup_deadline = driven.cleanup_deadline;
     let judging = finished.judging;
     Ok(ChildOutcome {
         preflight: checks,
@@ -2668,11 +3754,14 @@ async fn child_drive(
         view: finished.view,
         session: (!driven.session.is_empty()).then_some(driven.session),
         stop: driven.stop.to_owned(),
+        timed_out: driven.timed_out,
         turns: driven.turns,
         window: driven.window,
         duration_ms: 0.,
         decline_retries: driven.decline_retries,
+        switch_retries: driven.switch_retries,
         error: driven.error,
+        incomplete: driven.incomplete,
         judge_outcome: judging.outcome,
         judge_error: judging.error,
         judge_reasks: judging.reasks,
@@ -2729,6 +3818,9 @@ fn overrides_value(overrides: &Overrides) -> Value {
         plugin_configs,
         branch_description,
         roster_closing,
+        default_note,
+        user_default_note,
+        former_default_note,
         goal_objective,
         goal_continuation,
         eventhub_entry,
@@ -2743,6 +3835,9 @@ fn overrides_value(overrides: &Overrides) -> Value {
         "pluginConfigs": plugin_configs,
         "branchDescription": branch_description.as_ref().map(ToString::to_string),
         "rosterClosing": roster_closing.as_ref().map(ToString::to_string),
+        "defaultNote": default_note.as_ref().map(ToString::to_string),
+        "userDefaultNote": user_default_note.as_ref().map(ToString::to_string),
+        "formerDefaultNote": former_default_note.as_ref().map(ToString::to_string),
         "goalObjective": goal_objective.as_ref().map(ToString::to_string),
         "goalContinuation": goal_continuation.as_ref().map(ToString::to_string),
         "schedulerDescription": scheduler_description.as_ref().map(ToString::to_string),
@@ -2767,6 +3862,9 @@ fn child_overrides(value: &Value) -> Overrides {
             .unwrap_or_default(),
         branch_description: text("branchDescription"),
         roster_closing: text("rosterClosing"),
+        default_note: text("defaultNote"),
+        user_default_note: text("userDefaultNote"),
+        former_default_note: text("formerDefaultNote"),
         goal_objective: text("goalObjective"),
         goal_continuation: text("goalContinuation"),
         scheduler_description: text("schedulerDescription"),
@@ -2830,7 +3928,7 @@ async fn product_probe(
         .rpc("session.attach", json!({"sessionId": probe}))
         .await
         .map_err(|error| format!("session.attach failed: {error}"))?;
-    submit(client, &probe, "PRODUCT-TOOLS\n", None)
+    let _ = submit(client, &probe, "PRODUCT-TOOLS\n", None, None)
         .await
         .map_err(|error| error.to_string())?;
     loop {
@@ -2938,8 +4036,11 @@ fn plugin_default_names(path: &Path) -> Vec<String> {
 /// the run's preflight provider that checks the run's isolation before the
 /// live model's first turn — the disposable `HOME`, the absence of credential
 /// names, an outside read refused for `exec` and for a file tool, the
-/// operator's home refused for both, and the run's socket unreachable. Any
-/// failure aborts the run and is reported as a harness failure.
+/// operator's home refused for both, and the run's socket unreachable. The
+/// probes are served the search service the run list names; it is cleared
+/// before the run's own Sessions, which do not call `web_search` and whose
+/// judged Timeline must not carry a source adoption. Any failure aborts the
+/// run and is reported as a harness failure.
 async fn preflight_session(
     client: &mut Client,
     params: &ChildParams,
@@ -2947,6 +4048,9 @@ async fn preflight_session(
     expected: &[String],
     database: &Path,
 ) -> std::result::Result<(Vec<PreflightCheck>, Vec<String>), (Vec<PreflightCheck>, String)> {
+    update_web(client, search_document())
+        .await
+        .map_err(|error| (Vec::new(), error.to_string()))?;
     let declared = product_probe(client, params, database)
         .await
         .map_err(|error| (Vec::new(), error))?;
@@ -2993,7 +4097,7 @@ async fn preflight_session(
         .rpc("session.attach", json!({"sessionId": session}))
         .await
         .map_err(|error| (Vec::new(), format!("session.attach failed: {error}")))?;
-    submit(client, &session, &message, None)
+    let _ = submit(client, &session, &message, None, None)
         .await
         .map_err(|error| (Vec::new(), error))?;
     // The tool results in arrival order: the scripted steps run one per
@@ -3047,28 +4151,30 @@ async fn preflight_session(
     // provider received the request before it scripted any step, so its
     // first PREFLIGHT request is this Session's declaration. The product
     // probe's request is the first whose messages carry the probe marker.
-    let held = preflight.requests.lock().unwrap();
-    let offered = held
-        .iter()
-        .find_map(|request| {
-            if !request.contains("PREFLIGHT") {
-                return None;
-            }
-            let tools = offered_tools(request);
-            (!tools.is_empty()).then_some(tools)
-        })
-        .unwrap_or_default();
-    let product = held
-        .iter()
-        .find_map(|request| {
-            if !request.contains("PRODUCT-TOOLS") {
-                return None;
-            }
-            let tools = offered_tools(request);
-            (!tools.is_empty()).then_some(tools)
-        })
-        .unwrap_or_default();
-    drop(held);
+    let (offered, product) = {
+        let held = preflight.requests.lock().unwrap();
+        let offered = held
+            .iter()
+            .find_map(|request| {
+                if !request.contains("PREFLIGHT") {
+                    return None;
+                }
+                let tools = offered_tools(request);
+                (!tools.is_empty()).then_some(tools)
+            })
+            .unwrap_or_default();
+        let product = held
+            .iter()
+            .find_map(|request| {
+                if !request.contains("PRODUCT-TOOLS") {
+                    return None;
+                }
+                let tools = offered_tools(request);
+                (!tools.is_empty()).then_some(tools)
+            })
+            .unwrap_or_default();
+        (offered, product)
+    };
     let checks = preflight_checks(
         &results, params, &offered, &ceiling, expected, &product, &declared,
     );
@@ -3076,6 +4182,9 @@ async fn preflight_session(
         let detail = format!("{}: {}", failed.name, failed.detail);
         return Err((checks, detail));
     }
+    update_web(client, json!({}))
+        .await
+        .map_err(|error| (checks.clone(), error.to_string()))?;
     Ok((checks, ceiling))
 }
 
@@ -3489,7 +4598,7 @@ async fn run_once(
     let socket = run_socket(options, arm, scenario, run);
     private_directory(socket.parent().expect("a socket has a parent"))?;
     let socket = bindable_socket(&socket)?;
-    let (record, outcome) = isolate_run(
+    let (mut record, outcome) = isolate_run(
         options,
         arm,
         overrides,
@@ -3504,6 +4613,7 @@ async fn run_once(
         instrument,
     )
     .await?;
+    record.texts = options.arm_texts(arm);
     write_run_outputs(options, arm, scenario, run, &outcome)?;
     Ok(record)
 }
@@ -3532,6 +4642,17 @@ fn run_socket(options: &Options, arm: &str, scenario: &Scenario, run: usize) -> 
         .out
         .join("sockets")
         .join(format!("{arm}-{}-run-{run}.sock", scenario.id))
+}
+
+/// The marker a stalled child writes, beside its params: one per run, so a
+/// bound counts from this child's stall and no other's.
+fn run_stall_marker(options: &Options, arm: &str, scenario: &Scenario, run: usize) -> PathBuf {
+    options
+        .out
+        .join("children")
+        .join(arm)
+        .join(&scenario.id)
+        .join(format!("run-{run}.stall"))
 }
 
 /// The run's own account files, under the output root, never inside the run
@@ -3589,6 +4710,17 @@ async fn isolate_run(
     let operator_home = std::env::var_os("HOME").map(PathBuf::from);
     let boundary = run_boundary(options, workspace, env_home)?;
     let credentials = augmented_credentials(options);
+    let stall = options.stall.as_ref().and_then(|stall| {
+        stall.point_for(arm, &scenario.id).map(|point| ChildStall {
+            point,
+            marker: run_stall_marker(options, arm, scenario, run),
+        })
+    });
+    let broken = options
+        .broken
+        .as_ref()
+        .filter(|broken| broken.run.0 == arm && broken.run.1 == scenario.id)
+        .map(|broken| broken.outcome);
     let params = ChildParams {
         home: run_home.to_owned(),
         workspace: workspace.to_owned(),
@@ -3620,6 +4752,13 @@ async fn isolate_run(
             .filter(|(arm_name, _)| arm_name == arm)
             .map(|(_, marker)| marker.clone()),
         fail_child_holds_stdout: options.fail_child_holds_stdout,
+        leave_member: options.leave_member.clone(),
+        stall_cleanup: options.stall_cleanup,
+        cleanup_budget_ms: options.cleanup_budget_ms,
+        stall_export: options.stall_export.clone(),
+        stall,
+        broken,
+        judge_budget_ms: options.judge_budget_ms,
         native_tools: native.to_vec(),
         probe_only: false,
     };
@@ -3631,7 +4770,14 @@ async fn isolate_run(
         .join(format!("run-{run}.json"));
     private_directory(params_path.parent().expect("a params file has a parent"))?;
     std::fs::write(&params_path, serde_json::to_string_pretty(&params)?)?;
-    let outcome = spawn_child(options, &params_path, &params, cancel).await?;
+    let outcome = spawn_child(
+        options,
+        &params_path,
+        &params,
+        cancel,
+        Duration::from_secs_f64(scenario.budget.seconds),
+    )
+    .await?;
     let record = child_record(arm, scenario, run, &outcome, instrument)?;
     Ok((record, outcome))
 }
@@ -3695,6 +4841,7 @@ async fn native_probe(
         private_directory(&root.join("env").join(directory))?;
     }
     private_directory(&home)?;
+    configure_search(&home)?;
     private_directory(socket.parent().expect("a socket has a parent"))?;
     let socket = bindable_socket(&socket)?;
     let params = ChildParams {
@@ -3726,12 +4873,33 @@ async fn native_probe(
         extra_tool: options.extra_tool,
         fail_child: None,
         fail_child_holds_stdout: false,
+        leave_member: None,
+        stall_cleanup: false,
+        cleanup_budget_ms: None,
+        stall_export: None,
+        stall: None,
+        broken: None,
+        judge_budget_ms: None,
         native_tools: Vec::new(),
         probe_only: true,
     };
     let params_path = root.join("params.json");
     std::fs::write(&params_path, serde_json::to_string_pretty(&params)?)?;
-    let outcome = spawn_child_json(options, &params_path, &params, cancel, "nativeTools").await?;
+    // The probe's set is all the parent needs: any ending without it fails
+    // the evaluation before its runs, as a startup probe that never finished
+    // always did.
+    let ChildOutput::Read(outcome) = spawn_child_json(
+        options,
+        &params_path,
+        &params,
+        cancel,
+        "nativeTools",
+        Some(STARTUP_BOUND),
+    )
+    .await?
+    else {
+        return Err("the native probe's serve child did not exit within its bound".into());
+    };
     serde_json::from_value(outcome["nativeTools"].clone())
         .map_err(|error| format!("the native probe printed no tool set: {error}").into())
 }
@@ -3986,15 +5154,247 @@ fn child_environment(
     Ok(env)
 }
 
-/// Spawns the run's serve child and reads its outcome line.
+/// How the parent's read of a serve child's output ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadEnd {
+    /// The reader saw the write end close: the child's output is complete.
+    Eof,
+    /// The read's deadline passed with the write end still open: the output
+    /// the reader collected is the child's, but the read was cut short.
+    Deadline,
+}
+
+/// The run's own ending, as the child reported it before its outcome line: a
+/// parent that ends the child before the outcome keeps the stop the run
+/// reached and records the supervisor failure beside it (model-prompts
+/// §8.1).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RunProgress {
+    stop: String,
+    timed_out: bool,
+}
+
+/// What one serve child's life left the parent: the eight endings of
+/// [`spawn_child_json`] group into these four records.
+enum ChildOutput {
+    /// The output holds the marker's JSON line, and the read reached EOF (or
+    /// the line was complete when the read's deadline cut it).
+    Read(Value),
+    /// The hard bound ended a child that had already printed its complete
+    /// line: the line stands, and the teardown did not settle.
+    Unsettled { value: Value, error: String },
+    /// The child exited, but the read was cut at its deadline before the
+    /// marker's line arrived.
+    CutShort { progress: Option<RunProgress> },
+    /// The hard bound ended the child before it printed the marker's line.
+    Killed { progress: Option<RunProgress> },
+}
+
+/// The JSON object of the first line that names `marker`, or `None` when the
+/// output holds no such line; a line that does not parse is an error.
+fn marker_value(text: &str, marker: &str) -> std::result::Result<Option<Value>, serde_json::Error> {
+    match text.lines().find(|line| line.contains(marker)) {
+        Some(line) => {
+            let json = &line[line.find('{').unwrap_or(line.len())..];
+            serde_json::from_str(json).map(Some)
+        }
+        None => Ok(None),
+    }
+}
+
+/// The run's own ending, if the child reported it before its outcome line.
+fn progress_value(text: &str) -> Option<RunProgress> {
+    let line = text.lines().find(|line| line.contains("\"runProgress\""))?;
+    let json = &line[line.find('{')?..];
+    let value: Value = serde_json::from_str(json).ok()?;
+    serde_json::from_value(value["runProgress"].clone()).ok()
+}
+
+/// Spawns the run's serve child and reads its outcome line. The child runs
+/// under the parent's hard bound on one run: one that is still alive when the
+/// bound expires is killed with its process group, and what the child had
+/// already printed decides the record (model-prompts §8.1).
 async fn spawn_child(
     options: &Options,
     params_path: &Path,
     params: &ChildParams,
     cancel: &CancellationToken,
+    wall_clock: Duration,
 ) -> Result<ChildOutcome> {
-    let outcome = spawn_child_json(options, params_path, params, cancel, "judgeOutcome").await?;
-    Ok(serde_json::from_value(outcome)?)
+    let bound = child_hard_bound(options, params, wall_clock);
+    let started = Instant::now();
+    match spawn_child_json(
+        options,
+        params_path,
+        params,
+        cancel,
+        "judgeOutcome",
+        Some(bound),
+    )
+    .await?
+    {
+        ChildOutput::Read(value) => Ok(serde_json::from_value(value)?),
+        ChildOutput::Unsettled { value, error } => unsettled_outcome(value, error),
+        ChildOutput::Killed { progress } => {
+            Ok(bound_outcome(params, bound, started.elapsed(), progress))
+        }
+        ChildOutput::CutShort { progress } => {
+            Ok(cut_short_outcome(params, started.elapsed(), progress))
+        }
+    }
+}
+
+/// The parent's hard bound on one run's serve child: the run's wall clock, the
+/// startup before it ([`STARTUP_BOUND`]), the cleanup budget after it — or the
+/// judge phase's budget when that is longer — and the grace to read the
+/// output the child may print. A child stuck in blocking work may never reach
+/// its own cleanup, so this bound is what ends it. A test stall hook replaces
+/// it with its own bound and counts that from the child's stall marker.
+fn child_hard_bound(options: &Options, params: &ChildParams, wall_clock: Duration) -> Duration {
+    match (&params.stall, &options.stall) {
+        (Some(_), Some(stall)) => Duration::from_millis(stall.bound_ms),
+        _ => {
+            wall_clock
+                + STARTUP_BOUND
+                + cleanup_budget(params.stall_cleanup, params.cleanup_budget_ms)
+                    .max(judge_phase_budget(params.judge_budget_ms))
+                + settle_bound(params.stall_cleanup)
+        }
+    }
+}
+
+/// The instant a stalled child's bound falls: the bound counts from the
+/// marker the child writes at its stall, so the bound under test is not spent
+/// on the startup before it. A marker that never appears leaves the bound at
+/// [`STARTUP_BOUND`], the cap a child that never reports its stall gets.
+async fn bound_after_stall(marker: &Path, bound: Duration) -> tokio::time::Instant {
+    let startup = tokio::time::Instant::now() + STARTUP_BOUND;
+    loop {
+        if marker.exists() {
+            return tokio::time::Instant::now() + bound;
+        }
+        if tokio::time::Instant::now() >= startup {
+            return startup;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The record of a run the parent ended before its child printed its outcome:
+/// a supervisor failure, unless the child had reported the run's own
+/// wall-clock stop, which the record keeps (model-prompts §8.1).
+fn bound_outcome(
+    params: &ChildParams,
+    bound: Duration,
+    elapsed: Duration,
+    progress: Option<RunProgress>,
+) -> ChildOutcome {
+    supervisor_outcome(
+        params,
+        elapsed,
+        progress,
+        format!(
+            "the run's serve child did not exit within the parent's bound of {}s",
+            bound.as_secs_f64()
+        ),
+        "the run's Timeline was not exported: its serve child did not exit within the parent's \
+         bound"
+            .to_owned(),
+    )
+}
+
+/// The record of a run whose child exited before its outcome was read: a
+/// supervisor failure, unless the child had reported the run's own wall-clock
+/// stop, which the record keeps (model-prompts §8.1).
+fn cut_short_outcome(
+    params: &ChildParams,
+    elapsed: Duration,
+    progress: Option<RunProgress>,
+) -> ChildOutcome {
+    supervisor_outcome(
+        params,
+        elapsed,
+        progress,
+        "the run's serve child exited before its outcome was read within the parent's deadline"
+            .to_owned(),
+        "the run's Timeline was not exported: its serve child exited before its outcome was \
+         read"
+            .to_owned(),
+    )
+}
+
+/// The record of a run the supervisor ended: a failure, with no export and no
+/// judgment. A reported wall-clock stop is the run's own ending and is kept;
+/// every other ending is the supervisor failure `error` names.
+fn supervisor_outcome(
+    params: &ChildParams,
+    elapsed: Duration,
+    progress: Option<RunProgress>,
+    error: String,
+    judge_error: String,
+) -> ChildOutcome {
+    let scenario: Option<Scenario> = serde_json::from_value(params.scenario.clone()).ok();
+    let probes = scenario
+        .as_ref()
+        .map(unparsed)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|probe| SavedProbe {
+            id: probe.id,
+            kind: Some(probe.kind.to_owned()),
+            verdict: probe.verdict,
+            quote: probe.quote,
+        })
+        .collect();
+    let (stop, timed_out) = match progress {
+        Some(progress) if progress.timed_out => (progress.stop, true),
+        _ => ("error".to_owned(), false),
+    };
+    ChildOutcome {
+        preflight: Vec::new(),
+        harness: None,
+        export: None,
+        view: None,
+        session: None,
+        stop,
+        timed_out,
+        turns: 0,
+        window: None,
+        duration_ms: elapsed.as_secs_f64() * 1000.,
+        decline_retries: 0,
+        switch_retries: 0,
+        error: Some(error),
+        incomplete: None,
+        judge_outcome: JudgeOutcome::NotAsked,
+        judge_error: Some(judge_error),
+        judge_reasks: 0,
+        judge_calls: Vec::new(),
+        temperature_dropped: false,
+        events: Vec::new(),
+        reply_calls: Vec::new(),
+        probes,
+        model_configuration: None,
+        judge_configuration: None,
+        judge_window: (0, 0),
+    }
+}
+
+/// The record of a run whose child printed its complete outcome and then did
+/// not exit: the outcome stands, and the teardown failure is attached so the
+/// run is failed (model-prompts §8.1).
+fn unsettled_outcome(value: Value, error: String) -> Result<ChildOutcome> {
+    let mut outcome: ChildOutcome = serde_json::from_value(value)?;
+    if let Some(harness) = outcome.harness.as_mut() {
+        harness.push_str("; ");
+        harness.push_str(&error);
+    } else if let Some(existing) = outcome.error.as_mut() {
+        existing.push_str("; ");
+        existing.push_str(&error);
+    } else {
+        outcome.error = Some(error);
+    }
+    Ok(outcome)
 }
 
 /// The serve children this test binary started, by their params path: a
@@ -4005,13 +5405,18 @@ static SPAWNED: Mutex<Vec<(PathBuf, u32)>> = Mutex::new(Vec::new());
 /// Spawns a child and reads the JSON object of the output line that names
 /// `marker`: a run's child prints its outcome under `judgeOutcome`, the
 /// native probe's child its declared tool set under `nativeTools`.
+/// `hard_bound` is the parent's limit on the child's whole life. The answer
+/// tells the four endings apart: a complete line, a complete line printed by
+/// a child the bound had to end, a read cut at its deadline before the line,
+/// and a child the bound ended before the line.
 async fn spawn_child_json(
     options: &Options,
     params_path: &Path,
     params: &ChildParams,
     cancel: &CancellationToken,
     marker: &str,
-) -> Result<Value> {
+    hard_bound: Option<Duration>,
+) -> Result<ChildOutput> {
     let (executable, args, test_binary) = child_command(params_path);
     let env = child_environment(options, params, params_path, test_binary)?;
     let mut command = tokio::process::Command::new(&executable);
@@ -4046,31 +5451,44 @@ async fn spawn_child_json(
         .push((params_path.to_owned(), child.id().unwrap_or_default()));
     #[cfg(unix)]
     let mut group = ChildGroup::new(child.id().unwrap_or_default());
+    // The parent's hard bound runs from the spawn, so a child that never
+    // reaches its own cleanup is still ended. A test stall hook counts its
+    // bound from the child's marker instead: a slow start does not spend the
+    // bound, and the marker proves the child reached the stall under test.
+    let stall_marker = params.stall.as_ref().map(|stall| stall.marker.clone());
+    let deadline = hard_bound.map(|bound| tokio::time::Instant::now() + bound);
     // Drain the pipe while the child runs: the child may print more than a
     // pipe holds (the run's logged output rides the same stream), and a full
     // pipe would block the child's last print forever, so waiting and then
-    // reading would deadlock.
+    // reading would deadlock. The reader appends what it has read as it goes,
+    // so a read that outlives its bound still yields the output the child
+    // printed before it exited.
+    let collected = Arc::new(Mutex::new(Vec::new()));
     let reading = child.stdout.take().map(|mut stdout| {
+        let collected = Arc::clone(&collected);
         tokio::spawn(async move {
-            let mut output = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut output)
-                .await
-                .map_err(|error| format!("cannot read the serve child's outcome: {error}"))?;
-            Ok::<Vec<u8>, String>(output)
+            let mut buffer = [0u8; 8192];
+            loop {
+                let read = tokio::io::AsyncReadExt::read(&mut stdout, &mut buffer)
+                    .await
+                    .map_err(|error| format!("cannot read the serve child's outcome: {error}"))?;
+                if read == 0 {
+                    return Ok::<(), String>(());
+                }
+                collected.lock().unwrap().extend_from_slice(&buffer[..read]);
+            }
         })
     });
     let status = tokio::select! {
         result = child.wait() => {
             let status = result?;
-            // The group is killed before the output is read: a member the
-            // failed child left behind may hold the write end of its stdout,
-            // and the reader would wait for an EOF that never comes. A
-            // successful child left no member behind, so its group is
-            // disarmed instead.
+            // A failed child may have left a member holding the write end of
+            // its stdout, and the reader would wait for an EOF that never
+            // comes: the group is killed before the output is read. A
+            // successful child's group is killed once its output is in hand,
+            // below.
             #[cfg(unix)]
-            if status.success() {
-                group.disarm();
-            } else {
+            if !status.success() {
                 group.kill();
             }
             status
@@ -4082,13 +5500,111 @@ async fn spawn_child_json(
             let _ = child.wait().await;
             return Err("the evaluation was cancelled".into());
         }
+        _ = async {
+            let Some(bound) = hard_bound else {
+                return std::future::pending::<()>().await;
+            };
+            let until = match &stall_marker {
+                Some(marker) => bound_after_stall(marker, bound).await,
+                None => tokio::time::Instant::now() + bound,
+            };
+            tokio::time::sleep_until(until).await
+        } => {
+            // The child is still alive at the parent's hard bound: it may be
+            // stuck in blocking work and never reach its own cleanup. Its
+            // group is killed so no member outlives the run; every writer is
+            // gone, so the reader reaches EOF, and what the child printed
+            // before the bound is in hand when the outcome is decided.
+            #[cfg(unix)]
+            group.kill();
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            if let Some(mut reading) = reading
+                && tokio::time::timeout(KILLED_READ_GRACE, &mut reading)
+                    .await
+                    .is_err()
+            {
+                reading.abort();
+                let _ = reading.await;
+            }
+            let output = std::mem::take(&mut *collected.lock().unwrap());
+            let text = String::from_utf8_lossy(&output);
+            let bound = hard_bound.unwrap_or_default();
+            return match marker_value(&text, marker).ok().flatten() {
+                // The child printed its complete line and only could not
+                // exit: the outcome stands, and the teardown failure is
+                // attached (model-prompts §8.1).
+                Some(value) => Ok(ChildOutput::Unsettled {
+                    value,
+                    error: format!(
+                        "the run's serve child did not exit within the parent's bound of {}s",
+                        bound.as_secs_f64()
+                    ),
+                }),
+                // No complete line: a supervisor failure, unless the child
+                // reported the run's own wall-clock stop before the bound.
+                None => Ok(ChildOutput::Killed {
+                    progress: progress_value(&text),
+                }),
+            };
+        }
     };
+    // Whether the child's output was read to its end or the read was cut at
+    // its deadline: the same missing line means different things.
+    let mut read_end = ReadEnd::Eof;
     let output = match reading {
-        Some(reading) => reading
-            .await
-            .map_err(|error| format!("the outcome reader failed: {error}"))??,
+        Some(mut reading) => {
+            // The child has exited, but a member it left behind may hold the
+            // write end of its stdout: the read gets the cleanup grace, and
+            // the evaluation's cancel ends it at once. When the grace runs
+            // out — or the parent's hard bound does — the group is killed and
+            // the reader is dropped; what it collected is still the child's
+            // output, so a missing outcome line is reported as one.
+            let grace = settle_bound(params.stall_cleanup);
+            let until = if stall_marker.is_some() {
+                tokio::time::Instant::now() + grace
+            } else {
+                deadline.map_or_else(
+                    || tokio::time::Instant::now() + grace,
+                    |deadline| deadline.min(tokio::time::Instant::now() + grace),
+                )
+            };
+            let read = tokio::select! {
+                _ = cancel.cancelled() => {
+                    #[cfg(unix)]
+                    group.kill();
+                    reading.abort();
+                    let _ = reading.await;
+                    return Err("the evaluation was cancelled".into());
+                }
+                read = tokio::time::timeout_at(until, &mut reading) => read,
+            };
+            match read {
+                Ok(joined) => {
+                    joined.map_err(|error| format!("the outcome reader failed: {error}"))??;
+                }
+                Err(_) => {
+                    // The child exited, but a member it left behind still
+                    // holds the write end of its stdout: the read's grace ran
+                    // out. The group is killed so no member outlives the
+                    // harness, and the output the reader collected is what
+                    // the outcome line is looked for in. Whether the child's
+                    // own line arrived is decided by that output.
+                    read_end = ReadEnd::Deadline;
+                    #[cfg(unix)]
+                    group.kill();
+                    reading.abort();
+                    let _ = reading.await;
+                }
+            }
+            std::mem::take(&mut *collected.lock().unwrap())
+        }
         None => Vec::new(),
     };
+    // The output is in hand: whatever member the child left in its group goes
+    // with it, so none outlives the harness.
+    #[cfg(unix)]
+    group.kill();
     let text = String::from_utf8_lossy(&output);
     if !status.success() {
         // The group was killed as soon as the exit status was known: a
@@ -4109,49 +5625,56 @@ async fn spawn_child_json(
         }
         return Err(format!("the run's serve child exited with {status}").into());
     }
-    let line = text
-        .lines()
-        .find(|line| line.contains(marker))
-        .ok_or_else(|| {
-            format!(
-                "the run's serve child printed no {marker} line: {}",
-                text.trim()
-            )
-        })?;
     // A test-binary child runs under the test harness, which opens its
-    // output line with the test's name; the outcome is the rest of the
-    // line.
-    let json = &line[line
-        .find('{')
-        .ok_or("the child's outcome line carries no JSON")?..];
-    Ok(serde_json::from_str(json)?)
+    // output line with the test's name; the outcome is the rest of the line.
+    let value = match marker_value(&text, marker) {
+        Ok(value) => value,
+        // A read cut at its deadline may hold half a line: that is the
+        // supervisor's ending, decided below, not a malformed answer.
+        Err(_) if read_end == ReadEnd::Deadline => None,
+        // A read that reached EOF holds the child's whole output: a line
+        // that does not parse is a malformed answer and fails the evaluation
+        // as it always did.
+        Err(error) => return Err(error.into()),
+    };
+    match (value, read_end) {
+        // A complete line stands whether the read reached EOF or was cut
+        // afterwards: a member of the child's group held the write end, and
+        // the line was already in hand.
+        (Some(value), _) => Ok(ChildOutput::Read(value)),
+        // The child exited before its line could be read: one run's
+        // supervisor failure, and the evaluation continues.
+        (None, ReadEnd::Deadline) => Ok(ChildOutput::CutShort {
+            progress: progress_value(&text),
+        }),
+        (None, ReadEnd::Eof) => Err(format!(
+            "the run's serve child printed no {marker} line: {}",
+            text.trim()
+        )
+        .into()),
+    }
 }
 
 /// The serve child's process group: the child leads it (`process_group(0)`),
-/// so signalling it takes the members left in it. Armed until the child
-/// exits on its own; dropping the guard kills whatever the group still
-/// holds.
+/// so signalling it takes the members left in it. Killed once, before the
+/// output is read after a failed exit and after it is read otherwise;
+/// dropping the guard kills whatever the group still holds.
 #[cfg(unix)]
 struct ChildGroup {
     pid: u32,
-    armed: bool,
+    killed: bool,
 }
 
 #[cfg(unix)]
 impl ChildGroup {
     fn new(pid: u32) -> Self {
-        Self { pid, armed: true }
-    }
-
-    /// The child exited on its own: its group is not the harness's to kill.
-    fn disarm(&mut self) {
-        self.armed = false;
+        Self { pid, killed: false }
     }
 
     /// Kills every process in the group, once.
     fn kill(&mut self) {
-        if self.armed {
-            self.armed = false;
+        if !self.killed {
+            self.killed = true;
             if self.pid != 0 {
                 // SAFETY: the child leads the group its own `process_group
                 // (0)` created, so the negated id signals only the group the
@@ -4182,6 +5705,12 @@ fn child_record(
         "idle" => "idle",
         "turns" => "turns",
         "seconds" => "seconds",
+        "setup_failed" => "setup_failed",
+        "switch_target_not_reached" => "switch_target_not_reached",
+        "switch_target_ended" => "switch_target_ended",
+        "switch_target_unknown" => "switch_target_unknown",
+        "switch_note_missing" => "switch_note_missing",
+        "switch_incomplete" => "switch_incomplete",
         _ => "error",
     };
     let error = match &outcome.harness {
@@ -4192,12 +5721,14 @@ fn child_record(
         arm,
         scenario: scenario.id.clone(),
         run,
+        texts: Vec::new(),
         session: outcome.session.clone(),
         stop,
         turns: outcome.turns,
         window: outcome.window,
         duration_ms: outcome.duration_ms,
         failed: failed(stop, error.as_deref(), outcome.judge_outcome),
+        incomplete: outcome.incomplete.clone(),
         judge_outcome: outcome.judge_outcome,
         error,
 
@@ -4206,6 +5737,7 @@ fn child_record(
         judge_calls: outcome.judge_calls.clone(),
         temperature_dropped: Some(outcome.temperature_dropped),
         decline_retries: Some(outcome.decline_retries),
+        switch_retries: Some(outcome.switch_retries),
         events: outcome.events.clone(),
         reply_calls: outcome.reply_calls.clone(),
         probes: outcome
@@ -4244,7 +5776,7 @@ fn child_record(
             .clone()
             .map(|(effort, tier)| Configuration { effort, tier })
     });
-    if instrument.judge_window.is_none() {
+    if instrument.judge_window.is_none() && outcome.judge_window != (0, 0) {
         instrument.judge_window = Some(JudgeWindow {
             window: outcome.judge_window.0,
             max_output: outcome.judge_window.1,
@@ -4267,9 +5799,15 @@ impl Finished {
             driven: Driven {
                 session: String::new(),
                 stop: "error",
+                timed_out: false,
+                cleanup_deadline: None,
                 turns: 0,
                 window: None,
                 decline_retries: 0,
+                switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
                 error: Some(error),
             },
             export: None,
@@ -4310,6 +5848,32 @@ impl Judging {
             temperature_dropped: false,
         }
     }
+    /// A timed-out run whose judge did not answer within its cleanup grace:
+    /// the call is recorded as failed, and every probe stays unparsed.
+    fn unfinished(scenario: &Scenario, error: String) -> Self {
+        Self {
+            outcome: JudgeOutcome::CallFailed,
+            probes: unparsed(scenario),
+            error: Some(error),
+            reasks: 0,
+            calls: Vec::new(),
+            temperature_dropped: false,
+        }
+    }
+    /// A run the harness stopped before a request its probes read existed:
+    /// the judge is not asked, and every probe stays unparsed. The run is
+    /// incomplete, not failed; its reason travels on the record
+    /// (model-prompts §8.1).
+    fn unobserved(scenario: &Scenario) -> Self {
+        Self {
+            outcome: JudgeOutcome::Unobserved,
+            probes: unparsed(scenario),
+            error: None,
+            reasks: 0,
+            calls: Vec::new(),
+            temperature_dropped: false,
+        }
+    }
 }
 
 #[expect(
@@ -4328,6 +5892,7 @@ async fn drive_once(
     cancel: &CancellationToken,
     producer: &ProducerState,
     tools: Option<Vec<String>>,
+    stall: Option<&ChildStall>,
 ) -> Result<Finished> {
     let socket = settings
         .unix_path
@@ -4349,7 +5914,16 @@ async fn drive_once(
     if settings.defaults.is_some() {
         wait_for_plugins(&mut client).await?;
     }
-    let mut driven = drive(&mut client, scenario, workspace, model, producer, tools).await;
+    let mut driven = drive(
+        &mut client,
+        settings,
+        scenario,
+        workspace,
+        model,
+        producer,
+        tools,
+    )
+    .await;
     if driven.session.is_empty() {
         return Ok(Finished {
             driven,
@@ -4358,28 +5932,110 @@ async fn drive_once(
             judging: Judging::not_asked(scenario, None),
         });
     }
-    let _ = client
-        .rpc("session.close", json!({"sessionId": driven.session}))
-        .await;
-    drop(client);
-    let mut export = Vec::new();
-    let export = match dim_app_server::storage::export_timeline(
-        settings.database(run_home),
-        &driven.session,
-        &mut export,
-    )
-    .await
+    // The ending the run reached, printed before any cleanup: a parent that
+    // ends the child before its outcome line keeps the run's own stop and
+    // records the supervisor failure beside it (model-prompts §8.1).
+    println!(
+        "{}",
+        json!({"runProgress": {"stop": driven.stop, "timedOut": driven.timed_out}})
+    );
+    if let Some(stall) = stall
+        && stall.point == StallPoint::AfterWallClock
+        && driven.timed_out
     {
+        // The hook's stand-in for a child stuck in blocking work after its
+        // wall clock: no timer of the child's can end it, so only the
+        // parent's hard bound does. The marker is what the bound counts from.
+        stall_here(stall, "after its run's wall clock")?;
+    }
+    let close = client.rpc("session.close", json!({"sessionId": driven.session}));
+    // A run that stopped on its wall clock runs its close under the one
+    // deadline the wall-clock stop fixed: a move the run stopped waiting on
+    // keeps settling on the server, and the close waits behind it. Cleanup
+    // that cannot settle must not replace the outcome the run reached or hold
+    // the worker that runs it (model-prompts §8.1).
+    if let Some(deadline) = driven.cleanup_deadline {
+        let closed = if settings.stall_cleanup {
+            // The hook's stand-in for cleanup that never settles: the real
+            // close runs, and the wait after it does not return.
+            let stalled = async move {
+                let _ = close.await;
+                std::future::pending::<()>().await;
+            };
+            let _ = tokio::time::timeout_at(deadline, stalled).await;
+            false
+        } else {
+            matches!(tokio::time::timeout_at(deadline, close).await, Ok(Ok(_)))
+        };
+        if !closed {
+            // The Session may still be settling the move the run stopped on,
+            // so its export is not a settled record and the judge must not
+            // run on it: the run keeps the timeout it reached, and its
+            // child returns the record and exits (model-prompts §8.1).
+            return Ok(Finished {
+                driven,
+                export: None,
+                view: None,
+                judging: Judging::not_asked(
+                    scenario,
+                    Some(
+                        "the Session did not close within the cleanup grace after the run \
+                         stopped on its wall clock"
+                            .to_owned(),
+                    ),
+                ),
+            });
+        }
+    } else {
+        let _ = close.await;
+    }
+    drop(client);
+    let export = {
+        let session = driven.session.clone();
+        let database = settings.database(run_home);
+        let stalled = driven.cleanup_deadline.is_some()
+            && settings.stall_export.as_deref() == Some(scenario.id.as_str());
+        async move {
+            if stalled {
+                std::future::pending::<()>().await;
+            }
+            let mut export = Vec::new();
+            let exported =
+                dim_app_server::storage::export_timeline(database, &session, &mut export).await;
+            (export, exported)
+        }
+    };
+    let (export, exported) = match driven.cleanup_deadline {
+        Some(deadline) => match tokio::time::timeout_at(deadline, export).await {
+            Ok(exported) => exported,
+            Err(_) => {
+                // A run that stopped on its wall clock keeps the timeout it
+                // reached: no partial export is written, and the judge is not
+                // asked about a Timeline that was not exported
+                // (model-prompts §8.1).
+                return Ok(Finished {
+                    driven,
+                    export: None,
+                    view: None,
+                    judging: Judging::not_asked(
+                        scenario,
+                        Some(
+                            "the Timeline export did not finish within the cleanup grace after \
+                             the run stopped on its wall clock"
+                                .to_owned(),
+                        ),
+                    ),
+                });
+            }
+        },
+        None => export.await,
+    };
+    let export = match exported {
         Ok(()) => {
             let export = String::from_utf8_lossy_owned(export);
             let (turns, failed_turn) = turns_in_export(&export);
             driven.turns = turns;
-            if let Some(error) = failed_turn
-                && driven.error.is_none()
-            {
-                driven.stop = "error";
-                driven.error = Some(error);
-            }
+            settle_failed_turn(&mut driven, failed_turn);
             export
         }
         Err(error) => {
@@ -4392,6 +6048,35 @@ async fn drive_once(
             });
         }
     };
+    // A scored follow-up must answer under the note its move wrote. A run
+    // whose request consumed the input without it is failed before the judge,
+    // so the policy comparison cannot score an answer that did not see the
+    // text being evaluated (Timeline branches §12.4).
+    let notes = switch_note_check(&driven, &export);
+    if let NotesCheck::Unseen(error) = &notes {
+        driven.stop = "switch_note_missing";
+        driven.error = Some(error.clone());
+        return Ok(Finished {
+            driven,
+            export: Some(export),
+            view: None,
+            judging: Judging::not_asked(scenario, Some(error.clone())),
+        });
+    }
+    // A run the harness stopped before the requests its probes read existed is
+    // incomplete, not scored: the probe's absence has no candidate behavior to
+    // read. A run that already failed keeps its failure (model-prompts §8.1).
+    if driven.error.is_none()
+        && let Some(reason) = incomplete_reason(&driven, scenario, &export, &notes)
+    {
+        driven.incomplete = Some(reason);
+        return Ok(Finished {
+            driven,
+            export: Some(export),
+            view: None,
+            judging: Judging::unobserved(scenario),
+        });
+    }
     let (Some(host), Some(resolver)) = (
         server.service::<ModelHost>(),
         server.service::<ProviderConnectionResolver>(),
@@ -4407,7 +6092,50 @@ async fn drive_once(
         });
     };
     let view = judge_view(&export);
-    let judging = judge_export(&host, &resolver, judge, scenario, &view, limits, cancel).await;
+    // A run that stopped on its wall clock gives its judge the time left of
+    // the one cleanup deadline: the judge reads the view of a failed run,
+    // which enters no probe rate (model-prompts §8.1), so a judge that has not
+    // answered by the deadline leaves the run's judgment unfinished instead of
+    // holding the child — and the worker that runs it — open. A run that did
+    // not stop on its wall clock judges as before.
+    let judging = if let Some(deadline) = driven.cleanup_deadline {
+        match tokio::time::timeout_at(
+            deadline,
+            judge_export(&host, &resolver, judge, scenario, &view, limits, cancel),
+        )
+        .await
+        {
+            Ok(judging) => judging,
+            Err(_) => Judging::unfinished(
+                scenario,
+                "the judge did not finish within the cleanup grace after the run stopped on \
+                 its wall clock"
+                    .to_owned(),
+            ),
+        }
+    } else {
+        // A run that did not stop on its wall clock gives its judge phase
+        // its own budget: the judge may legitimately make several calls, and
+        // one that never answers must not hold the child — and the worker
+        // that runs it — open. The run keeps the stop it reached and its
+        // export (model-prompts §8.1).
+        let budget = judge_phase_budget(settings.judge_budget_ms);
+        match tokio::time::timeout(
+            budget,
+            judge_export(&host, &resolver, judge, scenario, &view, limits, cancel),
+        )
+        .await
+        {
+            Ok(judging) => judging,
+            Err(_) => Judging::unfinished(
+                scenario,
+                format!(
+                    "the judge did not finish within its phase budget of {}s",
+                    budget.as_secs_f64()
+                ),
+            ),
+        }
+    };
     Ok(Finished {
         driven,
         export: Some(export),
@@ -4417,12 +6145,18 @@ async fn drive_once(
 }
 
 /// Whether the run is a failed run (model-prompts §8.1): it failed on its
-/// own, an error or its wall-clock budget, or its judging did not happen — a
-/// judge call failed, there was no export to judge, or no model host for the
-/// judge.
+/// own, an error, its wall-clock budget or a switch that could not happen or
+/// did not send its scored follow-ups, or its judging did not happen — a judge
+/// call failed, there was no export to judge, or no model host for the judge.
 fn failed(stop: &str, error: Option<&str>, judge_outcome: JudgeOutcome) -> bool {
-    stop == "seconds"
-        || error.is_some()
+    matches!(
+        stop,
+        "seconds"
+            | "switch_target_not_reached"
+            | "switch_target_ended"
+            | "switch_target_unknown"
+            | "switch_incomplete"
+    ) || error.is_some()
         || matches!(
             judge_outcome,
             JudgeOutcome::CallFailed | JudgeOutcome::NotAsked
@@ -4475,6 +6209,415 @@ fn turns_in_export(export: &str) -> (u32, Option<String>) {
         }
     }
     (turns, failed)
+}
+
+/// Applies the export's turn account to a run's own ending: a failed turn it
+/// records fails a run that did not stop on its wall clock, and cannot replace
+/// the wall-clock stop the run reached, as the deferred window read cannot
+/// either (model-prompts §8.1).
+fn settle_failed_turn(driven: &mut Driven, failed_turn: Option<String>) {
+    if let Some(error) = failed_turn
+        && driven.error.is_none()
+        && !driven.timed_out
+    {
+        driven.stop = "error";
+        driven.error = Some(error);
+    }
+}
+
+/// The reason a run's own budget stop sends to every line: the requests that
+/// stop cut record it, so the export names the stop the same way.
+fn budget_stop_reason(stop: &str) -> String {
+    format!("budget: {stop}")
+}
+
+/// How a run's counted switch follow-ups ended (Timeline branches §12.4):
+/// every one was carried by a request that reached the model, one was stopped
+/// by the run's own turn cap before its model call, or one never reached the
+/// model for another reason.
+#[derive(Debug)]
+enum NotesCheck {
+    Observed,
+    /// The run's turn cap stopped a switch input before its model call: the
+    /// note was not at fault, and the probe has no request to read.
+    CapCut,
+    /// The request never reached the model for another reason.
+    Unseen(String),
+}
+
+/// The run's switch inputs and notes as the export shows them (Timeline
+/// branches §12.4). A run that already failed is not checked. Every input a
+/// move submitted must be carried by the request of the turn that consumed it,
+/// and every note is read over the inputs that did reach the model. A request
+/// that never reached the model fails the run as a missing note, and so does
+/// one that reached it without its note. A receipt the run's own turn cap
+/// stopped, or no turn consumed, leaves the probe with no request to read, but
+/// the check reads every receipt and note before it reports that cap: the run
+/// is an incomplete fixture rather than a missing note only when no receipt or
+/// note confirms a failure (model-prompts §8.1, issue #2140).
+fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
+    if driven.error.is_some() {
+        return NotesCheck::Observed;
+    }
+    let cap_stop = (driven.stop == "turns").then(|| budget_stop_reason(driven.stop));
+    let mut cap_cut = false;
+    for input in &driven.switch_notes.inputs {
+        let Some(id) = input.input.as_deref() else {
+            return NotesCheck::Unseen(format!(
+                "session.submit answered no input id for {}",
+                input.what
+            ));
+        };
+        match carried_request(export, &input.line, id, cap_stop.as_deref()) {
+            Carried::Call(_) => {}
+            // An input no turn consumed is not checked: no answer of its line
+            // is scored. When the run stopped on its turn cap, that cap is what
+            // left it unobserved, and the run is incomplete only if no other
+            // receipt or note confirms a failure.
+            Carried::Unconsumed if cap_stop.is_some() => cap_cut = true,
+            Carried::Unconsumed => {}
+            Carried::CapCut => cap_cut = true,
+            Carried::Unreached => {
+                return NotesCheck::Unseen(format!(
+                    "line {} consumed {} but its request never reached the model",
+                    input.line, input.what
+                ));
+            }
+        }
+    }
+    match switch_notes_unseen(export, &driven.switch_notes.expected, cap_stop.as_deref()) {
+        Some(error) => NotesCheck::Unseen(error),
+        None if cap_cut => NotesCheck::CapCut,
+        None => NotesCheck::Observed,
+    }
+}
+
+/// Why a scored switch follow-up did not see its note, or `None` when every
+/// consumed follow-up's note reached the model: the request
+/// [`carried_request`] reads for the input, and the note's exact text
+/// (Timeline branches §12.4). An input no request consumed is not checked: no
+/// answer of that line is scored. A request a steer replaced before its model
+/// call is not checked either: the note travels in the request that replaces
+/// it in the same turn. A request the run's own turn-budget stop ended, whose
+/// reason `cap_stop` carries, is not reported either: that stop, not the note,
+/// kept it from the model (issue #2140). Every other request that never
+/// reached the model is reported, because no request of the line carried the
+/// text being evaluated.
+fn switch_notes_unseen(
+    export: &str,
+    notes: &[SwitchNote],
+    cap_stop: Option<&str>,
+) -> Option<String> {
+    /// One `input/message` of the export, the line it is on, and the note it
+    /// carries when it is one.
+    struct Message {
+        branch: String,
+        note: Option<NoteSeen>,
+    }
+    let mut messages: BTreeMap<String, Message> = BTreeMap::new();
+    for line in export.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["kind"] != "event" {
+            continue;
+        }
+        let branch = record["branch_id"].as_str().unwrap_or_default().to_owned();
+        let event = &record["event"];
+        if (event["type"].as_str(), event["name"].as_str()) != (Some("input"), Some("message")) {
+            continue;
+        }
+        messages.insert(
+            event["id"].as_str().unwrap_or_default().to_owned(),
+            Message {
+                note: branch_line_note(event, &branch),
+                branch,
+            },
+        );
+    }
+    for note in notes {
+        let Some(message) = messages.get(&note.input) else {
+            return Some(format!(
+                "the switch input {} on line {} is not in the export",
+                note.input, note.line
+            ));
+        };
+        let call = match carried_request(export, &message.branch, &note.input, cap_stop) {
+            Carried::Unconsumed | Carried::CapCut => continue,
+            Carried::Unreached => {
+                return Some(format!(
+                    "line {} consumed the switch input {} but its request never reached the model",
+                    note.line, note.input
+                ));
+            }
+            Carried::Call(call) => call,
+        };
+        let marker = note_marker(note.default, &note.other);
+        let texts: Vec<&str> = messages
+            .values()
+            .filter(|message| message.branch == note.line)
+            .filter_map(|message| message.note.as_ref())
+            .filter(|seen| seen.default == note.default && seen.text.contains(&marker))
+            .map(|seen| seen.text.as_str())
+            .collect();
+        if !texts
+            .iter()
+            .any(|text| request_carries(&call["messages"], text))
+        {
+            return Some(format!(
+                "the request that consumed the switch input on line {} does not carry the note it must answer under",
+                note.line
+            ));
+        }
+    }
+    None
+}
+
+/// What an export shows of one input the runner submitted: whether its line
+/// consumed it, and the model call the request of that turn made (Timeline
+/// branches §12.4, model-prompts §8.1).
+#[derive(Debug)]
+enum Carried {
+    /// The line never consumed the input, so no request of its own answers it.
+    Unconsumed,
+    /// The request that began after the consumption reached the model; its
+    /// call carries the request body.
+    Call(Value),
+    /// The run's own turn cap stopped that request before its model call, when
+    /// the caller names the cap's reason.
+    CapCut,
+    /// No request the consuming turn began reached the model.
+    Unreached,
+}
+
+/// Reads one input the runner submitted from `export`: the turn its line
+/// consumed it in, and the first `step/model-start` after that consumption
+/// when no turn begins or ends in between. Only that request's own
+/// `model/call` answers for the input, or the call of a request that replaced
+/// it inside the same turn through `replaced by steer`. A start without a turn
+/// id joins no other start's turn and replaces nothing.
+fn carried_request(export: &str, branch: &str, input: &str, cap_stop: Option<&str>) -> Carried {
+    /// One `step/model-start` on the input's line.
+    struct Start {
+        turn: Option<String>,
+        sequence: u64,
+        request: String,
+    }
+    let mut consumed_at: Option<u64> = None;
+    let mut turns: Vec<u64> = Vec::new();
+    let mut starts: Vec<Start> = Vec::new();
+    let mut calls: BTreeMap<String, Value> = BTreeMap::new();
+    let mut replaced: BTreeSet<String> = BTreeSet::new();
+    let mut cut: BTreeSet<String> = BTreeSet::new();
+    let mut ended: BTreeMap<String, u64> = BTreeMap::new();
+    let mut ended_turns: BTreeMap<String, u64> = BTreeMap::new();
+    let mut interrupted: Vec<u64> = Vec::new();
+    for line in export.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["kind"] != "event" || record["branch_id"].as_str() != Some(branch) {
+            continue;
+        }
+        let event = &record["event"];
+        let sequence = event["sequence"].as_u64().unwrap_or_default();
+        match (event["type"].as_str(), event["name"].as_str()) {
+            (Some("input"), Some("consumed")) => {
+                if event["data"]["input_id"].as_str() == Some(input) {
+                    consumed_at = Some(consumed_at.map_or(sequence, |at| at.min(sequence)));
+                }
+            }
+            (Some("step"), Some("model-start")) => {
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    starts.push(Start {
+                        turn: event["data"]["turn_id"].as_str().map(str::to_owned),
+                        sequence,
+                        request: request.to_owned(),
+                    });
+                }
+            }
+            (Some("model"), Some("call")) => {
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    calls.insert(request.to_owned(), event["data"]["request"].clone());
+                }
+            }
+            (Some("step"), Some("model-output-end")) => {
+                let reason = event["data"]["reason"].as_str().unwrap_or_default();
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    if event["data"]["status"] == "cancelled" && reason == "replaced by steer" {
+                        replaced.insert(request.to_owned());
+                    } else if Some(reason) == cap_stop {
+                        cut.insert(request.to_owned());
+                    } else {
+                        ended
+                            .entry(request.to_owned())
+                            .and_modify(|at| *at = (*at).min(sequence))
+                            .or_insert(sequence);
+                    }
+                }
+            }
+            (Some("turn"), Some("start")) => turns.push(sequence),
+            (Some("turn"), Some("end")) => {
+                turns.push(sequence);
+                if let Some(turn) = event["data"]["turn_id"].as_str() {
+                    ended_turns
+                        .entry(turn.to_owned())
+                        .and_modify(|at| *at = (*at).min(sequence))
+                        .or_insert(sequence);
+                }
+            }
+            (Some("stop"), Some("interrupt"))
+                if cap_stop.is_some() && event["data"]["reason"].as_str() == cap_stop =>
+            {
+                interrupted.push(sequence);
+            }
+            _ => {}
+        }
+    }
+    // The requests the run's own turn-budget stop ended: the one each of its
+    // interrupts found in flight on the line, and one whose own end names that
+    // stop, which the Loop writes when the interrupt lands before the
+    // request's `step/model-start`. A request that had already ended on its own
+    // was not in flight when the interrupt landed, and the stop sends to every
+    // line, idle ones included.
+    for at in &interrupted {
+        if let Some(start) = starts
+            .iter()
+            .filter(|start| start.sequence < *at)
+            .filter(|start| {
+                !ended.get(&start.request).is_some_and(|end| end < at)
+                    && !start
+                        .turn
+                        .as_ref()
+                        .is_some_and(|turn| ended_turns.get(turn).is_some_and(|end| end < at))
+            })
+            .max_by_key(|start| start.sequence)
+        {
+            cut.insert(start.request.clone());
+        }
+    }
+    let Some(consumed_at) = consumed_at else {
+        return Carried::Unconsumed;
+    };
+    let Some(first) = starts
+        .iter()
+        .filter(|start| start.sequence > consumed_at)
+        .min_by_key(|start| start.sequence)
+    else {
+        return Carried::Unreached;
+    };
+    // The input belongs to the turn that consumed it: a turn boundary between
+    // the consumption and the first start means that start is another turn's.
+    if turns
+        .iter()
+        .any(|sequence| *sequence > consumed_at && *sequence < first.sequence)
+    {
+        return Carried::Unreached;
+    }
+    let mut request = first;
+    loop {
+        if let Some(call) = calls.get(&request.request) {
+            return Carried::Call(call.clone());
+        }
+        let Some(turn) = request.turn.clone() else {
+            return Carried::Unreached;
+        };
+        if !replaced.contains(&request.request) {
+            return if cap_stop.is_some() && cut.contains(&request.request) {
+                Carried::CapCut
+            } else {
+                Carried::Unreached
+            };
+        }
+        let Some(next) = starts
+            .iter()
+            .filter(|start| start.sequence > request.sequence)
+            .filter(|start| start.turn.as_deref() == Some(turn.as_str()))
+            .min_by_key(|start| start.sequence)
+        else {
+            return Carried::Unreached;
+        };
+        request = next;
+    }
+}
+
+/// Whether any string in `value` carries `needle`: a request is JSON, so a
+/// text with quotes in it is compared through the parsed value.
+fn request_carries(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text.contains(needle),
+        Value::Array(items) => items.iter().any(|item| request_carries(item, needle)),
+        Value::Object(map) => map.values().any(|item| request_carries(item, needle)),
+        _ => false,
+    }
+}
+
+/// Why the run's fixture was never observed, when it was not: every input the
+/// runner submitted must be carried by the request of the turn its line
+/// consumed it in, and a scenario with the step after the first idle must have
+/// run it. [`incomplete_reason`] decides which stops make a run that never ran
+/// such a request an incomplete fixture rather than a losing candidate: the
+/// probe has no request to read (model-prompts §8.1).
+fn fixture_incomplete(driven: &Driven, scenario: &Scenario, export: &str) -> Option<String> {
+    if scenario.after_idle.is_some()
+        && !driven
+            .inputs
+            .iter()
+            .any(|input| input.what == AFTER_IDLE_INPUT)
+    {
+        return Some(format!(
+            "the run stopped on {} before the step after the first idle",
+            driven.stop
+        ));
+    }
+    for input in &driven.inputs {
+        let Some(id) = input.input.as_deref() else {
+            return Some(format!(
+                "line {}: the Session named no input for {}, so the run cannot show it reached the model",
+                input.line, input.what
+            ));
+        };
+        match carried_request(export, &input.line, id, None) {
+            Carried::Call(_) => {}
+            Carried::Unconsumed => {
+                return Some(format!(
+                    "line {}: {} was never consumed before the run stopped on {}",
+                    input.line, input.what, driven.stop
+                ));
+            }
+            Carried::CapCut | Carried::Unreached => {
+                return Some(format!(
+                    "line {}: no request carried {} to the model before the run stopped on {}",
+                    input.line, input.what, driven.stop
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Why the run is an incomplete fixture, when it is: the harness's turn cap
+/// stopped it before a request its probes read existed — before the step after
+/// the first idle, before a submitted input's request, or before the request a
+/// switch follow-up needed. Any other stop keeps its own scoring: a run its
+/// wall clock or an error ended is failed, and a run that ended idle is scored
+/// for what its export holds (model-prompts §8.1).
+fn incomplete_reason(
+    driven: &Driven,
+    scenario: &Scenario,
+    export: &str,
+    notes: &NotesCheck,
+) -> Option<String> {
+    if driven.stop != "turns" {
+        return None;
+    }
+    fixture_incomplete(driven, scenario, export).or_else(|| match notes {
+        NotesCheck::CapCut => Some(
+            "the run's turn budget stopped the run before the switch follow-up reached the model"
+                .to_owned(),
+        ),
+        NotesCheck::Observed | NotesCheck::Unseen(_) => None,
+    })
 }
 
 pub(crate) async fn selection(
@@ -4534,10 +6677,31 @@ async fn wait_for_plugins(client: &mut Client) -> Result<()> {
 struct Driven {
     session: String,
     stop: &'static str,
+    /// The run stopped because its wall-clock budget ran out. The stop can be
+    /// renamed afterwards (a pending switch makes its own outcome), so the
+    /// cleanup paths read this rather than the stop's spelling.
+    timed_out: bool,
+    /// The one deadline every step after the wall-clock stop runs under,
+    /// [`CLEANUP_BUDGET`] after that moment; `Some` exactly when
+    /// [`timed_out`](Self::timed_out) is true.
+    cleanup_deadline: Option<tokio::time::Instant>,
     turns: u32,
     window: Option<f64>,
     /// How many declines the runner sent again after `question_not_pending`.
     decline_retries: u32,
+    /// How many times the runner moved again after the target line answered
+    /// `unknown_branch`.
+    switch_retries: u32,
+    /// The switch follow-ups the run sent and the notes each line's request
+    /// must carry; the run is not judged when one is missing.
+    switch_notes: SwitchNotes,
+    /// The inputs the runner submitted on the fixture's behalf: the scenario's
+    /// message and the requests after the first idle.
+    inputs: Vec<FixtureInput>,
+    /// Why the fixture's observation never happened, when it did not: the run
+    /// is neither failed nor judged, enters no probe rate, and the report
+    /// lists it apart from both.
+    incomplete: Option<String>,
     error: Option<String>,
 }
 
@@ -4558,6 +6722,7 @@ fn window_mismatch(window: Option<f64>, declared: u64) -> Option<String> {
 /// `plugin` tool.
 async fn drive(
     client: &mut Client,
+    settings: &RunSettings,
     scenario: &Scenario,
     workspace: &Path,
     model: &ModelSelection,
@@ -4570,9 +6735,15 @@ async fn drive(
         return Driven {
             session: String::new(),
             stop: "error",
+            timed_out: false,
+            cleanup_deadline: None,
             turns: 0,
             window: None,
             decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: Vec::new(),
+            incomplete: None,
             error: Some(error),
         };
     }
@@ -4586,15 +6757,24 @@ async fn drive(
         create["tools"] = json!(tools);
     }
     let created = client.rpc("session.create", create).await;
-    let session = match created {
-        Ok(reply) => reply["sessionId"].as_str().unwrap_or_default().to_owned(),
+    let (session, created_sequence) = match created {
+        Ok(reply) => (
+            reply["sessionId"].as_str().unwrap_or_default().to_owned(),
+            reply["sequence"].as_u64(),
+        ),
         Err(error) => {
             return Driven {
                 session: String::new(),
                 stop: "error",
+                timed_out: false,
+                cleanup_deadline: None,
                 turns: 0,
                 window: None,
                 decline_retries: 0,
+                switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
                 error: Some(format!("session.create failed: {error}")),
             };
         }
@@ -4602,9 +6782,15 @@ async fn drive(
     let mut driven = Driven {
         session: session.clone(),
         stop: "idle",
+        timed_out: false,
+        cleanup_deadline: None,
         turns: 0,
         window: None,
         decline_retries: 0,
+        switch_retries: 0,
+        switch_notes: SwitchNotes::default(),
+        inputs: Vec::new(),
+        incomplete: None,
         error: None,
     };
     if let Err(error) = client
@@ -4643,20 +6829,47 @@ async fn drive(
             return driven;
         }
     }
+    // The line the scenario's last `session.branch_create` call opened: a
+    // switch names it by role, and the reply is where its id is known before
+    // the run starts.
+    let mut user_line: Option<String> = None;
     for (index, call) in scenario.calls.iter().enumerate() {
         let mut params = match &call.params {
             Value::Object(params) => params.clone(),
             _ => serde_json::Map::new(),
         };
         params.insert("sessionId".to_owned(), json!(session));
-        if let Err(error) = client.rpc(&call.method, Value::Object(params)).await {
-            driven.stop = "error";
-            driven.error = Some(format!(
-                "the calls step {} ({}) failed: {error}",
-                index + 1,
-                call.method
-            ));
-            return driven;
+        if params.get("at").and_then(Value::as_str) == Some(SESSION_OPEN) {
+            let Some(sequence) = created_sequence else {
+                driven.stop = "setup_failed";
+                driven.error = Some(format!(
+                    "the calls step {} ({}) starts where the Session did, but session.create returned no sequence",
+                    index + 1,
+                    call.method
+                ));
+                return driven;
+            };
+            params.insert("at".to_owned(), json!(sequence));
+        }
+        match client.rpc(&call.method, Value::Object(params)).await {
+            Ok(reply) => {
+                if call.method == "session.branch_create" {
+                    user_line = reply["branch"]["branchId"].as_str().map(str::to_owned);
+                }
+            }
+            Err(error) => {
+                // The calls step runs before the message, so no model request
+                // of this run has seen the text being evaluated: the failure
+                // is a setup failure, not the model's answer (Timeline
+                // branches §12.3).
+                driven.stop = "setup_failed";
+                driven.error = Some(format!(
+                    "the calls step {} ({}) failed: {error}",
+                    index + 1,
+                    call.method
+                ));
+                return driven;
+            }
         }
     }
     for source in &scenario.sources {
@@ -4681,19 +6894,70 @@ async fn drive(
             return driven;
         }
     }
-    if let Err(error) = submit(client, &session, &scenario.message, None).await {
-        driven.stop = "error";
-        driven.error = Some(error);
-        return driven;
-    }
+    let message = match submit(client, &session, &scenario.message, None, None).await {
+        Ok(input) => input,
+        Err(error) => {
+            driven.stop = "error";
+            driven.error = Some(error);
+            return driven;
+        }
+    };
+    driven.inputs.push(FixtureInput {
+        what: MESSAGE_INPUT,
+        line: "main".to_owned(),
+        input: message,
+    });
     let started = Instant::now();
-    let mut branches: BTreeSet<String> = ["main".to_owned()].into();
+    // The lines the run knows before its message: `main` and the line the calls
+    // step opened, whose id is known before its `branch/create` notice arrives
+    // — waiting on that notice alone would let a run that stops early go idle
+    // with the line still starting. They are also the lines the step after the
+    // first idle settles (Timeline branches §12.3).
+    let after_lines: Vec<String> = std::iter::once("main".to_owned())
+        .chain(user_line.clone())
+        .collect();
+    let mut branches: BTreeSet<String> = after_lines.iter().cloned().collect();
+    // The lines whose `context/compaction` this run has seen complete, and the
+    // step after the first idle, which compacts the rest before it asks each
+    // line for a request.
+    let mut compacted: BTreeSet<String> = BTreeSet::new();
+    let mut after_idle = scenario.after_idle.clone();
     let mut steers: Vec<(Steer, bool)> = scenario
         .steers
         .iter()
         .cloned()
         .map(|steer| (steer, false))
         .collect();
+    // The moves still to make, in order, and the default branch they move
+    // away from. A chained move fires right after the one before it.
+    let mut switches: VecDeque<PendingSwitch> = scenario
+        .switch
+        .iter()
+        .chain(&scenario.moves)
+        .enumerate()
+        .map(|(index, switch)| PendingSwitch::new(switch.clone(), user_line.as_deref(), index > 0))
+        .collect();
+    if switches.iter().any(|pending| {
+        matches!(pending.switch.to, SwitchTarget::Role(SwitchRole::UserLine))
+            && pending.line.is_none()
+    }) {
+        driven.stop = "error";
+        driven.error = Some(
+            "the switch to the user line has no line: the scenario's session.branch_create call answered no branch id"
+                .into(),
+        );
+        return driven;
+    }
+    let mut default = "main".to_owned();
+    // The latest tool line the run has seen opened. The role
+    // `latest_tool_line` names it, and a move activated after the line opened
+    // uses it: a `branch/create` reaches only the move that is front when it
+    // arrives.
+    let mut latest_tool_line: Option<String> = None;
+    // The follow-ups the moves sent and the notes their lines must carry: a
+    // move waits for its notes before it sends them, and the run is not judged
+    // when a request consumed one without its note.
+    let mut switch_notes = SwitchNotes::default();
     let mut last_event = Instant::now();
     // The events still to publish, and whether each was.
     let mut events: Vec<(EventSpec, bool)> = scenario
@@ -4711,7 +6975,16 @@ async fn drive(
     // The idle requests the quiet check keeps outstanding, one per line.
     let mut calls = IdleCalls::default();
     loop {
-        match fire_due(client, &session, &mut steers, started).await {
+        match fire_due(
+            client,
+            &session,
+            &mut steers,
+            &default,
+            &mut driven.inputs,
+            started,
+        )
+        .await
+        {
             Ok(submitted) => awaiting |= submitted,
             Err(error) => {
                 driven.stop = "error";
@@ -4752,6 +7025,70 @@ async fn drive(
             driven.error = Some(error);
             return driven;
         }
+        // The move and the input after it are bounded by the same absolute
+        // deadline the budget check below applies: a reply that never comes
+        // must not hold the run past its wall clock (model-prompts §8.1).
+        let line = switches.front().and_then(|pending| pending.line.clone());
+        let fired = match tokio::time::timeout(
+            time_left(started, &scenario.budget),
+            fire_switch(
+                client,
+                &session,
+                &mut switches,
+                &mut default,
+                latest_tool_line.as_deref(),
+                Some(&mut switch_notes),
+            ),
+        )
+        .await
+        {
+            Ok(fired) => fired,
+            Err(_) => {
+                driven.stop = "seconds";
+                driven.timed_out = true;
+                driven.cleanup_deadline = Some(
+                    tokio::time::Instant::now()
+                        + cleanup_budget(settings.stall_cleanup, settings.cleanup_budget_ms),
+                );
+                driven.error = Some(match line {
+                    Some(line) => format!(
+                        "the switch to line {line} did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                    None => format!(
+                        "the switch did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                });
+                return driven;
+            }
+        };
+        match fired {
+            // The next attempt waits for the loop's next notice (`wait_time`),
+            // so the retry is paced there rather than by a sleep here.
+            Ok(SwitchFire::Retry) => driven.switch_retries += 1,
+            Ok(SwitchFire::Fired) => awaiting = true,
+            Ok(SwitchFire::NotFired) => {}
+            Ok(SwitchFire::TargetEnded { line, error }) => {
+                driven.stop = "switch_target_ended";
+                driven.error = Some(format!(
+                    "line {line} ended before the switch could move to it: {error}"
+                ));
+                return driven;
+            }
+            Ok(SwitchFire::TargetUnknown { line, error }) => {
+                driven.stop = "switch_target_unknown";
+                driven.error = Some(format!(
+                    "line {line} was not ready for the switch after {UNKNOWN_BRANCH_RETRIES} retries: {error}"
+                ));
+                return driven;
+            }
+            Err(error) => {
+                driven.stop = "error";
+                driven.error = Some(error);
+                return driven;
+            }
+        }
         // An `afterSubscribedSeconds` event whose clock has not started is
         // not pending: only a subscription of the model's can start it, so a
         // model that never subscribed cannot make it fire, and the run ends
@@ -4759,13 +7096,33 @@ async fn drive(
         // first in this pass, so a subscription the model made in its last
         // turn has already started the clock and keeps the run open here
         // (EventHub design A.4).
-        let pending = steers.iter().any(|(_, fired)| !fired)
+        let pending = !switches.is_empty()
+            || steers.iter().any(|(_, fired)| !fired)
             || events.iter().any(|(event, fired)| {
                 !fired
                     && (event.after_subscribed_seconds.is_none() || event.subscribed_at.is_some())
             });
         if started.elapsed().as_secs_f64() >= scenario.budget.seconds {
             driven.stop = "seconds";
+            driven.timed_out = true;
+            driven.cleanup_deadline = Some(
+                tokio::time::Instant::now()
+                    + cleanup_budget(settings.stall_cleanup, settings.cleanup_budget_ms),
+            );
+            // A pending switch the run stopped waiting on names itself, as the
+            // move's own deadline does: its note or its input did not come.
+            if let Some(pending) = switches.front() {
+                driven.error = Some(match &pending.line {
+                    Some(line) => format!(
+                        "the switch to line {line} did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                    None => format!(
+                        "the switch did not answer before the run's {}s budget ran out",
+                        scenario.budget.seconds
+                    ),
+                });
+            }
             break;
         }
         if driven.turns >= scenario.budget.turns {
@@ -4774,7 +7131,52 @@ async fn drive(
         }
         if !pending && !awaiting && last_event.elapsed() >= QUIET {
             match idle(client, &session, &branches, &mut calls).await {
-                Ok(true) => break,
+                Ok(true) => {
+                    // The lines are idle: a scenario with a step after the
+                    // first idle runs it here, and its requests keep the loop
+                    // going until the second idle.
+                    let Some(after) = after_idle.take() else {
+                        break;
+                    };
+                    let settled = tokio::time::timeout(
+                        time_left(started, &scenario.budget),
+                        settle_after_idle(client, &session, &after_lines, &after, &compacted),
+                    )
+                    .await;
+                    match settled {
+                        Ok(Ok(submitted)) => {
+                            for (line, input) in submitted {
+                                driven.inputs.push(FixtureInput {
+                                    what: AFTER_IDLE_INPUT,
+                                    line,
+                                    input,
+                                });
+                            }
+                            awaiting = true;
+                        }
+                        Ok(Err(error)) => {
+                            driven.stop = "error";
+                            driven.error = Some(error);
+                            return driven;
+                        }
+                        Err(_) => {
+                            driven.stop = "seconds";
+                            driven.timed_out = true;
+                            driven.cleanup_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + cleanup_budget(
+                                        settings.stall_cleanup,
+                                        settings.cleanup_budget_ms,
+                                    ),
+                            );
+                            driven.error = Some(format!(
+                                "the step after the first idle did not answer before the run's {}s budget ran out",
+                                scenario.budget.seconds
+                            ));
+                            return driven;
+                        }
+                    }
+                }
                 Ok(false) => last_event = Instant::now(),
                 Err(error) => {
                     driven.stop = "error";
@@ -4798,6 +7200,18 @@ async fn drive(
                         {
                             branches.insert(branch.to_owned());
                         }
+                        // A line that compacted on its own is not compacted
+                        // again after the idle: a second compaction of the same
+                        // tail does not shrink the input (context policy §5).
+                        if event["type"] == "context"
+                            && event["name"] == "compaction"
+                            && event["data"]["status"] == "completed"
+                        {
+                            compacted.insert(branch.clone());
+                        }
+                        if let Some(line) = tool_line(&event) {
+                            latest_tool_line = Some(line.to_owned());
+                        }
                         // A steer is taken inside the turn it reaches, so no
                         // turn starts for it: either event means the input is
                         // no longer outstanding.
@@ -4820,7 +7234,19 @@ async fn drive(
                                 return driven;
                             }
                         }
-                        match fire_triggered(client, &session, &mut steers, &event).await {
+                        if let Some(pending) = switches.front_mut() {
+                            pending.notice(&branch, &event);
+                        }
+                        match fire_triggered(
+                            client,
+                            &session,
+                            &mut steers,
+                            &default,
+                            &mut driven.inputs,
+                            &event,
+                        )
+                        .await
+                        {
                             Ok(submitted) => awaiting |= submitted,
                             Err(error) => {
                                 driven.stop = "error";
@@ -4886,35 +7312,127 @@ async fn drive(
         }
     }
     if driven.stop == "turns" || driven.stop == "seconds" {
-        for branch in &branches {
-            let _ = client
-                .rpc(
-                    "session.stop",
-                    json!({"sessionId": session, "branchId": branch,
-                           "reason": format!("budget: {}", driven.stop)}),
-                )
-                .await;
+        let reason = budget_stop_reason(driven.stop);
+        let stop = async {
+            for branch in &branches {
+                let _ = client
+                    .rpc(
+                        "session.stop",
+                        json!({"sessionId": session, "branchId": branch,
+                               "reason": reason.as_str()}),
+                    )
+                    .await;
+            }
+        };
+        // A run that already spent its wall clock runs its cleanup under the
+        // one deadline the wall-clock stop fixed: a server that keeps settling
+        // the operation the run stopped waiting on must not hold the run past
+        // the outcome it reached (model-prompts §8.1).
+        if let Some(deadline) = driven.cleanup_deadline {
+            let _ = tokio::time::timeout_at(deadline, stop).await;
+        } else {
+            stop.await;
         }
     }
     if window_deferred && driven.error.is_none() {
-        match client
-            .rpc(
-                "session.context.usage",
-                json!({"sessionId":session,"branchId":"main"}),
-            )
-            .await
-        {
-            Ok(usage) => {
+        let usage = async {
+            client
+                .rpc(
+                    "session.context.usage",
+                    json!({"sessionId":session,"branchId":"main"}),
+                )
+                .await
+        };
+        let usage = if let Some(deadline) = driven.cleanup_deadline {
+            tokio::time::timeout_at(deadline, usage).await.ok()
+        } else {
+            Some(usage.await)
+        };
+        if driven.timed_out {
+            // The read belongs to the timed-out run's cleanup: what it returns
+            // cannot replace the ending the run reached (model-prompts §8.1).
+            if let Some(Ok(usage)) = usage {
                 driven.window = usage["contextWindow"].as_f64();
-                driven.error = window_mismatch(driven.window, scenario.budget.window);
             }
-            Err(error) if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
-            Err(error) => driven.error = Some(format!("Context window check failed: {error}")),
-        }
-        if driven.error.is_some() {
-            driven.stop = "error";
+        } else {
+            match usage {
+                Some(Ok(usage)) => {
+                    driven.window = usage["contextWindow"].as_f64();
+                    driven.error = window_mismatch(driven.window, scenario.budget.window);
+                }
+                Some(Err(error))
+                    if dim_client::app_error(&error) == Some("context_usage_unavailable") => {}
+                Some(Err(error)) => {
+                    driven.error = Some(format!("Context window check failed: {error}"))
+                }
+                None => {}
+            }
+            if driven.error.is_some() {
+                driven.stop = "error";
+            }
         }
     }
+    // A switch still at the front when the loop ended never completed. A move
+    // that never happened keeps its own outcome, so a scenario that could not
+    // switch is not read as a run that reached its budget. A move that
+    // happened without sending its scored follow-ups is incomplete: no request
+    // answered under the text the evaluation compares, so the run is failed
+    // instead of scored as a complete scenario. A run that stopped on its wall
+    // clock already named the switch it stopped waiting on and keeps that
+    // ending.
+    if let Some(pending) = switches.front()
+        && !(pending.moved && driven.stop == "seconds" && driven.error.is_some())
+    {
+        let reason = if pending.moved {
+            let line = pending
+                .line
+                .as_deref()
+                .expect("a moved switch names its line");
+            format!(
+                "the move to line {line} happened but its scored follow-up was not sent before the run stopped on {}",
+                driven.stop
+            )
+        } else {
+            match (&pending.line, pending.triggered) {
+                _ if pending.previous.is_some() => match &pending.line {
+                    Some(line) => format!(
+                        "the chained move to line {line} did not fire: the input before it was not consumed before the run stopped on {}",
+                        driven.stop
+                    ),
+                    None => format!(
+                        "the chained move did not fire: its target was not opened and the input before it was not consumed before the run stopped on {}",
+                        driven.stop
+                    ),
+                },
+                (Some(line), true) => format!(
+                    "the move to line {line} did not complete before the run stopped on {}",
+                    driven.stop
+                ),
+                (Some(line), false) => format!(
+                    "the switch never fired: line {line}'s first turn did not start before the run stopped on {}",
+                    driven.stop
+                ),
+                (None, _) => format!(
+                    "the switch never fired: the line its role names was never opened before the run stopped on {}",
+                    driven.stop
+                ),
+            }
+        };
+        if driven.stop == "error" {
+            driven.error = Some(match driven.error.take() {
+                Some(error) => format!("{error}; {reason}"),
+                None => reason,
+            });
+        } else {
+            driven.stop = if pending.moved {
+                "switch_incomplete"
+            } else {
+                "switch_target_not_reached"
+            };
+            driven.error = Some(reason);
+        }
+    }
+    driven.switch_notes = switch_notes;
     driven
 }
 
@@ -5738,35 +8256,252 @@ async fn fire_events_after_subscribe(
     Ok((published, starts))
 }
 
-/// The `session.submit` params. A mode names how `main` takes the input: a
-/// steer ends a wait and replaces a request that has produced no output yet,
-/// while the operator's first message carries no mode and is queued.
-fn submit_params(session: &str, text: &str, mode: Option<InputMode>) -> Value {
-    let mut params = json!({"sessionId": session, "branchId": "main", "text": text});
+/// The `session.submit` params. A mode names how the target line takes the
+/// input: a steer ends a wait and replaces a request that has produced no
+/// output yet, while the operator's first message carries no mode and is
+/// queued. A call that names no `branchId` lands on the Session's default
+/// branch (design §9, §14), which is what a scenario after a switch wants; a
+/// scenario that names a line passes it here.
+fn submit_params(
+    session: &str,
+    text: &str,
+    mode: Option<InputMode>,
+    branch: Option<&str>,
+) -> Value {
+    let mut params = json!({"sessionId": session, "text": text});
+    if let Some(branch) = branch {
+        params["branchId"] = json!(branch);
+    }
     if let Some(mode) = mode {
         params["mode"] = json!(mode);
     }
     params
 }
 
+/// Sends one input and answers the id the Session wrote it under, when the
+/// reply names the event: a switch records it to check the note the line's
+/// request must carry.
 async fn submit(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     text: &str,
     mode: Option<InputMode>,
-) -> std::result::Result<(), String> {
-    client
-        .rpc("session.submit", submit_params(session, text, mode))
+    branch: Option<&str>,
+) -> std::result::Result<Option<String>, String> {
+    let reply = client
+        .rpc("session.submit", submit_params(session, text, mode, branch))
         .await
-        .map(|_| ())
-        .map_err(|error| format!("session.submit failed: {error}"))
+        .map_err(|error| format!("session.submit failed: {error}"))?;
+    Ok(reply["event"]["id"].as_str().map(str::to_owned))
 }
 
-/// Sends the timed steers that are due, and whether it sent one.
+/// The one RPC a switch and its next input make; the tests' fake records the
+/// calls and their order without a Session behind them.
+trait SwitchClient {
+    async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value>;
+}
+
+impl SwitchClient for Client {
+    async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
+        Client::rpc(self, method, params).await
+    }
+}
+
+/// What one notice did with the scenario's pending switch.
+#[derive(Debug)]
+enum SwitchFire {
+    /// The target line has not started its first turn; the switch stays
+    /// pending.
+    NotFired,
+    /// The default branch moved and the next input was sent.
+    Fired,
+    /// The target line's move answered `unknown_branch`: the line's first turn
+    /// started before the line was marked ready, so the run tries again.
+    Retry,
+    /// The target line had already ended, or a line above it was ending, so
+    /// the move answered `branch_ended` or `branch_target_protected`: the run
+    /// stops with its own outcome rather than a harness error.
+    TargetEnded { line: String, error: String },
+    /// The move still answered `unknown_branch` after its retries: the run
+    /// stops with its own outcome rather than a harness error.
+    TargetUnknown { line: String, error: String },
+}
+
+/// The tree's `unknown_branch`, as the Session protocol answers it: the
+/// invalid-input code with the tree's own message. A line's first input can
+/// start its first turn before the line is marked ready, so the move can meet
+/// this transient state.
+fn unknown_branch(error: &dim_client::Error) -> bool {
+    dim_client::app_error(error) == Some("session_invalid_input")
+        && error
+            .downcast_ref::<dim_client::RpcError>()
+            .is_some_and(|error| error.message.starts_with("unknown branch:"))
+}
+
+/// Runs the next move once it is due: the Session's default branch moves
+/// first, and then the inputs the move sends: the one on the new default,
+/// naming a line only when the scenario does, and the one meant for the line
+/// it moved away from. With `notes`, those inputs wait for the notes the move
+/// writes on the lines that answer them, and each input is recorded with its
+/// note for the run's check before the judge. A move fires once and leaves the
+/// queue; the move after it fires on a later call once its input has been
+/// consumed, and is activated here with the tool line the run has seen opened.
+async fn fire_switch(
+    client: &mut impl SwitchClient,
+    session: &str,
+    switches: &mut VecDeque<PendingSwitch>,
+    default: &mut String,
+    latest_tool_line: Option<&str>,
+    notes: Option<&mut SwitchNotes>,
+) -> std::result::Result<SwitchFire, String> {
+    let Some(pending) = switches.front_mut() else {
+        return Ok(SwitchFire::NotFired);
+    };
+    if pending.moved {
+        return send_switch_follow_ups(client, session, switches, latest_tool_line, notes).await;
+    }
+    if !pending.triggered {
+        return Ok(SwitchFire::NotFired);
+    }
+    let Some(line) = pending.line.clone() else {
+        return Ok(SwitchFire::NotFired);
+    };
+    if let Err(error) = client
+        .rpc(
+            "session.branch_set_default",
+            json!({"sessionId": session, "branchId": line}),
+        )
+        .await
+    {
+        if let Some("branch_ended" | "branch_target_protected") = dim_client::app_error(&error) {
+            switches.pop_front();
+            return Ok(SwitchFire::TargetEnded {
+                line: line.clone(),
+                error: error.to_string(),
+            });
+        }
+        if unknown_branch(&error) {
+            if pending.retries_left > 0 {
+                pending.retries_left -= 1;
+                return Ok(SwitchFire::Retry);
+            }
+            switches.pop_front();
+            return Ok(SwitchFire::TargetUnknown {
+                line: line.clone(),
+                error: error.to_string(),
+            });
+        }
+        return Err(format!("the switch to {line} failed: {error}"));
+    }
+    let pending = switches.front_mut().expect("the switch is pending");
+    let former = std::mem::replace(default, line);
+    pending.moved = true;
+    pending.former = Some(former);
+    send_switch_follow_ups(client, session, switches, latest_tool_line, notes).await
+}
+
+/// Sends a moved switch's follow-ups once the notes they must follow are in,
+/// and records each input with the note its line answers under. A line the
+/// move owes a note that ended first fails the run's switch instead.
+async fn send_switch_follow_ups(
+    client: &mut impl SwitchClient,
+    session: &str,
+    switches: &mut VecDeque<PendingSwitch>,
+    latest_tool_line: Option<&str>,
+    mut notes: Option<&mut SwitchNotes>,
+) -> std::result::Result<SwitchFire, String> {
+    let Some(pending) = switches.front() else {
+        return Ok(SwitchFire::NotFired);
+    };
+    let target = pending.line.clone().expect("a moved switch names its line");
+    let former = pending.former.clone().expect("a moved switch left a line");
+    let wanted = pending.notes(&target, &former);
+    if notes.is_some() {
+        if let Some((line, error)) = &pending.ended
+            && wanted.iter().any(|(awaited, _, _)| awaited == line)
+        {
+            let line = line.clone();
+            let error = error.clone();
+            switches.pop_front();
+            return Ok(SwitchFire::TargetEnded { line, error });
+        }
+        if !wanted
+            .iter()
+            .all(|(line, default, other)| pending.saw_note(line, *default, other))
+        {
+            return Ok(SwitchFire::NotFired);
+        }
+    }
+    let pending = switches.pop_front().expect("the switch is pending");
+    let message_line = pending
+        .switch
+        .branch_id
+        .clone()
+        .unwrap_or_else(|| target.clone());
+    let receipt = submit(
+        client,
+        session,
+        &pending.switch.message,
+        None,
+        pending.switch.branch_id.as_deref(),
+    )
+    .await?;
+    if let Some(gate) = notes.as_mut() {
+        let input = receipt.clone().ok_or_else(|| {
+            format!("session.submit answered no input id for the switch to {target}")
+        })?;
+        gate.inputs.push(FixtureInput {
+            what: SWITCH_INPUT,
+            line: message_line.clone(),
+            input: Some(input.clone()),
+        });
+        for (line, default, other) in &wanted {
+            if *line == message_line {
+                gate.expected.push(SwitchNote {
+                    line: line.clone(),
+                    input: input.clone(),
+                    default: *default,
+                    other: other.clone(),
+                });
+            }
+        }
+    }
+    if let Some(message) = pending.switch.former_message.as_deref() {
+        let receipt = submit(client, session, message, None, Some(former.as_str())).await?;
+        if let Some(gate) = notes.as_mut() {
+            let input = receipt.ok_or_else(|| {
+                format!("session.submit answered no input id for the switch to {target}")
+            })?;
+            gate.inputs.push(FixtureInput {
+                what: FORMER_INPUT,
+                line: former.clone(),
+                input: Some(input.clone()),
+            });
+            if former != "main" {
+                gate.expected.push(SwitchNote {
+                    line: former.clone(),
+                    input,
+                    default: false,
+                    other: target.clone(),
+                });
+            }
+        }
+    }
+    if let Some(next) = switches.front_mut() {
+        next.activated(latest_tool_line, receipt.map(|input| (message_line, input)));
+    }
+    Ok(SwitchFire::Fired)
+}
+
+/// Sends the timed steers that are due, and whether it sent one. A steer is a
+/// fixture input: its receipt names the line the Session's default branch was
+/// when it was sent.
 async fn fire_due(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     steers: &mut [(Steer, bool)],
+    line: &str,
+    inputs: &mut Vec<FixtureInput>,
     started: Instant,
 ) -> std::result::Result<bool, String> {
     let mut sent = false;
@@ -5776,7 +8511,13 @@ async fn fire_due(
             .is_some_and(|after| started.elapsed().as_secs_f64() >= after);
         if due && !*fired {
             *fired = true;
-            submit(client, session, &steer.text, Some(InputMode::Steer)).await?;
+            let receipt =
+                submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            inputs.push(FixtureInput {
+                what: STEER_INPUT,
+                line: line.to_owned(),
+                input: receipt,
+            });
             sent = true;
         }
     }
@@ -5786,9 +8527,11 @@ async fn fire_due(
 /// Sends the event-triggered steers whose substring the notice's
 /// `step/tool-use` event carries, and whether it sent one.
 async fn fire_triggered(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     steers: &mut [(Steer, bool)],
+    line: &str,
+    inputs: &mut Vec<FixtureInput>,
     event: &Value,
 ) -> std::result::Result<bool, String> {
     if event["type"] != "step" || event["name"] != "tool-use" {
@@ -5803,11 +8546,23 @@ async fn fire_triggered(
             .is_some_and(|trigger| data.contains(trigger.as_str()));
         if triggered && !*fired {
             *fired = true;
-            submit(client, session, &steer.text, Some(InputMode::Steer)).await?;
+            let receipt =
+                submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            inputs.push(FixtureInput {
+                what: STEER_INPUT,
+                line: line.to_owned(),
+                input: receipt,
+            });
             sent = true;
         }
     }
     Ok(sent)
+}
+
+/// The wall clock left of the scenario's budget, counted from the first
+/// submission; a run past its budget has none left.
+fn time_left(started: Instant, budget: &Budget) -> Duration {
+    Duration::from_secs_f64((budget.seconds - started.elapsed().as_secs_f64()).max(0.))
 }
 
 /// How long to wait for the next notice: until the next timed steer, the
@@ -5923,6 +8678,57 @@ impl IdleCalls {
     }
 }
 
+/// The step after the first idle: every line without a completed compaction of
+/// this run is compacted, then each line is asked one request (Timeline
+/// branches §12.3). A compaction that does not complete ends the run here
+/// instead of letting the next request be judged as one after a compaction:
+/// the probe reads identity across a compaction, and a run that did not compact
+/// measures nothing else. Answers each line's input, in the order sent, so the
+/// caller can tell whether a request followed it.
+async fn settle_after_idle(
+    client: &mut impl SwitchClient,
+    session: &str,
+    lines: &[String],
+    after: &AfterIdle,
+    compacted: &BTreeSet<String>,
+) -> std::result::Result<Vec<(String, Option<String>)>, String> {
+    for line in lines {
+        if compacted.contains(line) {
+            continue;
+        }
+        let reply = client
+            .rpc(
+                "session.context.compact",
+                json!({"sessionId": session, "branchId": line}),
+            )
+            .await
+            .map_err(|error| format!("{line}: session.context.compact failed: {error}"))?;
+        match reply["status"].as_str() {
+            Some("completed") => {}
+            Some("skipped") => {
+                return Err(format!(
+                    "{line}: the compaction after the first idle was skipped: {}",
+                    reply["reason"].as_str().unwrap_or("no reason given")
+                ));
+            }
+            status => {
+                return Err(format!(
+                    "{line}: the compaction after the first idle answered {}",
+                    status.unwrap_or("no status")
+                ));
+            }
+        }
+    }
+    let mut submitted = Vec::with_capacity(lines.len());
+    for line in lines {
+        let input = submit(client, session, &after.request, None, Some(line))
+            .await
+            .map_err(|error| format!("{line}: the request after the idle failed: {error}"))?;
+        submitted.push((line.clone(), input));
+    }
+    Ok(submitted)
+}
+
 /// Whether every known line is idle and no notice arrived while it asked.
 /// `session.idle` returns when the line is idle; a short deadline keeps a busy
 /// line from holding the driver, and a call whose deadline passes stays
@@ -5972,12 +8778,31 @@ async fn idle(
 /// The export as the judge reads it (issue #635): every line in order, with
 /// each request-bearing event's request rendered against the previous request
 /// of the same line, so a run does not carry a request's unchanged history
-/// once per model call.
+/// once per model call. A request's consecutive `step/thinking` deltas render
+/// as one line with their text joined, because a delta line carries mostly an
+/// id and field names and the judge reads the run as a whole (issue #2139).
 fn judge_view(export: &str) -> String {
+    /// A request's open `step/thinking` line and its deltas' text so far.
+    struct Thinking {
+        key: (String, String, String),
+        line: Value,
+        text: String,
+    }
+    let flush = |view: &mut String, thinking: &mut Option<Thinking>| {
+        if let Some(mut thinking) = thinking.take() {
+            thinking.line["event"]["data"]["delta"] = json!(thinking.text);
+            view.push_str(
+                &serde_json::to_string(&thinking.line).expect("a parsed line serializes"),
+            );
+            view.push('\n');
+        }
+    };
     let mut view = String::new();
     let mut previous: BTreeMap<String, Value> = BTreeMap::new();
+    let mut thinking: Option<Thinking> = None;
     for raw in export.lines() {
         let Ok(mut line) = serde_json::from_str::<Value>(raw) else {
+            flush(&mut view, &mut thinking);
             view.push_str(raw);
             view.push('\n');
             continue;
@@ -5988,10 +8813,49 @@ fn judge_view(export: &str) -> String {
             line["event"]["data"]["request"] = rendered_request(&request, previous.get(&branch));
             previous.insert(branch, request);
         }
-        view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
-        view.push('\n');
+        let Some(key) = thinking_key(&line) else {
+            flush(&mut view, &mut thinking);
+            view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
+            view.push('\n');
+            continue;
+        };
+        let delta = line["event"]["data"]["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(open) = thinking.as_mut()
+            && open.key == key
+        {
+            open.text.push_str(&delta);
+            continue;
+        }
+        flush(&mut view, &mut thinking);
+        thinking = Some(Thinking {
+            key,
+            line,
+            text: delta,
+        });
     }
+    flush(&mut view, &mut thinking);
     view
+}
+
+/// The request a `step/thinking` line belongs to: the line, the turn and the
+/// request. A delta joins the open thinking line only when all three match.
+fn thinking_key(line: &Value) -> Option<(String, String, String)> {
+    (line["event"]["type"] == "step" && line["event"]["name"] == "thinking").then(|| {
+        (
+            line["branch_id"].as_str().unwrap_or_default().to_owned(),
+            line["event"]["data"]["turn_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            line["event"]["data"]["request_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    })
 }
 
 /// One request as [`judge_view`] renders it, starting from the request object
@@ -6285,7 +9149,9 @@ struct ProbeCounts {
 
 /// The arm's metrics over its scenarios and runs (model-prompts §8.1). An
 /// unjudged or failed run adds nothing to the probe rates; the arm counts it
-/// in its own rate.
+/// in its own rate. An incomplete fixture is compared with neither: it is
+/// reported apart, and its arm's rates are read over the runs it attempted
+/// that had something to compare.
 #[derive(Default)]
 struct Metrics {
     /// `(scenario, probe)` → its counted runs and the passes among them.
@@ -6299,11 +9165,21 @@ struct Metrics {
     /// Runs the judge gave no answer to, that did not fail on their own,
     /// left out of every other count.
     unjudged: u32,
-    /// Every run of the arm, failed and unjudged included.
+    /// The runs the arm's rates are computed over: judged, failed and unjudged.
     runs: u32,
+    /// Every run the arm attempted, the incomplete fixtures included.
+    attempted: u32,
+    /// Runs the harness's turn cap stopped before the request its probe reads
+    /// existed, left out of `runs` (model-prompts §8.1).
+    incomplete: u32,
 }
 impl Metrics {
     fn add(&mut self, scenario: &Scenario, record: &RunRecord) {
+        self.attempted += 1;
+        if record.incomplete.is_some() {
+            self.incomplete += 1;
+            return;
+        }
         self.runs += 1;
         if record.unjudged() {
             self.unjudged += 1;
@@ -6523,7 +9399,7 @@ impl Instrument {
         self.judge_window = self.judge_window.take().or(measured.judge_window);
         let asked = !matches!(
             record.judge_outcome,
-            JudgeOutcome::NotAsked | JudgeOutcome::Unfit
+            JudgeOutcome::NotAsked | JudgeOutcome::Unfit | JudgeOutcome::Unobserved
         );
         match record.temperature_dropped {
             Some(dropped) => self.judge_temperature_dropped += usize::from(dropped),
@@ -6579,6 +9455,9 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         };
         metrics.entry(record.arm).or_default().add(scenario, record);
     }
+    let empty = Metrics::default();
+    let current = metrics.get("current").unwrap_or(&empty);
+    let candidate = metrics.get("candidate").unwrap_or(&empty);
     let window = instrument.judge_window.map_or_else(String::new, |window| {
         format!(
             ", window {}, max output {}",
@@ -6586,8 +9465,9 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         )
     });
     let mut text = String::from("| | |\n| --- | --- |\n");
-    // A report built from saved runs names its sources instead: no saved run
-    // records the texts under test.
+    // A report built from saved runs names its sources instead: a pool or a
+    // re-judge is given no --text, and the arm rows below state the texts the
+    // saved records carry.
     if instrument.sources.is_none() {
         let texts: Vec<String> = instrument
             .texts
@@ -6595,6 +9475,34 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
             .map(|text| format!("`{text}`"))
             .collect();
         text += &format!("| text | {} |\n", texts.join(", "));
+    }
+    // Each evaluation's runs carry the configured texts it was given. A pool
+    // and a rejudge refuse runs of one arm that mix recorded and unrecorded
+    // texts, so the first record that names them states the arm's set.
+    let configured = |arm: &str| {
+        records
+            .iter()
+            .find(|record| record.arm == arm && !record.texts.is_empty())
+            .map(|record| record.texts.as_slice())
+    };
+    for arm in ["current", "candidate"] {
+        if !records.iter().any(|record| record.arm == arm) {
+            continue;
+        }
+        let Some(texts) = configured(arm) else {
+            text += &format!("| {arm} configured texts | not recorded |\n");
+            continue;
+        };
+        let listed: Vec<String> = texts
+            .iter()
+            .map(|text| {
+                format!(
+                    "`{}`: {} bytes, fingerprint {}",
+                    text.id, text.bytes, text.fingerprint
+                )
+            })
+            .collect();
+        text += &format!("| {arm} configured texts | {} |\n", listed.join("; "));
     }
     text += &format!(
         "| model | `{}/{}`, {} |\n| judge | `{}/{}`, temperature 0, {}{window} |\n| runs | {} per arm and scenario |\n",
@@ -6605,6 +9513,13 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         instrument.judge.model_id,
         carried(&instrument.judge_configuration),
         instrument.runs,
+    );
+    // The rates quote the runs with something to compare; the arm's attempts
+    // and the fixtures its own turn cap left unobserved are reported beside
+    // them, and enter no rate (model-prompts §8.1).
+    text += &format!(
+        "| attempted runs | current {}, candidate {} |\n| incomplete fixtures | current {}, candidate {} |\n",
+        current.attempted, candidate.attempted, current.incomplete, candidate.incomplete,
     );
     if instrument.sources.is_none() {
         let tokens: Vec<String> = instrument
@@ -6674,9 +9589,6 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         );
         text.push('\n');
     }
-    let empty = Metrics::default();
-    let current = metrics.get("current").unwrap_or(&empty);
-    let candidate = metrics.get("candidate").unwrap_or(&empty);
     // The fewest judged runs an arm ran a scenario: the floor the verdict
     // needs. Failed and unjudged runs are compared in their own rows and do
     // not count here, because they enter no probe rate (model-prompts §8.1).
@@ -6718,6 +9630,50 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
                 record.scenario,
                 record.run,
                 error.lines().next().unwrap_or_default(),
+            );
+        }
+    }
+    // A run that failed before its first request is a setup failure, not the
+    // model's answer: the report names it apart from the run failures beside
+    // the rates it left, so a probe no run was judged on is not read as a lost
+    // identity (Timeline branches §12.3).
+    let failed_runs: Vec<&RunRecord> = records.iter().filter(|record| record.failed).collect();
+    if !failed_runs.is_empty() {
+        text += "\n| arm | scenario | run | failure | error |\n| --- | --- | --- | --- | --- |\n";
+        for record in failed_runs {
+            let failure = if record.stop == "setup_failed" {
+                "setup"
+            } else {
+                "run"
+            };
+            let error = record.error.as_deref().unwrap_or_default();
+            text += &format!(
+                "| {} | {} | {} | {failure} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                error.lines().next().unwrap_or_default(),
+            );
+        }
+    }
+    // A run the harness stopped before a request its probes read existed is an
+    // incomplete fixture, not the model's answer: the report names it apart
+    // from the failed runs and the rates it left, so a probe no run was judged
+    // on is not read as a lost identity (model-prompts §8.1).
+    let incomplete_runs: Vec<&RunRecord> = records
+        .iter()
+        .filter(|record| record.incomplete.is_some())
+        .collect();
+    if !incomplete_runs.is_empty() {
+        text += "\n| arm | scenario | run | incomplete |\n| --- | --- | --- | --- |\n";
+        for record in incomplete_runs {
+            let reason = record.incomplete.as_deref().unwrap_or_default();
+            text += &format!(
+                "| {} | {} | {} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                reason.lines().next().unwrap_or_default(),
             );
         }
     }
@@ -6825,6 +9781,9 @@ mod tests {
             sources: Vec::new(),
             events: Vec::new(),
             steers: Vec::new(),
+            switch: None,
+            moves: Vec::new(),
+            after_idle: None,
             budget: Budget {
                 turns: 4,
                 seconds: 60.,
@@ -6843,12 +9802,14 @@ mod tests {
             arm,
             scenario: scenario.id.clone(),
             run: 0,
+            texts: Vec::new(),
             session: None,
             stop: "idle",
             turns: 1,
             window: None,
             duration_ms: 0.,
             failed: failed("idle", None, judge_outcome),
+            incomplete: None,
             judge_outcome,
             error: None,
             judge_error: None,
@@ -6856,6 +9817,7 @@ mod tests {
             judge_calls: Vec::new(),
             temperature_dropped: Some(false),
             decline_retries: Some(0),
+            switch_retries: Some(0),
             events: Vec::new(),
             reply_calls: Vec::new(),
             probes: verdicts
@@ -6871,6 +9833,13 @@ mod tests {
                     quote: None,
                 })
                 .collect(),
+        }
+    }
+    /// The error a `NotesCheck` reported, when it found an unseen request.
+    fn unseen_note(check: NotesCheck) -> Option<String> {
+        match check {
+            NotesCheck::Unseen(error) => Some(error),
+            NotesCheck::Observed | NotesCheck::CapCut => None,
         }
     }
     fn metrics(scenario: &Scenario, records: &[RunRecord]) -> Metrics {
@@ -7011,28 +9980,2533 @@ mod tests {
     }
 
     /// A scenario's steers are the operator's: they go out in Steer mode, so
-    /// a waiting `main` takes them, and the initial message carries no mode
-    /// and is queued input (issue #728).
+    /// a waiting line takes them, and the initial message carries no mode and
+    /// is queued input (issue #728). Neither names a line: an input without
+    /// `branchId` lands on the Session's default branch, which is the line a
+    /// steer after a switch reaches.
     #[test]
     fn a_steer_is_submitted_in_steer_mode_and_the_message_without_one() {
-        let params = submit_params("session", "go", None);
+        let params = submit_params("session", "go", None, None);
         assert!(params.get("mode").is_none(), "{params}");
+        assert!(params.get("branchId").is_none(), "{params}");
         let message: dim_app_server::protocol::Submit =
             serde_json::from_value(params).expect("the first message is a Submit");
         assert_eq!(message.text.as_deref(), Some("go"));
         assert_eq!(message.mode, None);
-        let params = submit_params("session", "also", Some(InputMode::Steer));
+        assert_eq!(message.branch_id, None);
+        let params = submit_params("session", "also", Some(InputMode::Steer), Some("main"));
         let steer: dim_app_server::protocol::Submit =
             serde_json::from_value(params).expect("a steer is a Submit");
         assert_eq!(steer.text.as_deref(), Some("also"));
         assert_eq!(steer.mode, Some(InputMode::Steer));
+        assert_eq!(steer.branch_id.as_deref(), Some("main"));
     }
 
-    /// The committed set parses through the runner's own reader, and the two
-    /// pairs that share a premise stay equal: the compact scenario reuses
-    /// `redone-work`'s message and workspace, and `flooding` and
-    /// `never-ending` share one workspace (Timeline branches §12.3). No model
-    /// runs, so CI catches a schema, layout or pair drift before a manual run.
+    /// A switch names the line to move to by role or by id, and the input
+    /// after the move; the runner moves the default branch at the target
+    /// line's first `turn/start` (model-prompts §9.8).
+    #[test]
+    fn a_switch_step_names_a_line_and_its_next_input() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-switch-{}", std::process::id()));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        let parse = |switch: Value| {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "first",
+                "switch": switch,
+                "budget": {"turns": 3, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "it ran"}]
+            }))
+            .unwrap();
+            into_scenario("case".into(), directory.clone(), file)
+        };
+        let scenario = parse(json!({
+            "to": {"role": "latest_tool_line"},
+            "message": "second"
+        }))
+        .unwrap();
+        let switch = scenario.switch.expect("the scenario switches");
+        assert!(matches!(
+            switch.to,
+            SwitchTarget::Role(SwitchRole::LatestToolLine)
+        ));
+        assert_eq!(switch.message, "second");
+        assert_eq!(switch.branch_id, None);
+        let scenario = parse(json!({
+            "to": {"id": "3"},
+            "message": "second",
+            "branchId": "main"
+        }))
+        .unwrap();
+        let switch = scenario.switch.expect("the scenario switches");
+        assert!(matches!(&switch.to, SwitchTarget::Id(id) if id == "3"));
+        assert_eq!(switch.branch_id.as_deref(), Some("main"));
+        assert!(
+            parse(json!({"to": {"role": "latest_tool_line"}, "message": " "})).is_err(),
+            "a switch needs the input to send after the move"
+        );
+        assert!(
+            parse(json!({"to": {"id": ""}, "message": "second"})).is_err(),
+            "a switch target id is not empty"
+        );
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// The move's trigger is the target line's first `turn/start`: a tool
+    /// `branch/create` names the role's latest line, and another line's turn
+    /// does not fire it. The run drops the switch after the move, so one
+    /// scenario switches once.
+    #[test]
+    fn a_switch_fires_on_the_target_lines_first_turn_start() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let turn_end = json!({"type": "turn", "name": "end", "data": {}});
+        let create = |branch: &str, kind: &str| {
+            json!({"type": "branch", "name": "create",
+                   "data": {"branch": branch, "source": {"kind": kind}}})
+        };
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        pending.notice("main", &turn_start);
+        assert!(!pending.triggered, "main's turn starts no switch");
+        pending.notice("main", &create("2", "tool"));
+        assert!(!pending.triggered, "opening the line is not its turn");
+        pending.notice("2", &turn_end);
+        assert!(!pending.triggered, "a turn end is not the trigger");
+        pending.notice("2", &turn_start);
+        assert!(pending.triggered, "the target's first turn start is");
+        assert_eq!(pending.line.as_deref(), Some("2"));
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        pending.notice("main", &create("2", "tool"));
+        pending.notice("3", &turn_start);
+        assert!(!pending.triggered, "another line's turn starts no switch");
+        pending.notice("main", &create("3", "user"));
+        pending.notice("3", &turn_start);
+        assert!(
+            !pending.triggered,
+            "a line the user opened is not a tool line"
+        );
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("4".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        pending.notice("4", &turn_start);
+        assert!(pending.triggered);
+    }
+
+    /// A scenario's moves can end on the line its `session.branch_create` call
+    /// opened, and a move can carry the input for the line it moved away from:
+    /// the role and that input parse, and a user-line move without the call is
+    /// refused before any run (design §12.3).
+    #[test]
+    fn a_move_names_the_user_line_and_the_input_for_the_former_default() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-user-line-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        let parse = |moves: Value, calls: Value| {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "first",
+                "calls": calls,
+                "moves": moves,
+                "budget": {"turns": 3, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "it ran"}]
+            }))
+            .unwrap();
+            into_scenario("case".into(), directory.clone(), file)
+        };
+        let create = json!([{"method": "session.branch_create",
+                             "params": {"parentBranchId": "main", "at": 0,
+                                        "prompt": "the user's line"}}]);
+        let scenario = parse(
+            json!([
+                {"to": {"role": "latest_tool_line"}, "message": "second"},
+                {"to": {"role": "user_line"}, "message": "third",
+                 "formerMessage": "report to the user"}
+            ]),
+            create.clone(),
+        )
+        .unwrap();
+        assert_eq!(scenario.moves.len(), 2);
+        assert!(matches!(
+            scenario.moves[1].to,
+            SwitchTarget::Role(SwitchRole::UserLine)
+        ));
+        assert_eq!(
+            scenario.moves[1].former_message.as_deref(),
+            Some("report to the user")
+        );
+        assert!(
+            scenario.switch.is_none(),
+            "a scenario with several moves states them under moves"
+        );
+        let Err(error) = parse(
+            json!([{"to": {"role": "user_line"}, "message": "second"}]),
+            json!([]),
+        ) else {
+            panic!("a user-line move without the call is refused");
+        };
+        assert!(error.contains("session.branch_create"), "{error}");
+        let Err(error) = parse(
+            json!([{"to": {"id": "3"}, "message": "second",
+                    "formerMessage": " "}]),
+            create,
+        ) else {
+            panic!("an empty former-default input is refused");
+        };
+        assert!(error.contains("former-default input is empty"), "{error}");
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// `session_open` is filled from `session.create`, so only a
+    /// `session.branch_create` on `main` may write it: any other call or
+    /// parent would name a line the Session never opened. A numeric `at` is
+    /// still a call's own sequence, whatever its parent.
+    #[test]
+    fn the_session_open_placeholder_needs_a_main_branch_create() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-parse-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        let parse = |calls: Value| {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "first",
+                "calls": calls,
+                "budget": {"turns": 3, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "it ran"}]
+            }))
+            .unwrap();
+            into_scenario("case".into(), directory.clone(), file)
+        };
+        let create = |at: Value, parent: &str| {
+            json!([{"method": "session.branch_create",
+                    "params": {"parentBranchId": parent, "at": at,
+                               "prompt": "the user's line"}}])
+        };
+        let scenario = parse(create(json!(SESSION_OPEN), "main")).unwrap();
+        assert_eq!(scenario.calls[0].params["at"], SESSION_OPEN);
+        let Err(error) = parse(create(json!(SESSION_OPEN), "3")) else {
+            panic!("a line cut from another line cannot start where the Session did");
+        };
+        assert!(
+            error.contains(SESSION_OPEN) && error.contains("main"),
+            "{error}"
+        );
+        let Err(error) = parse(json!([{"method": "session.context.usage",
+                                       "params": {"at": SESSION_OPEN}}]))
+        else {
+            panic!("the placeholder is only a branch_create's at");
+        };
+        assert!(error.contains("session.branch_create"), "{error}");
+        let scenario = parse(create(json!(0), "3")).unwrap();
+        assert_eq!(scenario.calls[0].params["at"], 0);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A second move fires right after the first, and a move that names a
+    /// former-default input sends it to the line it moved away from: the note
+    /// a move writes goes in as `append` input, which never starts a turn, so
+    /// that input is the only thing that brings the former default line's
+    /// answer (model-prompts §9.8).
+    #[tokio::test]
+    async fn a_second_move_fires_after_the_first_and_wakes_the_former_default() {
+        let create = |line: &str| {
+            json!({"type": "branch", "name": "create",
+                   "data": {"branch": line, "source": {"kind": "tool"}}})
+        };
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let mut first = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        first.notice("main", &create("2"));
+        first.notice("2", &turn_start);
+        let second = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::UserLine),
+                message: "to the user line".into(),
+                branch_id: None,
+                former_message: Some("to the former default".into()),
+            },
+            Some("3"),
+            true,
+        );
+        assert!(
+            second.triggered,
+            "a chained move fires after the move before it"
+        );
+        let mut switches: VecDeque<PendingSwitch> = [first, second].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder::default();
+        for move_number in [1, 2] {
+            assert!(
+                matches!(
+                    fire_switch(
+                        &mut client,
+                        "session",
+                        &mut switches,
+                        &mut default,
+                        None,
+                        None
+                    )
+                    .await,
+                    Ok(SwitchFire::Fired)
+                ),
+                "move {move_number}"
+            );
+        }
+        assert!(matches!(
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switches,
+                &mut default,
+                None,
+                None
+            )
+            .await,
+            Ok(SwitchFire::NotFired)
+        ));
+        let calls: Vec<&str> = client
+            .calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "session.branch_set_default",
+                "session.submit",
+                "session.branch_set_default",
+                "session.submit",
+                "session.submit"
+            ],
+            "each move runs before its input, and the former default's input follows the move"
+        );
+        assert_eq!(client.calls[0].1["branchId"], "2");
+        assert_eq!(client.calls[2].1["branchId"], "3");
+        assert_eq!(client.calls[3].1["text"], "to the user line");
+        assert!(
+            client.calls[3].1.get("branchId").is_none(),
+            "the next input lands on the new default branch"
+        );
+        assert_eq!(client.calls[4].1["text"], "to the former default");
+        assert_eq!(
+            client.calls[4].1["branchId"], "2",
+            "the former-default input names the line the move moved away from"
+        );
+        assert_eq!(default, "3", "the last move holds the default branch");
+    }
+
+    /// A move's acknowledgment does not send its follow-up: the line answers
+    /// the input only after it wrote the note, so an idle line cannot answer a
+    /// follow-up before its note lands (Timeline branches §12.4).
+    #[tokio::test]
+    async fn a_follow_up_waits_for_the_note_after_the_moves_acknowledgment() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        pending.notice("2", &turn_start);
+        let mut switches: VecDeque<PendingSwitch> = [pending].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder {
+            inputs: ["i1".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        let mut notes = SwitchNotes::default();
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    Some(&mut notes)
+                )
+                .await,
+                Ok(SwitchFire::NotFired)
+            ),
+            "the move's answer alone sends nothing"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default"],
+            "the follow-up waits for the note the move wrote"
+        );
+        let pending = switches.front_mut().expect("the move waits for its note");
+        pending.notice("2", &move_note("2", true, "main"));
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    Some(&mut notes)
+                )
+                .await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the note releases the follow-up"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default", "session.submit"],
+            "the move runs before its input"
+        );
+        assert_eq!(default, "2", "the move holds the new default");
+        assert_eq!(notes.expected.len(), 1, "one input, one note");
+        assert_eq!(notes.expected[0].line, "2");
+        assert_eq!(notes.expected[0].input, "i1");
+        assert!(notes.expected[0].default);
+        assert_eq!(notes.expected[0].other, "main");
+    }
+
+    /// A chained move waits for the input the move before it sent: the first
+    /// move's target answers with its note in effect before the next move can
+    /// retire it (Timeline branches §12.4).
+    #[tokio::test]
+    async fn a_chained_move_waits_for_the_input_before_it() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let first = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        let second = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("3".into()),
+                message: "to the user line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            true,
+        );
+        let mut switches: VecDeque<PendingSwitch> = [first, second].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder {
+            inputs: ["i1".to_owned(), "i2".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        switches
+            .front_mut()
+            .expect("the first move is pending")
+            .notice("2", &turn_start);
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the first move fires"
+        );
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
+                Ok(SwitchFire::NotFired)
+            ),
+            "the chained move waits for the input before it"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.branch_set_default", "session.submit"],
+            "the second move sends nothing before the first input is consumed"
+        );
+        let pending = switches.front_mut().expect("the second move is pending");
+        pending.notice("2", &consumed("i1"));
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    None
+                )
+                .await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the consumed input releases the chained move"
+        );
+        assert_eq!(default, "3", "the chained move holds the new default");
+    }
+
+    /// The judge is not asked about a request that consumed a switch's input
+    /// without the note the move wrote: the check reads the export's
+    /// consumption and the request that began after it (Timeline branches
+    /// §12.4).
+    #[test]
+    fn a_request_that_consumed_a_follow_up_without_its_note_is_unseen() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |request: &str| {
+            [
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"request_id": "r1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "m1", "sequence": 5, "type": "model", "name": "call",
+                                 "data": {"request_id": "r1",
+                                          "request": {"messages": [{"role": "user", "content": request}]}}}}),
+            ]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        assert!(
+            switch_notes_unseen(&export(note), &notes, None).is_none(),
+            "the request carries the note"
+        );
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
+            .expect("the request without the note is unseen");
+        assert!(unseen.contains("line 2"), "{unseen}");
+    }
+
+    /// A steer can replace the request a line began after it consumed a switch
+    /// input before that request reaches the model. The replacement request in
+    /// the same turn carries the note, so the check reads the first request
+    /// after the consumption that reached the model (issue #2140).
+    #[test]
+    fn a_replaced_request_does_not_hide_the_note_its_replacement_carries() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |request: &str| {
+            [
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"turn_id": "t1", "request_id": "r1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "o1", "sequence": 5, "type": "step", "name": "model-output-end",
+                                 "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                          "reason": "replaced by steer"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s2", "sequence": 6, "type": "step", "name": "model-start",
+                                 "data": {"turn_id": "t1", "request_id": "r2"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "m2", "sequence": 7, "type": "model", "name": "call",
+                                 "data": {"request_id": "r2",
+                                          "request": {"messages": [{"role": "user", "content": request}]}}}}),
+            ]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        assert!(
+            switch_notes_unseen(&export(note), &notes, None).is_none(),
+            "the replacement request carries the note"
+        );
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
+            .expect("the request without the note is still unseen");
+        assert!(unseen.contains("does not carry the note"), "{unseen}");
+    }
+
+    /// A run that closed its session before the follow-up's request reached the
+    /// model is failed on its note: no request of the line carried the text to
+    /// the model, so the probe would score an answer that did not see it
+    /// (Timeline branches §12.4). The same export with no request started after
+    /// the consumption is failed the way the check read it before #2140.
+    #[test]
+    fn a_note_whose_request_the_run_closed_before_the_model_is_unseen() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |start: bool| {
+            let mut records = vec![
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+            ];
+            if start {
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"request_id": "r1"}}}));
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "o1", "sequence": 5, "type": "step", "name": "model-output-end",
+                                 "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                          "reason": "timeline closed"}}}));
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "e1", "sequence": 6, "type": "turn", "name": "end",
+                                 "data": {"status": "cancelled", "reason": "timeline closed"}}}));
+            }
+            records
+                .iter()
+                .map(|record| serde_json::to_string(record).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let unseen = switch_notes_unseen(&export(true), &notes, None)
+            .expect("the closed request never reached the model");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+        let unseen = switch_notes_unseen(&export(false), &notes, None)
+            .expect("no request started after the consumption");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A run that stopped on its turn budget ended the request before its
+    /// model call: the note is not a missing note, but the run has no request
+    /// for its probe to read, so it is an incomplete fixture. The same export
+    /// with any other stop is a missing note (issue #2140).
+    #[test]
+    fn a_turn_budget_stop_makes_a_note_its_stop_ended_incomplete() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = [
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                             "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                    "text": note}]}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                             "data": {}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                             "data": {"input_id": "f1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                             "data": {"turn_id": "t1", "request_id": "r1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "i1", "sequence": 5, "type": "stop", "name": "interrupt",
+                             "data": {"reason": "budget: turns", "scope": "turn"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "o1", "sequence": 6, "type": "step", "name": "model-output-end",
+                             "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                      "reason": "budget: turns"}}}),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let switch_note = || SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        };
+        let notes = [switch_note()];
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![switch_note()],
+                inputs: vec![FixtureInput {
+                    what: SWITCH_INPUT,
+                    line: "2".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        assert!(
+            matches!(switch_note_check(&driven, &export), NotesCheck::CapCut),
+            "the run's turn budget ended the request before its model call"
+        );
+        let unseen = switch_notes_unseen(&export, &notes, None)
+            .expect("any other stop still reports the note");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A turn-budget stop exempts the request it stopped and nothing else: a
+    /// follow-up whose request never reached the model for another reason is
+    /// still reported when a later request of its line meets the cap
+    /// (issue #2140).
+    #[test]
+    fn a_turn_budget_stop_keeps_a_missing_follow_up_the_cap_did_not_stop() {
+        let note = |line: &str| {
+            format!(
+                "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>"
+            )
+        };
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let carried =
+            |text: &str| json!({"blocks": [{"type": "raw", "key": "branch:line", "text": text}]});
+        let export = [
+            // The cap found line 2's follow-up in flight, so that note is not
+            // reported.
+            event("2", 1, "n2", ["input", "message"], carried(&note("2"))),
+            event("2", 2, "f2", ["input", "message"], json!({})),
+            event(
+                "2",
+                3,
+                "c2",
+                ["input", "consumed"],
+                json!({"input_id": "f2"}),
+            ),
+            event(
+                "2",
+                4,
+                "s2",
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r1"}),
+            ),
+            event(
+                "2",
+                5,
+                "i2",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "turn"}),
+            ),
+            // Line 3's follow-up ended before the model for another reason,
+            // and the request the cap stopped on that line is a later one.
+            event("3", 10, "n3", ["input", "message"], carried(&note("3"))),
+            event("3", 11, "f3", ["input", "message"], json!({})),
+            event(
+                "3",
+                12,
+                "c3",
+                ["input", "consumed"],
+                json!({"input_id": "f3"}),
+            ),
+            event(
+                "3",
+                13,
+                "s3",
+                ["step", "model-start"],
+                json!({"turn_id": "t3", "request_id": "r2"}),
+            ),
+            event(
+                "3",
+                14,
+                "o3",
+                ["step", "model-output-end"],
+                json!({"turn_id": "t3", "request_id": "r2", "status": "cancelled",
+                       "reason": "timeline closed"}),
+            ),
+            event(
+                "3",
+                20,
+                "s4",
+                ["step", "model-start"],
+                json!({"turn_id": "t4", "request_id": "r3"}),
+            ),
+            event(
+                "3",
+                21,
+                "m4",
+                ["model", "call"],
+                json!({"request_id": "r3",
+                       "request": {"messages": [{"role": "user",
+                                                  "content": "the follow-up was answered"}]}}),
+            ),
+            event(
+                "3",
+                22,
+                "i3",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "turn"}),
+            ),
+        ]
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let notes = [
+            SwitchNote {
+                line: "2".into(),
+                input: "f2".into(),
+                default: true,
+                other: "main".into(),
+            },
+            SwitchNote {
+                line: "3".into(),
+                input: "f3".into(),
+                default: true,
+                other: "main".into(),
+            },
+        ];
+        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"));
+        assert!(
+            unseen.as_deref().is_some_and(
+                |error| error.contains("line 3") && error.contains("never reached the model")
+            ),
+            "the follow-up the cap did not stop is still missing: {unseen:?}"
+        );
+    }
+
+    /// A request that had already ended when the turn-budget stop reached its
+    /// line was not in flight, so the stop did not keep it from the model: its
+    /// note is still reported (issue #2140). The stop goes to every line, idle
+    /// ones included, so the last start before its interrupt is not always the
+    /// request it stopped.
+    #[test]
+    fn a_turn_budget_stop_does_not_exempt_a_request_that_ended_before_it() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let export = |end: Value| {
+            [
+                event(
+                    1,
+                    "n1",
+                    ["input", "message"],
+                    json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+                ),
+                event(2, "f1", ["input", "message"], json!({})),
+                event(3, "c1", ["input", "consumed"], json!({"input_id": "f1"})),
+                event(
+                    4,
+                    "s1",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t1", "request_id": "r1"}),
+                ),
+                end,
+                event(
+                    6,
+                    "i1",
+                    ["stop", "interrupt"],
+                    json!({"reason": "budget: turns", "scope": "turn"}),
+                ),
+            ]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        for end in [
+            event(
+                5,
+                "o1",
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "completed",
+                       "finish_reason": "end_turn"}),
+            ),
+            event(
+                5,
+                "e1",
+                ["turn", "end"],
+                json!({"turn_id": "t1", "status": "completed", "reason": "end_turn"}),
+            ),
+        ] {
+            let unseen = switch_notes_unseen(&export(end), &notes, Some("budget: turns"))
+                .expect("a request that ended before the stop still needs its note");
+            assert!(unseen.contains("never reached the model"), "{unseen}");
+        }
+    }
+
+    /// A start that carries no turn id is not exempted by the turn-budget stop
+    /// the way a placed request is: without the turn, nothing says the stop
+    /// found this request in flight, and grouping every such start under one
+    /// turn would drop the turn the check reads (Timeline branches §12.4).
+    #[test]
+    fn a_start_without_a_turn_id_is_exempted_by_no_stop() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let export = [
+            event(
+                1,
+                "n1",
+                ["input", "message"],
+                json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+            ),
+            event(2, "f1", ["input", "message"], json!({})),
+            event(3, "c1", ["input", "consumed"], json!({"input_id": "f1"})),
+            event(
+                4,
+                "s1",
+                ["step", "model-start"],
+                json!({"request_id": "r1"}),
+            ),
+            event(
+                5,
+                "i1",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "turn"}),
+            ),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"))
+            .expect("an unplaced request is not exempted by the stop");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A turn-budget stop does not hide a request that reached the model
+    /// without the note: the stop explains a request that never reached the
+    /// model, not one that did (Timeline branches §12.4).
+    #[test]
+    fn a_turn_budget_stop_still_reports_a_request_that_reached_the_model_without_the_note() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = [
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                             "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                    "text": note}]}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                             "data": {}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                             "data": {"input_id": "f1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                             "data": {"request_id": "r1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "m1", "sequence": 5, "type": "model", "name": "call",
+                             "data": {"request_id": "r1",
+                                      "request": {"messages": [{"role": "user", "content": "the follow-up was answered"}]}}}}),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![SwitchNote {
+                    line: "2".into(),
+                    input: "f1".into(),
+                    default: true,
+                    other: "main".into(),
+                }],
+                inputs: Vec::new(),
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let unseen = unseen_note(switch_note_check(&driven, &export)).expect("the note is missing");
+        assert!(unseen.contains("does not carry the note"), "{unseen}");
+    }
+
+    /// The fixture's own inputs must be consumed and followed by a request on
+    /// their line. A run its own budget stopped before the step after the first
+    /// idle, or before the follow-up request, leaves the probe with nothing to
+    /// read: it is an incomplete fixture, not a losing candidate
+    /// (model-prompts §8.1).
+    #[test]
+    fn a_fixture_its_budget_stopped_before_its_requests_is_incomplete() {
+        let event = |branch: &str, sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let mut scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let mut driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let export = [
+            event(
+                "main",
+                1,
+                ["input", "message"],
+                json!({"user": {"content": "message"}}),
+            ),
+            event("main", 2, ["input", "consumed"], json!({"input_id": "m1"})),
+            event(
+                "main",
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                "main",
+                4,
+                ["model", "call"],
+                json!({"request_id": "r1", "request": {}}),
+            ),
+        ]
+        .join("\n");
+        let reason = fixture_incomplete(&driven, &scenario, &export).unwrap();
+        assert!(
+            reason.contains("before the step after the first idle"),
+            "{reason}"
+        );
+
+        driven.inputs.push(FixtureInput {
+            what: AFTER_IDLE_INPUT,
+            line: "main".into(),
+            input: Some("f1".into()),
+        });
+        let consumed = [
+            event(
+                "main",
+                6,
+                ["input", "message"],
+                json!({"user": {"content": "Re-run the tests."}}),
+            ),
+            event("main", 7, ["input", "consumed"], json!({"input_id": "f1"})),
+        ]
+        .join("\n");
+        let reason =
+            fixture_incomplete(&driven, &scenario, &format!("{export}\n{consumed}")).unwrap();
+        assert!(reason.contains("no request carried"), "{reason}");
+
+        let after = [
+            consumed.clone(),
+            event(
+                "main",
+                8,
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r2"}),
+            ),
+            event(
+                "main",
+                9,
+                ["model", "call"],
+                json!({"request_id": "r2", "request": {}}),
+            ),
+        ]
+        .join("\n");
+        assert_eq!(
+            fixture_incomplete(&driven, &scenario, &format!("{export}\n{after}")),
+            None,
+            "the request after the follow-up makes the fixture complete"
+        );
+    }
+
+    /// A run that stopped on its wall clock is a failed run, not an incomplete
+    /// fixture: the harness did not stop it before a request its probes read
+    /// existed, the run's own budget did, and a probe that saw no request is
+    /// the candidate's outcome (model-prompts §8.1).
+    #[test]
+    fn a_run_that_stopped_on_its_wall_clock_is_failed_not_incomplete() {
+        let mut scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let driven = Driven {
+            session: "s".into(),
+            stop: "seconds",
+            timed_out: true,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let export = json!({"kind": "event", "branch_id": "main",
+                            "event": {"id": "e1", "sequence": 1, "type": "input",
+                                      "name": "message", "data": {}}})
+        .to_string();
+        assert_eq!(
+            incomplete_reason(&driven, &scenario, &export, &NotesCheck::Observed),
+            None,
+            "the wall clock ended the run, not the step after the first idle"
+        );
+        assert!(
+            failed(driven.stop, driven.error.as_deref(), JudgeOutcome::Judged),
+            "a run that stopped on its wall clock is a failed run"
+        );
+    }
+
+    /// A switch follow-up request the run's turn cap stopped has no request
+    /// for its probe to read: the note check reports the cap, and the run is
+    /// incomplete rather than scored (model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_switch_follow_up_makes_the_run_incomplete() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(
+                1,
+                ["input", "message"],
+                json!({"user": {"content": "message"}}),
+            ),
+            event(2, ["input", "consumed"], json!({"input_id": "m1"})),
+            event(
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                4,
+                ["model", "call"],
+                json!({"request_id": "r1", "request": {}}),
+            ),
+        ]
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 4,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let reason =
+            incomplete_reason(&driven, &scenario(Vec::new()), &export, &NotesCheck::CapCut)
+                .unwrap();
+        assert!(
+            reason.contains("switch follow-up") && reason.contains("turn budget"),
+            "{reason}"
+        );
+    }
+
+    /// An input belongs to the turn that consumed it: a later turn's request
+    /// does not carry it, a call with no `step/model-start` is no request, and
+    /// a request a steer replaced inside the same turn answers for it
+    /// (model-prompts §8.1).
+    #[test]
+    fn a_fixture_input_is_carried_only_by_the_request_of_its_turn() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        let message: Vec<String> = vec![
+            event(
+                1,
+                ["input", "message"],
+                json!({"user": {"content": "message"}}),
+            ),
+            event(2, ["input", "consumed"], json!({"input_id": "m1"})),
+        ];
+        let mut later_turn = message.clone();
+        later_turn.extend([
+            event(
+                3,
+                ["turn", "end"],
+                json!({"turn_id": "t1", "status": "cancelled", "reason": "end_turn"}),
+            ),
+            event(4, ["turn", "start"], json!({"turn_id": "t2"})),
+            event(
+                5,
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r2"}),
+            ),
+            event(
+                6,
+                ["model", "call"],
+                json!({"request_id": "r2", "request": {}}),
+            ),
+        ]);
+        assert!(
+            fixture_incomplete(&driven, &scenario, &later_turn.join("\n"))
+                .is_some_and(|reason| reason.contains("no request carried")),
+            "a later turn's request does not carry the input"
+        );
+        let mut call_only = message.clone();
+        call_only.push(event(
+            3,
+            ["model", "call"],
+            json!({"request_id": "r1", "request": {}}),
+        ));
+        assert!(
+            fixture_incomplete(&driven, &scenario, &call_only.join("\n")).is_some(),
+            "a call with no request start did not carry the input"
+        );
+        let mut replaced = message.clone();
+        replaced.extend([
+            event(
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                4,
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                       "reason": "replaced by steer"}),
+            ),
+            event(
+                5,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r2"}),
+            ),
+            event(
+                6,
+                ["model", "call"],
+                json!({"request_id": "r2", "request": {}}),
+            ),
+        ]);
+        assert_eq!(
+            fixture_incomplete(&driven, &scenario, &replaced.join("\n")),
+            None,
+            "the request that replaced it in the same turn carries the input"
+        );
+    }
+
+    /// A switch follow-up the run's turn cap stopped before any turn consumed
+    /// it leaves the probe with no request to read: the run is an incomplete
+    /// fixture, not a scored answer, and a run that ended idle keeps the
+    /// scoring it had (model-prompts §8.1).
+    #[test]
+    fn a_switch_follow_up_no_turn_consumed_is_an_incomplete_fixture() {
+        let export = json!({"kind": "event", "branch_id": "2",
+                            "event": {"id": "e1", "sequence": 1, "type": "model", "name": "call",
+                                      "data": {"request_id": "r1", "request": {}}}})
+        .to_string();
+        let driven = |stop: &'static str| Driven {
+            session: "s".into(),
+            stop,
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs: vec![FixtureInput {
+                    what: SWITCH_INPUT,
+                    line: "2".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        assert!(
+            matches!(
+                switch_note_check(&driven("turns"), &export),
+                NotesCheck::CapCut
+            ),
+            "the turn cap left the follow-up unobserved"
+        );
+        assert!(
+            matches!(
+                switch_note_check(&driven("idle"), &export),
+                NotesCheck::Observed
+            ),
+            "an input no turn consumed is not checked on an idle run"
+        );
+    }
+
+    /// A switch input the line consumed, whose request never reached the model
+    /// for any reason other than the run's turn cap, fails the run before the
+    /// judge: no request of the consuming turn carried the input, on the root
+    /// line that owes no note as on any other (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_consumed_switch_input_whose_request_never_reached_the_model_is_unseen() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(1, ["input", "message"], json!({})),
+            event(2, ["input", "consumed"], json!({"input_id": "f1"})),
+            event(
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                4,
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                       "reason": "timeline closed"}),
+            ),
+        ]
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "idle",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs: vec![FixtureInput {
+                    what: FORMER_INPUT,
+                    line: "main".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let unseen = unseen_note(switch_note_check(&driven, &export))
+            .expect("the request that consumed the input never reached the model");
+        assert!(
+            unseen.contains("line main consumed the former line's request after the switch"),
+            "{unseen}"
+        );
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A switch input belongs to the turn its line consumed it in: a request a
+    /// later turn began does not answer for it, even when it carries the note
+    /// (Timeline branches §12.4).
+    #[test]
+    fn a_later_turn_does_not_answer_for_a_switch_input() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(
+                1,
+                ["input", "message"],
+                json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+            ),
+            event(2, ["input", "message"], json!({})),
+            event(3, ["input", "consumed"], json!({"input_id": "e2"})),
+            event(
+                4,
+                ["turn", "end"],
+                json!({"turn_id": "t1", "status": "cancelled", "reason": "end_turn"}),
+            ),
+            event(5, ["turn", "start"], json!({"turn_id": "t2"})),
+            event(
+                6,
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r2"}),
+            ),
+            event(
+                7,
+                ["model", "call"],
+                json!({"request_id": "r2",
+                       "request": {"messages": [{"role": "user", "content": note}]}}),
+            ),
+        ]
+        .join("\n");
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "e2".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let unseen = switch_notes_unseen(&export, &notes, None);
+        assert!(
+            unseen
+                .as_deref()
+                .is_some_and(|error| error.contains("never reached the model")),
+            "a later turn does not answer for the input: {unseen:?}"
+        );
+    }
+
+    /// The outcome a run's record takes from its note check and its incomplete
+    /// reason, in the order the runner reads them (model-prompts §8.1): a note
+    /// check that finds an unseen request fails the run before the judge, and
+    /// only a run without one is an incomplete fixture.
+    fn scored_switch_run(driven: &Driven, export: &str) -> (NotesCheck, Option<String>, Metrics) {
+        let scenario = scenario(Vec::new());
+        let check = switch_note_check(driven, export);
+        let mut stop = driven.stop;
+        let mut error = driven.error.clone();
+        let mut incomplete = None;
+        let judge = if let NotesCheck::Unseen(message) = &check {
+            stop = "switch_note_missing";
+            error = Some(message.clone());
+            JudgeOutcome::NotAsked
+        } else {
+            incomplete = incomplete_reason(driven, &scenario, export, &check);
+            if incomplete.is_some() {
+                JudgeOutcome::NotAsked
+            } else {
+                JudgeOutcome::Judged
+            }
+        };
+        let mut record = record("current", &scenario, &[], judge);
+        record.stop = stop;
+        record.failed = failed(stop, error.as_deref(), judge);
+        record.incomplete = incomplete.clone();
+        let mut metrics = Metrics::default();
+        metrics.add(&scenario, &record);
+        (check, incomplete, metrics)
+    }
+
+    /// A run whose receipt the turn cap left unobserved still fails on every
+    /// confirmed failure it shows, and enters gate 1's failed runs rather than
+    /// the report's incomplete fixtures (model-prompts §8.1).
+    fn assert_confirmed_failure(
+        case: &str,
+        check: &NotesCheck,
+        incomplete: &Option<String>,
+        metrics: &Metrics,
+        needle: &str,
+    ) {
+        match check {
+            NotesCheck::Unseen(error) => {
+                assert!(error.contains(needle), "{case}: {error}");
+            }
+            NotesCheck::Observed | NotesCheck::CapCut => {
+                panic!(
+                    "{case}: the receipt the cap cut hid the failure this run confirms: {check:?}"
+                )
+            }
+        }
+        assert_eq!(
+            incomplete, &None,
+            "{case}: a confirmed failure is not an incomplete fixture"
+        );
+        assert_eq!(
+            (
+                metrics.attempted,
+                metrics.runs,
+                metrics.failed,
+                metrics.incomplete
+            ),
+            (1, 1, 1, 0),
+            "{case}: a confirmed failure enters gate 1's failed runs, not its incomplete fixtures"
+        );
+    }
+
+    /// A receipt the run's turn cap left unobserved does not hide another
+    /// receipt that reached the model without its note, whether the missing
+    /// note came before or after the cap-cut one (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_receipt_does_not_hide_a_request_that_reached_the_model_without_its_note() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let missing_note = || -> Vec<Value> {
+            vec![
+                event(
+                    "2",
+                    1,
+                    "n2",
+                    ["input", "message"],
+                    json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+                ),
+                event("2", 2, "f2", ["input", "message"], json!({})),
+                event(
+                    "2",
+                    3,
+                    "c2",
+                    ["input", "consumed"],
+                    json!({"input_id": "f2"}),
+                ),
+                event(
+                    "2",
+                    4,
+                    "s2",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t2", "request_id": "r2"}),
+                ),
+                event(
+                    "2",
+                    5,
+                    "m2",
+                    ["model", "call"],
+                    json!({"request_id": "r2",
+                           "request": {"messages": [{"role": "user",
+                                                      "content": "the follow-up was answered"}]}}),
+                ),
+            ]
+        };
+        let cap_cut = || -> Vec<Value> {
+            vec![
+                event("3", 1, "f3", ["input", "message"], json!({})),
+                event(
+                    "3",
+                    2,
+                    "c3",
+                    ["input", "consumed"],
+                    json!({"input_id": "f3"}),
+                ),
+                event(
+                    "3",
+                    3,
+                    "s3",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t3", "request_id": "r3"}),
+                ),
+                event(
+                    "3",
+                    4,
+                    "i3",
+                    ["stop", "interrupt"],
+                    json!({"reason": "budget: turns", "scope": "turn"}),
+                ),
+                event(
+                    "3",
+                    5,
+                    "o3",
+                    ["step", "model-output-end"],
+                    json!({"turn_id": "t3", "request_id": "r3", "status": "cancelled",
+                           "reason": "budget: turns"}),
+                ),
+            ]
+        };
+        let unconsumed = || -> Vec<Value> {
+            vec![
+                event("3", 1, "f3", ["input", "message"], json!({})),
+                event(
+                    "3",
+                    2,
+                    "s3",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t3", "request_id": "r3"}),
+                ),
+            ]
+        };
+        let receipt = |line: &str, input: &str| FixtureInput {
+            what: SWITCH_INPUT,
+            line: line.into(),
+            input: Some(input.into()),
+        };
+        let driven = |inputs: Vec<FixtureInput>| Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![SwitchNote {
+                    line: "2".into(),
+                    input: "f2".into(),
+                    default: true,
+                    other: "main".into(),
+                }],
+                inputs,
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let cases = [
+            (
+                "the missing note's receipt first",
+                vec![receipt("2", "f2"), receipt("3", "f3")],
+                [missing_note(), cap_cut()].concat(),
+            ),
+            (
+                "the cap-cut receipt first",
+                vec![receipt("3", "f3"), receipt("2", "f2")],
+                [cap_cut(), missing_note()].concat(),
+            ),
+            (
+                "the cap left the other receipt unconsumed",
+                vec![receipt("2", "f2"), receipt("3", "f3")],
+                [missing_note(), unconsumed()].concat(),
+            ),
+            (
+                "the cap left the earlier receipt unconsumed",
+                vec![receipt("3", "f3"), receipt("2", "f2")],
+                [unconsumed(), missing_note()].concat(),
+            ),
+        ];
+        for (case, inputs, export) in cases {
+            let export = export
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (check, incomplete, metrics) = scored_switch_run(&driven(inputs), &export);
+            assert_confirmed_failure(
+                case,
+                &check,
+                &incomplete,
+                &metrics,
+                "does not carry the note",
+            );
+        }
+    }
+
+    /// A receipt the run's turn cap left unobserved does not hide a later
+    /// receipt whose request never reached the model, whether that later
+    /// receipt is on another line or on the root (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_receipt_does_not_hide_a_later_request_that_never_reached_the_model() {
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let cap_cut = || -> Vec<Value> {
+            vec![
+                event("2", 1, "f2", ["input", "message"], json!({})),
+                event(
+                    "2",
+                    2,
+                    "c2",
+                    ["input", "consumed"],
+                    json!({"input_id": "f2"}),
+                ),
+                event(
+                    "2",
+                    3,
+                    "s2",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t2", "request_id": "r2"}),
+                ),
+                event(
+                    "2",
+                    4,
+                    "i2",
+                    ["stop", "interrupt"],
+                    json!({"reason": "budget: turns", "scope": "turn"}),
+                ),
+                event(
+                    "2",
+                    5,
+                    "o2",
+                    ["step", "model-output-end"],
+                    json!({"turn_id": "t2", "request_id": "r2", "status": "cancelled",
+                           "reason": "budget: turns"}),
+                ),
+            ]
+        };
+        let unconsumed =
+            || -> Vec<Value> { vec![event("2", 1, "f2", ["input", "message"], json!({}))] };
+        let unreached = |branch: &str| -> Vec<Value> {
+            vec![
+                event(branch, 1, "u1", ["input", "message"], json!({})),
+                event(
+                    branch,
+                    2,
+                    "u2",
+                    ["input", "consumed"],
+                    json!({"input_id": "u1"}),
+                ),
+                event(
+                    branch,
+                    3,
+                    "u3",
+                    ["turn", "end"],
+                    json!({"turn_id": "tu", "status": "cancelled", "reason": "end_turn"}),
+                ),
+                event(
+                    branch,
+                    4,
+                    "u4",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t4", "request_id": "r4"}),
+                ),
+            ]
+        };
+        let receipt = |line: &str, input: &str| FixtureInput {
+            what: SWITCH_INPUT,
+            line: line.into(),
+            input: Some(input.into()),
+        };
+        let driven = |inputs: Vec<FixtureInput>| Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs,
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let cases = [
+            (
+                "a later request on another line never reached the model",
+                vec![receipt("2", "f2"), receipt("3", "u1")],
+                [cap_cut(), unreached("3")].concat(),
+            ),
+            (
+                "a later request on the root never reached the model",
+                vec![receipt("2", "f2"), receipt("main", "u1")],
+                [cap_cut(), unreached("main")].concat(),
+            ),
+            (
+                "the cap left the first receipt unconsumed",
+                vec![receipt("2", "f2"), receipt("3", "u1")],
+                [unconsumed(), unreached("3")].concat(),
+            ),
+        ];
+        for (case, inputs, export) in cases {
+            let export = export
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (check, incomplete, metrics) = scored_switch_run(&driven(inputs), &export);
+            assert_confirmed_failure(
+                case,
+                &check,
+                &incomplete,
+                &metrics,
+                "never reached the model",
+            );
+        }
+    }
+
+    /// A run that ended idle is scored as it was before the incomplete class
+    /// existed: the stop is the product's state, not the harness's turn cap,
+    /// so an input it left unrun is the candidate's outcome, not a fixture
+    /// the report sets aside (model-prompts §8.1).
+    #[test]
+    fn an_idle_run_is_scored_rather_than_incomplete() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let message = || FixtureInput {
+            what: MESSAGE_INPUT,
+            line: "main".into(),
+            input: Some("m1".into()),
+        };
+        let driven = |stop: &'static str| Driven {
+            session: "s".into(),
+            stop,
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![message()],
+            incomplete: None,
+            error: None,
+        };
+        let scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        let message_event = event(
+            1,
+            ["input", "message"],
+            json!({"user": {"content": "message"}}),
+        );
+        let consumed = event(2, ["input", "consumed"], json!({"input_id": "m1"}));
+
+        assert!(
+            fixture_incomplete(&driven("turns"), &scenario, &message_event).is_some(),
+            "the input the run left unrun is what the fixture check reads"
+        );
+        assert_eq!(
+            incomplete_reason(
+                &driven("idle"),
+                &scenario,
+                &message_event,
+                &NotesCheck::Observed
+            ),
+            None,
+            "a run that ended idle is not the harness's stop"
+        );
+
+        let no_request = [message_event, consumed].join("\n");
+        assert!(
+            fixture_incomplete(&driven("turns"), &scenario, &no_request)
+                .is_some_and(|reason| reason.contains("no request carried")),
+            "the consumed input without a request is what the fixture check reads"
+        );
+        assert_eq!(
+            incomplete_reason(
+                &driven("idle"),
+                &scenario,
+                &no_request,
+                &NotesCheck::Observed
+            ),
+            None,
+            "a run that ended idle is not the harness's stop"
+        );
+
+        let idle = record(
+            "current",
+            &scenario,
+            &[("identity", ProbeVerdict::Unparsed)],
+            JudgeOutcome::Judged,
+        );
+        assert!(!idle.failed, "idle is not one of the failed stops");
+        let mut metrics = Metrics::default();
+        metrics.add(&scenario, &idle);
+        assert_eq!(
+            (metrics.runs, metrics.failed, metrics.unjudged),
+            (1, 0, 0),
+            "the idle run is counted, as it was before the class existed"
+        );
+        assert_eq!(
+            metrics
+                .probes
+                .get(&("case".to_owned(), "identity".to_owned())),
+            Some(&ProbeCounts { passed: 0, runs: 1 }),
+            "the probe the run left unanswered is counted as a loss"
+        );
+    }
+
+    /// A switch that has started its target stays with it: a tool line opened
+    /// afterwards has its own purpose, so the retry of a move promotes the
+    /// line that started rather than the newer line (model-prompts §9.8).
+    #[tokio::test]
+    async fn a_retried_switch_stays_on_the_line_that_started() {
+        let create = |line: &str| {
+            json!({"type": "branch", "name": "create",
+                   "data": {"branch": line, "source": {"kind": "tool"}}})
+        };
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let mut switch: VecDeque<PendingSwitch> = vec![PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        )]
+        .into();
+        let pending = switch.front_mut().expect("the switch is pending");
+        pending.notice("main", &create("A"));
+        pending.notice("A", &turn_start);
+        assert!(pending.triggered);
+        let mut client = SwitchRecorder {
+            refusals: vec![unknown_branch_refusal()],
+            ..SwitchRecorder::default()
+        };
+        assert!(matches!(
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
+            Ok(SwitchFire::Retry)
+        ));
+        let pending = switch.front_mut().expect("the retry keeps the switch");
+        pending.notice("main", &create("B"));
+        assert_eq!(
+            pending.line.as_deref(),
+            Some("A"),
+            "the line that started keeps the move"
+        );
+        assert!(matches!(
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
+            Ok(SwitchFire::Fired)
+        ));
+        let calls: Vec<&str> = client
+            .calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "session.branch_set_default",
+                "session.branch_set_default",
+                "session.submit"
+            ],
+            "the retry moves before it sends the next input"
+        );
+        assert_eq!(
+            client.calls[1].1["branchId"], "A",
+            "the retry promotes the line that started, not the line opened after it"
+        );
+    }
+
+    /// Every follow-up a move sends keeps a receipt: the input on the line its
+    /// message went to and the one on the line it left, the root included. A
+    /// run whose turn cap stops a follow-up before a turn consumes it has no
+    /// request to score (model-prompts §8.1).
+    #[tokio::test]
+    async fn a_move_keeps_a_receipt_for_each_follow_up_it_sends() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let switch = Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "to the tool line".into(),
+            branch_id: Some("main".into()),
+            former_message: Some("report to the user".into()),
+        };
+        let mut switches: VecDeque<PendingSwitch> =
+            [PendingSwitch::new(switch, None, false)].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder {
+            inputs: ["i1".to_owned(), "i2".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        let mut notes = SwitchNotes::default();
+        switches
+            .front_mut()
+            .expect("the move is pending")
+            .notice("2", &turn_start);
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    Some(&mut notes)
+                )
+                .await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the move fires"
+        );
+        let received: Vec<(&str, &str)> = notes
+            .inputs
+            .iter()
+            .map(|input| (input.what, input.line.as_str()))
+            .collect();
+        assert_eq!(
+            received,
+            [(SWITCH_INPUT, "main"), (FORMER_INPUT, "main")],
+            "both follow-ups keep their receipt, on the line they went to"
+        );
+    }
+
+    /// A steer the fixture submits keeps a receipt: the input the Session
+    /// answered, on the line the runner sent it from, whether it was due on
+    /// the clock or triggered by a tool call (model-prompts §8.1).
+    #[tokio::test]
+    async fn a_sent_steer_keeps_a_receipt_on_the_line_it_went_to() {
+        let mut steers = vec![
+            (
+                Steer {
+                    after_seconds: Some(0.1),
+                    when_tool_call: None,
+                    text: "timed".into(),
+                },
+                false,
+            ),
+            (
+                Steer {
+                    after_seconds: None,
+                    when_tool_call: Some("read".into()),
+                    text: "triggered".into(),
+                },
+                false,
+            ),
+        ];
+        let mut inputs = Vec::new();
+        let mut client = SwitchRecorder {
+            inputs: ["s1".to_owned(), "s2".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        let started = Instant::now() - Duration::from_secs(1);
+        assert!(
+            fire_due(
+                &mut client,
+                "session",
+                &mut steers,
+                "main",
+                &mut inputs,
+                started
+            )
+            .await
+            .expect("the timed steer is sent"),
+            "the timed steer is due"
+        );
+        let event = json!({"type": "step", "name": "tool-use",
+                           "data": {"name": "read", "arguments": {"path": "parser/expr.py"}}});
+        assert!(
+            fire_triggered(
+                &mut client,
+                "session",
+                &mut steers,
+                "line-2",
+                &mut inputs,
+                &event
+            )
+            .await
+            .expect("the triggered steer is sent"),
+            "the tool call triggers the steer"
+        );
+        let received: Vec<(&str, &str, Option<&str>)> = inputs
+            .iter()
+            .map(|input| (input.what, input.line.as_str(), input.input.as_deref()))
+            .collect();
+        assert_eq!(
+            received,
+            [
+                (STEER_INPUT, "main", Some("s1")),
+                (STEER_INPUT, "line-2", Some("s2")),
+            ],
+            "each steer keeps the line the runner sent it from and the id the Session answered"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.submit", "session.submit"],
+            "a steer is one submission"
+        );
+        assert!(
+            client.calls.iter().all(|(_, params)| {
+                params["mode"] == "steer" && params.get("branchId").is_none()
+            }),
+            "a steer goes to the default branch and names no line"
+        );
+    }
+
+    /// The switch's calls, recorded, and the refusals its
+    /// `session.branch_set_default` calls answer, in order; no Session stands
+    /// behind it.
+    #[derive(Default)]
+    struct SwitchRecorder {
+        calls: Vec<(String, Value)>,
+        refusals: Vec<dim_client::RpcError>,
+        /// The input ids its `session.submit` answers carry, in order; a call
+        /// past the list answers an empty result.
+        inputs: VecDeque<String>,
+    }
+    impl SwitchRecorder {
+        fn methods(&self) -> Vec<&str> {
+            self.calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect()
+        }
+    }
+    impl SwitchClient for SwitchRecorder {
+        async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
+            self.calls.push((method.to_owned(), params));
+            if method == "session.branch_set_default" && !self.refusals.is_empty() {
+                return Err(self.refusals.remove(0).into());
+            }
+            if method == "session.submit"
+                && let Some(input) = self.inputs.pop_front()
+            {
+                return Ok(json!({"event": {"id": input}}));
+            }
+            Ok(json!({}))
+        }
+    }
+    /// Answers the step after the first idle's two calls and records them: its
+    /// compaction with the status the test set, and each request with an input
+    /// id.
+    struct AfterIdleRecorder {
+        calls: Vec<(String, Value)>,
+        compaction: &'static str,
+    }
+    impl Default for AfterIdleRecorder {
+        fn default() -> Self {
+            Self {
+                calls: Vec::new(),
+                compaction: "completed",
+            }
+        }
+    }
+    impl AfterIdleRecorder {
+        fn methods(&self) -> Vec<&str> {
+            self.calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect()
+        }
+    }
+    impl SwitchClient for AfterIdleRecorder {
+        async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
+            self.calls.push((method.to_owned(), params));
+            Ok(match method {
+                "session.context.compact" => json!({
+                    "status": self.compaction,
+                    "reason": "nothing_to_compact",
+                }),
+                _ => json!({"event": {"id": "input"}}),
+            })
+        }
+    }
+
+    /// The `branch:line` message a move writes on `line`: the role it gives
+    /// the line and the participant it names (design §12.1).
+    fn move_note(line: &str, default: bool, other: &str) -> Value {
+        let marker = if default {
+            format!("This line is now the session's default branch, switched from line {other}.")
+        } else {
+            format!("The session's default branch moved from this line to line {other}.")
+        };
+        let text = format!(
+            "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"{}\">\n{marker}\n</dim-branch-line>",
+            if default { "true" } else { "false" }
+        );
+        json!({"type": "input", "name": "message", "id": format!("note-{line}"), "sequence": 1,
+               "data": {"blocks": [{"type": "raw", "key": "branch:line", "text": text}]}})
+    }
+
+    /// The `input/consumed` notice of `input` on a line.
+    fn consumed(input: &str) -> Value {
+        json!({"type": "input", "name": "consumed", "id": format!("consumed-{input}"),
+               "sequence": 2, "data": {"input_id": input}})
+    }
+
+    /// A move whose target has started its first turn, ready to move.
+    fn triggered_switch() -> VecDeque<PendingSwitch> {
+        let mut pending = PendingSwitch::new(
+            Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            None,
+            false,
+        );
+        pending.notice("2", &json!({"type": "turn", "name": "start", "data": {}}));
+        assert!(pending.triggered);
+        vec![pending].into()
+    }
+
+    /// The tree's `unknown_branch` as the Session protocol answers it: the
+    /// invalid-input code carrying the tree's message.
+    fn unknown_branch_refusal() -> dim_client::RpcError {
+        dim_client::RpcError {
+            code: -32000,
+            message: "unknown branch: 2".into(),
+            data: Some(json!({"appError": "session_invalid_input"})),
+        }
+    }
+
+    /// A switch moves the Session's default branch before it sends the next
+    /// input, and fires once: after the move the switch is gone, so a later
+    /// call leaves it unfired (model-prompts §9.8).
+    #[tokio::test]
+    async fn a_switch_moves_the_default_branch_before_its_next_input_and_fires_once() {
+        let mut client = SwitchRecorder::default();
+        let mut switch = triggered_switch();
+        assert!(matches!(
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
+            Ok(SwitchFire::Fired)
+        ));
+        let calls: Vec<&str> = client
+            .calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            ["session.branch_set_default", "session.submit"],
+            "the default branch moves before the next input is sent"
+        );
+        assert_eq!(client.calls[0].1["branchId"], "2");
+        assert_eq!(client.calls[1].1["text"], "next");
+        assert!(
+            client.calls[1].1.get("branchId").is_none(),
+            "the next input lands on the new default branch"
+        );
+        assert!(matches!(
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
+            Ok(SwitchFire::NotFired)
+        ));
+        assert_eq!(client.calls.len(), 2, "a switch fires once");
+    }
+
+    /// A refused move answers the error that failed it and sends no input.
+    #[tokio::test]
+    async fn a_refused_switch_move_propagates_its_error_and_sends_no_input() {
+        let mut client = SwitchRecorder {
+            refusals: vec![dim_client::RpcError {
+                code: -32000,
+                message: "the tree is closing".into(),
+                data: Some(json!({"appError": "session_closed"})),
+            }],
+            ..SwitchRecorder::default()
+        };
+        let mut switch = triggered_switch();
+        let error = match fire_switch(
+            &mut client,
+            "session",
+            &mut switch,
+            &mut "main".into(),
+            None,
+            None,
+        )
+        .await
+        {
+            Err(error) => error,
+            Ok(outcome) => panic!("the move was refused, not {outcome:?}"),
+        };
+        assert!(error.contains("the switch to 2 failed"), "{error}");
+        assert!(error.contains("the tree is closing"), "{error}");
+        assert_eq!(
+            client.calls.len(),
+            1,
+            "no input is sent after a refused move"
+        );
+    }
+
+    /// A move that meets the line before it is ready retries: one
+    /// `unknown_branch` leaves the switch pending, and the next call moves and
+    /// submits (model-prompts §9.8).
+    #[tokio::test]
+    async fn an_unknown_branch_move_retries_until_the_line_is_ready() {
+        let mut client = SwitchRecorder {
+            refusals: vec![unknown_branch_refusal()],
+            ..SwitchRecorder::default()
+        };
+        let mut switch = triggered_switch();
+        assert!(matches!(
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
+            Ok(SwitchFire::Retry)
+        ));
+        assert!(!switch.is_empty(), "the switch stays pending for the retry");
+        assert!(matches!(
+            fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None
+            )
+            .await,
+            Ok(SwitchFire::Fired)
+        ));
+        let calls: Vec<&str> = client
+            .calls
+            .iter()
+            .map(|(method, _)| method.as_str())
+            .collect();
+        assert_eq!(
+            calls,
+            [
+                "session.branch_set_default",
+                "session.branch_set_default",
+                "session.submit"
+            ],
+            "the retry moves before it sends the next input"
+        );
+        assert_eq!(client.calls[2].1["text"], "next");
+        assert!(switch.is_empty());
+    }
+
+    /// A line that never becomes ready is its own outcome after the retry
+    /// budget, not a harness error (model-prompts §9.8).
+    #[tokio::test]
+    async fn a_target_that_never_becomes_ready_is_its_own_outcome() {
+        let mut client = SwitchRecorder {
+            refusals: (0..=UNKNOWN_BRANCH_RETRIES)
+                .map(|_| unknown_branch_refusal())
+                .collect(),
+            ..SwitchRecorder::default()
+        };
+        let mut switch = triggered_switch();
+        for retry in 0..UNKNOWN_BRANCH_RETRIES {
+            assert!(
+                matches!(
+                    fire_switch(
+                        &mut client,
+                        "session",
+                        &mut switch,
+                        &mut "main".into(),
+                        None,
+                        None
+                    )
+                    .await,
+                    Ok(SwitchFire::Retry)
+                ),
+                "retry {retry}"
+            );
+            assert!(!switch.is_empty(), "retry {retry}: still pending");
+        }
+        match fire_switch(
+            &mut client,
+            "session",
+            &mut switch,
+            &mut "main".into(),
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(SwitchFire::TargetUnknown { line, error }) => {
+                assert_eq!(line, "2");
+                assert!(error.contains("unknown branch"), "{error}");
+            }
+            outcome => panic!("the unready target is its own outcome, not {outcome:?}"),
+        }
+        assert!(switch.is_empty());
+        assert_eq!(
+            client.calls.len(),
+            UNKNOWN_BRANCH_RETRIES as usize + 1,
+            "the first move and every retry"
+        );
+        assert!(
+            client
+                .calls
+                .iter()
+                .all(|(method, _)| method == "session.branch_set_default"),
+            "no input is sent to a line that never became ready"
+        );
+    }
+
+    /// A target line that ended, or whose chain was ending, before the move is
+    /// its own outcome, read from the refusal's application code rather than
+    /// its text, and not a harness error (design §14, §20.26a; model-prompts
+    /// §9.8).
+    #[tokio::test]
+    async fn a_target_that_ended_before_the_move_is_its_own_outcome() {
+        for (code, message) in [
+            ("branch_ended", "branch 2 has ended"),
+            ("branch_target_protected", "line 2 is ending or ended"),
+        ] {
+            let mut client = SwitchRecorder {
+                refusals: vec![dim_client::RpcError {
+                    code: -32000,
+                    message: message.into(),
+                    data: Some(json!({"appError": code})),
+                }],
+                ..SwitchRecorder::default()
+            };
+            let mut switch = triggered_switch();
+            match fire_switch(
+                &mut client,
+                "session",
+                &mut switch,
+                &mut "main".into(),
+                None,
+                None,
+            )
+            .await
+            {
+                Ok(SwitchFire::TargetEnded { line, error }) => {
+                    assert_eq!(line, "2");
+                    assert!(error.contains(code), "{code}: {error}");
+                }
+                outcome => panic!("{code}: the ended target is its own outcome, not {outcome:?}"),
+            }
+            assert_eq!(
+                client.calls.len(),
+                1,
+                "{code}: no input is sent to an ended line"
+            );
+        }
+    }
+
+    /// The committed set parses through the runner's own reader, its two
+    /// switch scenarios carry the move, and the two pairs that share a
+    /// premise stay equal: the compact scenario reuses `redone-work`'s
+    /// message and workspace, and `flooding` and `never-ending` share one
+    /// workspace (Timeline branches §12.3). No model runs, so CI catches a
+    /// schema, layout or pair drift before a manual run.
     #[test]
     fn the_committed_scenario_set_parses_and_its_shared_premises_stay_equal() {
         let root = repository().join("xtask").join("scenario-eval");
@@ -7044,6 +12518,94 @@ mod tests {
                 .find(|scenario| scenario.id == id)
                 .unwrap_or_else(|| panic!("{id} is in the committed set"))
         }
+        let ids: Vec<_> = branches
+            .iter()
+            .map(|scenario| scenario.id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                "asking-the-user",
+                "background-command-not-branch",
+                "flooding",
+                "long-work-and-a-flaky-test",
+                "main-moved-on",
+                "never-ending",
+                "over-splitting",
+                "ping-pong",
+                "redone-work",
+                "refactor-and-a-pasted-report",
+                "root-opens-after-switch",
+                "same-file-tradeoff",
+                "sibling-relay",
+                "switch-continue-directly",
+                "switch-then-open-lines",
+                "user-line-becomes-default",
+            ],
+            "the committed branch set is the sixteen scenarios"
+        );
+        assert_eq!(
+            compact
+                .iter()
+                .map(|scenario| scenario.id.as_str())
+                .collect::<Vec<_>>(),
+            ["identity-after-compaction"],
+            "the committed compact set is the one scenario"
+        );
+        for scenario in &branches {
+            assert_eq!(
+                scenario.budget.window, 131_072,
+                "{}: the branch scenarios declare one window",
+                scenario.id
+            );
+        }
+        assert_eq!(
+            find(&compact, "identity-after-compaction").budget.window,
+            29_000,
+            "the compact scenario declares the window that compacts it"
+        );
+        for scenario in &branches {
+            let switches = matches!(
+                scenario.id.as_str(),
+                "switch-continue-directly" | "switch-then-open-lines" | "root-opens-after-switch"
+            );
+            assert_eq!(
+                scenario.switch.is_some(),
+                switches,
+                "{}: only the switch scenarios carry the move",
+                scenario.id
+            );
+        }
+        assert!(
+            find(&branches, "switch-then-open-lines")
+                .switch
+                .as_ref()
+                .is_some_and(|switch| switch.branch_id.is_none()),
+            "switch-then-open-lines sends its next input to the new default branch"
+        );
+        assert!(
+            find(&branches, "switch-continue-directly")
+                .switch
+                .as_ref()
+                .is_some_and(|switch| switch.branch_id.is_none()),
+            "switch-continue-directly sends its next input to the new default branch"
+        );
+        assert!(
+            find(&branches, "root-opens-after-switch")
+                .switch
+                .as_ref()
+                .is_some_and(|switch| switch.branch_id.as_deref() == Some("main")),
+            "root-opens-after-switch names the root after the move"
+        );
+        assert!(
+            find(&branches, "switch-then-open-lines")
+                .probes
+                .iter()
+                .any(|probe| {
+                    probe.id == "new-default-opens-a-line" && probe.kind == ProbeKind::MustShow
+                }),
+            "switch-then-open-lines requires the new default branch to open a line"
+        );
         let redone = find(&branches, "redone-work");
         let identity = find(&compact, "identity-after-compaction");
         assert_eq!(
@@ -7061,6 +12623,150 @@ mod tests {
             workspace_files(&flooding.directory),
             workspace_files(&never_ending.directory),
             "flooding and never-ending start from one workspace"
+        );
+    }
+
+    /// The step after the first idle compacts only the lines that did not
+    /// compact on their own, then asks every line of the scenario one
+    /// request (Timeline branches §12.3).
+    #[tokio::test]
+    async fn the_step_after_the_idle_compacts_the_rest_and_asks_every_line() {
+        let mut client = AfterIdleRecorder::default();
+        let lines = vec!["main".to_owned(), "line".to_owned()];
+        let compacted: BTreeSet<String> = ["main".to_owned()].into();
+        let after = AfterIdle {
+            request: "re-run the tests".into(),
+        };
+        let submitted = settle_after_idle(&mut client, "session", &lines, &after, &compacted)
+            .await
+            .unwrap();
+        assert_eq!(
+            submitted,
+            [
+                ("main".to_owned(), Some("input".to_owned())),
+                ("line".to_owned(), Some("input".to_owned()))
+            ],
+            "every line's request is returned with the input the Session named"
+        );
+        assert_eq!(
+            client.methods(),
+            [
+                "session.context.compact",
+                "session.submit",
+                "session.submit"
+            ],
+            "the line that compacted is not compacted again, and both are asked"
+        );
+        assert_eq!(client.calls[0].1["branchId"], "line");
+        assert_eq!(client.calls[1].1["branchId"], "main");
+        assert_eq!(client.calls[1].1["text"], "re-run the tests");
+        assert_eq!(client.calls[2].1["branchId"], "line");
+    }
+
+    /// A compaction that does not complete fails the run there: the requests
+    /// after it would be judged as ones after a compaction (Timeline branches
+    /// §12.3).
+    #[tokio::test]
+    async fn a_compaction_the_idle_step_could_not_complete_fails_the_run() {
+        let after = AfterIdle {
+            request: "re-run the tests".into(),
+        };
+        for (status, reason) in [
+            ("skipped", "nothing_to_compact"),
+            ("failed", "no error given"),
+        ] {
+            let mut client = AfterIdleRecorder {
+                compaction: status,
+                ..AfterIdleRecorder::default()
+            };
+            let error = settle_after_idle(
+                &mut client,
+                "session",
+                &["main".to_owned()],
+                &after,
+                &BTreeSet::new(),
+            )
+            .await
+            .expect_err("a line that did not compact cannot be judged on it");
+            assert!(error.contains(status) || error.contains(reason), "{error}");
+            assert_eq!(
+                client.methods(),
+                ["session.context.compact"],
+                "no request follows a compaction that did not complete"
+            );
+        }
+    }
+
+    /// The opening scenarios pre-register the probe that their runs open one
+    /// line for one job, and the compact scenario opens its parser line before
+    /// the message, keeps `main` off it, and settles both lines after the
+    /// first idle (Timeline branches §12.3). No model runs, so CI catches a
+    /// drift in the committed probes, calls or step before a manual run.
+    #[test]
+    fn the_opening_scenarios_pre_register_their_probe_and_the_compact_scenario_opens_its_line() {
+        let root = repository().join("xtask").join("scenario-eval");
+        let branches = read_scenarios(&root.join("timeline-branches")).unwrap();
+        let compact = read_scenarios(&root.join("timeline-branches-compact")).unwrap();
+        fn find<'a>(scenarios: &'a [Scenario], id: &str) -> &'a Scenario {
+            scenarios
+                .iter()
+                .find(|scenario| scenario.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the committed set"))
+        }
+        for id in ["long-work-and-a-flaky-test", "refactor-and-a-pasted-report"] {
+            assert!(
+                find(&branches, id).probes.iter().any(|probe| {
+                    probe.id == "line-opened-for-one-job" && probe.kind == ProbeKind::MustShow
+                }),
+                "{id} pre-registers the probe that its run opens a line for one job"
+            );
+        }
+        let identity = find(&compact, "identity-after-compaction");
+        assert_eq!(
+            identity.calls.len(),
+            1,
+            "identity-after-compaction opens its line before the message"
+        );
+        assert_eq!(identity.calls[0].method, "session.branch_create");
+        assert_eq!(identity.calls[0].params["parentBranchId"], "main");
+        assert_eq!(identity.calls[0].params["at"], "session_open");
+        assert!(
+            identity.calls[0].params["prompt"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("parser/")),
+            "the line is given the parser/ subsystem: {:?}",
+            identity.calls[0].params["prompt"]
+        );
+        assert_eq!(
+            identity.steers.len(),
+            1,
+            "identity-after-compaction keeps main off the line's subsystem"
+        );
+        assert!(
+            identity.steers[0]
+                .text
+                .contains("Keep main strictly on cache/"),
+            "the steer keeps main on cache/: {}",
+            identity.steers[0].text
+        );
+        let after = identity
+            .after_idle
+            .as_ref()
+            .expect("identity-after-compaction settles both lines after the first idle");
+        assert!(
+            after.request.contains("Re-run the tests") && !after.request.contains("which line"),
+            "the request re-runs a line's own tests and names no line: {}",
+            after.request
+        );
+        let probe = identity
+            .probes
+            .iter()
+            .find(|probe| probe.id == "identity-after-compaction")
+            .expect("the identity probe");
+        assert_eq!(
+            probe.text,
+            "after a compaction, a line's next request still carries its own identity block",
+            "the probe reads a line's own identity, not main's roster"
         );
     }
 
@@ -7206,6 +12912,61 @@ mod tests {
             Some("candidate description")
         );
         assert!(overrides.branch_description.is_none());
+    }
+
+    /// Each status note's `How you work here:` block is injected through its
+    /// own factory member (timeline branches §12.4, model-prompts §8.1):
+    /// `--text timeline-tree/default-note`, `user-default-note` and
+    /// `former-default-note` land on the `Overrides` fields
+    /// [`app_server::serve_home`] hands `BranchToolConfig`, never on a product
+    /// string patched for the evaluation, and the serve child carries them.
+    #[test]
+    fn the_status_note_blocks_are_factory_members() {
+        let overrides = overrides_in(
+            TEXTS,
+            &[
+                (
+                    "timeline-tree/default-note".to_owned(),
+                    Arc::from("candidate default note"),
+                ),
+                (
+                    "timeline-tree/user-default-note".to_owned(),
+                    Arc::from("candidate user note"),
+                ),
+                (
+                    "timeline-tree/former-default-note".to_owned(),
+                    Arc::from("candidate former note"),
+                ),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            overrides.default_note.as_deref(),
+            Some("candidate default note")
+        );
+        assert_eq!(
+            overrides.user_default_note.as_deref(),
+            Some("candidate user note")
+        );
+        assert_eq!(
+            overrides.former_default_note.as_deref(),
+            Some("candidate former note")
+        );
+        assert!(overrides.branch_description.is_none());
+        assert!(overrides.roster_closing.is_none());
+        let carried = child_overrides(&overrides_value(&overrides));
+        assert_eq!(
+            carried.default_note.as_deref(),
+            Some("candidate default note")
+        );
+        assert_eq!(
+            carried.user_default_note.as_deref(),
+            Some("candidate user note")
+        );
+        assert_eq!(
+            carried.former_default_note.as_deref(),
+            Some("candidate former note")
+        );
     }
 
     /// The base prompt is injected through PromptSources' own factory member
@@ -7508,12 +13269,16 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let out = directory.join("out");
         let args = [
             "--scenarios",
             "scenarios",
             "--text",
             "context-compaction/summary",
+            "--baseline",
+            baseline.to_str().unwrap(),
             "--candidate",
             candidate.to_str().unwrap(),
             "--model",
@@ -7748,16 +13513,22 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let parsed = Options::parse_from(
             [
                 "--scenarios",
                 "scenarios",
                 "--text",
                 "goal/objective",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--text",
                 "goal/objective",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--model",
@@ -7779,9 +13550,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
     }
 
-    /// A `--text ID --candidate FILE` pair reads in either order: the
-    /// candidate given first pairs with the text that follows it
-    /// (model-prompts §8.1).
+    /// A `--text ID` pair reads in either order: a file given before the text
+    /// pairs with the text that follows it (model-prompts §8.1).
     #[test]
     fn a_pair_reads_in_either_order() {
         let directory =
@@ -7789,17 +13559,16 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let candidate = directory.join("candidate.md");
         std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
         let out = directory.join("out");
         let file = candidate.to_str().unwrap();
-        let parse = |flags: [&str; 4]| {
-            Options::parse_from(
+        let base = baseline.to_str().unwrap();
+        let parse = |flags: &[&str]| {
+            let mut args: Vec<String> = ["--scenarios", "scenarios"].map(str::to_owned).to_vec();
+            args.extend(flags.iter().map(|value| (*value).to_owned()));
+            args.extend(
                 [
-                    "--scenarios",
-                    "scenarios",
-                    flags[0],
-                    flags[1],
-                    flags[2],
-                    flags[3],
                     "--model",
                     "gateway/model",
                     "--judge",
@@ -7810,17 +13579,116 @@ mod tests {
                     out.to_str().unwrap(),
                 ]
                 .map(str::to_owned),
-            )
+            );
+            Options::parse_from(args)
         };
         for flags in [
-            ["--text", "goal/objective", "--candidate", file],
-            ["--candidate", file, "--text", "goal/objective"],
+            [
+                "--text",
+                "goal/objective",
+                "--baseline",
+                base,
+                "--candidate",
+                file,
+            ],
+            [
+                "--text",
+                "goal/objective",
+                "--candidate",
+                file,
+                "--baseline",
+                base,
+            ],
+            [
+                "--baseline",
+                base,
+                "--text",
+                "goal/objective",
+                "--candidate",
+                file,
+            ],
+            [
+                "--candidate",
+                file,
+                "--text",
+                "goal/objective",
+                "--baseline",
+                base,
+            ],
         ] {
-            let options = parse(flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
+            let options = parse(&flags).unwrap_or_else(|error| panic!("{flags:?}: {error}"));
             assert_eq!(options.texts.len(), 1, "{flags:?}");
+            assert_eq!(options.baseline.len(), 1, "{flags:?}");
             assert_eq!(options.texts[0].0, "goal/objective", "{flags:?}");
             assert_eq!(&*options.texts[0].1, "candidate", "{flags:?}");
+            assert_eq!(&*options.baseline[0].1, "baseline", "{flags:?}");
         }
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// A text is compared with the text it replaces, never with the copy the
+    /// checkout ships: `--text ID` names the baseline beside the candidate,
+    /// and a pair without one, or one whose baseline is its candidate, is
+    /// refused before any run (model-prompts §8.1).
+    #[test]
+    fn a_pair_without_its_baseline_is_refused() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-baseline-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let candidate = directory.join("candidate.md");
+        std::fs::write(&candidate, "candidate").unwrap();
+        let baseline = directory.join("baseline.md");
+        std::fs::write(&baseline, "baseline").unwrap();
+        let same = directory.join("same.md");
+        std::fs::write(&same, "baseline").unwrap();
+        let out = directory.join("out");
+        let parse = |flags: &[&str]| {
+            let mut args: Vec<String> = [
+                "--scenarios",
+                "scenarios",
+                "--model",
+                "gateway/model",
+                "--judge",
+                "gateway/model",
+                "--runs",
+                "1",
+                "--out",
+                out.to_str().unwrap(),
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            args.extend(flags.iter().map(|value| (*value).to_owned()));
+            Options::parse_from(args)
+        };
+        let error = match parse(&[
+            "--text",
+            "goal/objective",
+            "--candidate",
+            candidate.to_str().unwrap(),
+        ]) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a candidate without the baseline it replaces is refused"),
+        };
+        assert!(
+            error.contains("--text goal/objective has no --baseline"),
+            "the refusal names the missing text: {error}"
+        );
+        let error = match parse(&[
+            "--text",
+            "goal/objective",
+            "--baseline",
+            baseline.to_str().unwrap(),
+            "--candidate",
+            same.to_str().unwrap(),
+        ]) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("a pair whose baseline is its candidate is refused"),
+        };
+        assert!(
+            error.contains("the baseline and the candidate are the same text"),
+            "the refusal says the comparison is the text with itself: {error}"
+        );
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -8011,6 +13879,56 @@ mod tests {
         );
     }
 
+    /// A run whose calls step failed never sent the configured text to a model:
+    /// the report lists it as a setup failure, apart from a run that failed on
+    /// its own, and neither enters the probe's rate (Timeline branches §12.3).
+    #[test]
+    fn the_report_lists_a_setup_failure_apart_from_a_run_failure() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut setup = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            JudgeOutcome::NotAsked,
+        );
+        setup.stop = "setup_failed";
+        setup.error =
+            Some("the calls step 1 (session.branch_create) failed: branch_not_found".into());
+        setup.failed = true;
+        let mut run = record(
+            "current",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            JudgeOutcome::Judged,
+        );
+        run.stop = "seconds";
+        run.error = Some("the run stopped on its wall clock".into());
+        run.failed = true;
+        let records = [setup, run];
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains(
+                "| candidate | case | 0 | setup | the calls step 1 (session.branch_create) failed"
+            ),
+            "a setup failure is named as one: {text}"
+        );
+        assert!(
+            text.contains("| current | case | 0 | run | the run stopped on its wall clock |"),
+            "a run failure is named as one: {text}"
+        );
+        let metrics = metrics(&scenario, &records);
+        assert_eq!(metrics.failed, 2, "both are failed runs for gate 1");
+        assert_eq!(
+            metrics.counts(&("case".to_owned(), "reports".to_owned())),
+            ProbeCounts::default(),
+            "neither enters the probe's rate"
+        );
+    }
+
     /// The same holds when the judge answered unreadably: twenty unjudged
     /// runs compare zero probes with zero probes, and the verdict is
     /// inconclusive (model-prompts §8.1).
@@ -8146,6 +14064,50 @@ mod tests {
         assert_eq!(failed.candidate, Counts::new(1, 21));
     }
 
+    /// An incomplete fixture is not compared: the failed-run and unjudged-run
+    /// rates count the judged, failed and unjudged runs, and the report states
+    /// the arm's attempts and its incomplete fixtures beside them
+    /// (model-prompts §8.1).
+    #[test]
+    fn the_report_counts_an_incomplete_fixture_apart_from_the_compared_runs() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut records = arm(&scenario, "current", 1, 1);
+        records.extend(arm(&scenario, "candidate", 1, 1));
+        for arm in ["current", "candidate"] {
+            let mut incomplete = record(
+                arm,
+                &scenario,
+                &[("reports", ProbeVerdict::Unparsed)],
+                JudgeOutcome::Unobserved,
+            );
+            incomplete.stop = "turns";
+            incomplete.incomplete =
+                Some("the run stopped on turns before the step after the first idle".into());
+            records.push(incomplete);
+        }
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains("| case/reports (must_show) | 1/1 (1.000) | 1/1 (1.000) |"),
+            "the probe counts only the judged run: {text}"
+        );
+        assert!(
+            text.contains("| failed runs | 0/1 (0.000) | 0/1 (0.000) |"),
+            "the incomplete fixture is not in the failed-run denominator: {text}"
+        );
+        assert!(
+            text.contains("| attempted runs | current 2, candidate 2 |"),
+            "the report counts the attempt: {text}"
+        );
+        assert!(
+            text.contains("| incomplete fixtures | current 1, candidate 1 |"),
+            "the report counts the incomplete fixture apart: {text}"
+        );
+    }
+
     /// A candidate that violates a `must_not_show` probe more often fails
     /// through the probe's row and the pooled row beside it, and the report
     /// prints both arms' counts (model-prompts §8.1).
@@ -8257,6 +14219,51 @@ mod tests {
         assert_eq!(turns_in_export(""), (0, None));
     }
 
+    /// The export's failed turn fails a run that did not stop on its wall
+    /// clock, but a run that did keeps that stop: a run can reach its wall
+    /// clock with a failed turn in its export that its notice stream did not
+    /// deliver before the stop, and the stop it reached stands
+    /// (model-prompts §8.1). Dedicated, because the flows that end on a
+    /// failed turn return before their export is read, so no flow brings the
+    /// two endings together.
+    #[test]
+    fn a_failed_turn_in_the_export_does_not_replace_a_wall_clock_stop() {
+        fn driven(stop: &'static str, timed_out: bool) -> Driven {
+            Driven {
+                session: String::new(),
+                stop,
+                timed_out,
+                cleanup_deadline: None,
+                turns: 0,
+                window: None,
+                decline_retries: 0,
+                switch_retries: 0,
+                switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
+                error: None,
+            }
+        }
+        let failed_turn = || Some("main: the turn failed: provider error".to_owned());
+
+        let mut stopped = driven("seconds", true);
+        settle_failed_turn(&mut stopped, failed_turn());
+        assert_eq!(stopped.stop, "seconds", "the wall-clock stop stands");
+        assert_eq!(
+            stopped.error, None,
+            "the export's failed turn does not replace the stop's ending"
+        );
+
+        let mut idle = driven("idle", false);
+        settle_failed_turn(&mut idle, failed_turn());
+        assert_eq!(idle.stop, "error", "a failed turn fails an idle run");
+        assert_eq!(
+            idle.error.as_deref(),
+            Some("main: the turn failed: provider error"),
+            "the run records the failed turn's error"
+        );
+    }
+
     /// A declared tool without a source cannot come from the product: the
     /// request holds `ToolDefinition` values, whose `source` is a required
     /// field. The probe fails naming the tool instead of dropping it from
@@ -8351,6 +14358,63 @@ mod tests {
         assert!(
             other["event"]["data"]["request"]["messages"].is_array(),
             "the other line's first request is given in full: {other}"
+        );
+    }
+
+    /// A request's thinking is judged as one line: a delta line spends most of
+    /// its bytes on an id and field names, and the judge reads the run as a
+    /// whole (model-prompts §8.1). The merged line keeps the first delta's id
+    /// and position and the text of every delta in order; a delta of another
+    /// request or line, or one after another event, starts its own line.
+    #[test]
+    fn a_requests_thinking_deltas_render_as_one_line() {
+        let thinking = |id: &str, sequence: u64, branch: &str, request: &str, delta: &str| {
+            json!({
+                "kind": "event",
+                "branch_id": branch,
+                "event": {"id": id, "sequence": sequence, "type": "step", "name": "thinking",
+                          "data": {"turn_id": "t1", "request_id": request, "delta": delta}},
+            })
+            .to_string()
+        };
+        let export = [
+            thinking("e1", 1, "main", "r1", "one "),
+            thinking("e2", 2, "main", "r1", "two"),
+            thinking("e3", 3, "main", "r1", " three"),
+            thinking("e4", 4, "main", "r2", "other request"),
+            thinking("e5", 5, "other", "r1", "other line"),
+            r#"{"kind":"event","branch_id":"main","event":{"id":"e6","sequence":6,"type":"turn","name":"end","data":{"status":"completed"}}}"#.to_owned(),
+            thinking("e7", 7, "main", "r1", "after a break"),
+            r#"{"kind":"end","branches":2,"events":7}"#.to_owned(),
+        ]
+        .join("\n");
+        let view = judge_view(&export);
+        let lines: Vec<Value> = view
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            lines.len(),
+            6,
+            "one line per request's thinking run and one per other event"
+        );
+        assert_eq!(
+            lines[0]["event"]["id"], "e1",
+            "the first delta names the merged line"
+        );
+        assert_eq!(
+            lines[0]["event"]["sequence"], 1,
+            "the merged line keeps the first delta's position"
+        );
+        assert_eq!(
+            lines[0]["event"]["data"]["delta"], "one two three",
+            "the merged line carries every delta's text in order"
+        );
+        assert_eq!(lines[1]["event"]["data"]["delta"], "other request");
+        assert_eq!(lines[2]["event"]["data"]["delta"], "other line");
+        assert_eq!(
+            lines[4]["event"]["data"]["delta"], "after a break",
+            "another event ends the run a delta joins"
         );
     }
 
@@ -9124,6 +15188,12 @@ mod tests {
             !report.contains("| text |"),
             "no saved run records the texts under test: {report}"
         );
+        for arm in ["current", "candidate"] {
+            assert!(
+                report.contains(&format!("| {arm} configured texts | not recorded |")),
+                "{arm}: runs that recorded no text are reported as unrecorded: {report}"
+            );
+        }
         assert!(
             report.contains("| decline retries | 3 across all runs; not recorded for 2 runs |"),
             "a saved run written before the runner counted declines is not read as none: {report}"
@@ -9197,6 +15267,41 @@ mod tests {
                 .all(|request| !request.contains("SAVED VIEW unselected")),
             "a run --run did not select is not judged: {asked:?}"
         );
+    }
+
+    /// A run that the runner itself recorded with the `setup_failed` stop is
+    /// read back by the read a pool or a re-judge takes: `stop_name` keeps the
+    /// stop, so a read that meets a calls-step failure reports the run again
+    /// instead of refusing the whole set.
+    #[test]
+    fn a_saved_setup_failure_reads_back_by_its_own_stop() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-setup-failed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let saved = json!({
+            "arm": "current", "scenario": "identity-after-compaction", "run": 0,
+            "session": null, "stop": "setup_failed", "turns": 0, "window": null,
+            "durationMs": 1.0, "failed": true, "judgeOutcome": "not_asked",
+            "error": "the calls step 1 (session.branch_create) failed",
+            "judgeError": null, "judgeReasks": 0, "probes": []
+        });
+        std::fs::write(directory.join("runs.jsonl"), format!("{saved}\n")).unwrap();
+        let scenarios = read_scenarios(
+            &repository()
+                .join("xtask")
+                .join("scenario-eval")
+                .join("timeline-branches-compact"),
+        )
+        .unwrap();
+        let records = read_pooled_runs(&directory, &scenarios)
+            .expect("a saved setup failure is one of the stops the runner writes");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stop, "setup_failed");
+        assert!(records[0].failed);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A pool reports several finished evaluations under one rule: both
@@ -9279,6 +15384,12 @@ mod tests {
             !report.contains("| text |"),
             "no saved run records the texts under test: {report}"
         );
+        for arm in ["current", "candidate"] {
+            assert!(
+                report.contains(&format!("| {arm} configured texts | not recorded |")),
+                "{arm}: runs that recorded no text are reported as unrecorded: {report}"
+            );
+        }
         assert_eq!(
             std::fs::read_to_string(first.join("runs.jsonl")).unwrap(),
             first_jsonl,
@@ -9296,6 +15407,257 @@ mod tests {
             "every run of both sources is kept: {records:?}"
         );
         assert!(out.join("scenario.md").exists());
+    }
+
+    /// A pool states the configured texts its runs recorded, and refuses an
+    /// arm whose runs recorded different ones: a report that stated one set
+    /// for runs that compared several would be wrong.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pool_refuses_runs_that_recorded_different_texts() {
+        const BASELINE: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const CANDIDATE: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        const OTHER: &str = "OTHER BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "pool-texts",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let source = |name: &str, baseline: &str| {
+            let directory = fixture.directory.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            let texts = |text: &str| {
+                json!([{"id": "timeline-tree/branch-description", "bytes": text.len(),
+                        "fingerprint": fingerprint(text)}])
+            };
+            let runs = [
+                json!({"arm": "current", "scenario": "case", "run": 0, "session": null,
+                       "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                       "failed": false, "judgeOutcome": "judged", "error": null,
+                       "judgeError": null, "judgeReasks": 0, "texts": texts(baseline),
+                       "probes": [{"id": "ran", "kind": "must_show",
+                                   "verdict": "present", "quote": null}]}),
+                json!({"arm": "candidate", "scenario": "case", "run": 0, "session": null,
+                       "stop": "idle", "turns": 2, "window": 24000.0, "durationMs": 1.0,
+                       "failed": false, "judgeOutcome": "judged", "error": null,
+                       "judgeError": null, "judgeReasks": 0, "texts": texts(CANDIDATE),
+                       "probes": [{"id": "ran", "kind": "must_show",
+                                   "verdict": "present", "quote": null}]}),
+            ];
+            let jsonl: String = runs.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let (first, second) = (source("first", BASELINE), source("second", BASELINE));
+        let mut options = fixture.options(fixture.directory.join("pooled"));
+        options.pool = vec![first.clone(), second];
+        let report = fixture.pooled(&options).await.unwrap();
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            assert!(
+                report.contains(&format!(
+                    "| {arm} configured texts | `timeline-tree/branch-description`: {} bytes, \
+                     fingerprint {} |",
+                    text.len(),
+                    fingerprint(text)
+                )),
+                "{arm}: a pool states the configured texts its runs recorded: {report}"
+            );
+        }
+        let other = source("other", OTHER);
+        let mut options = fixture.options(fixture.directory.join("pooled-again"));
+        options.pool = vec![first, other];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the current runs recorded different texts"),
+            "{error}"
+        );
+        assert!(error.contains("report them separately"), "{error}");
+    }
+
+    /// A pool refuses runs of one arm whose texts only some of them recorded:
+    /// a record written before the runner recorded texts would otherwise be
+    /// counted and labeled as one comparison with a recorded run. An
+    /// all-legacy pool stays supported as unrecorded.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_pool_refuses_mixed_text_provenance() {
+        const TEXT: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "pool-mixed",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let run = |arm: &str, texts: Option<Value>| {
+            let mut record = json!({"arm": arm, "scenario": "case", "run": 0,
+                   "session": null, "stop": "idle", "turns": 2, "window": 24000.0,
+                   "durationMs": 1.0, "failed": false, "judgeOutcome": "judged",
+                   "error": null, "judgeError": null, "judgeReasks": 0,
+                   "probes": [{"id": "ran", "kind": "must_show",
+                               "verdict": "present", "quote": null}]});
+            if let Some(texts) = texts {
+                record["texts"] = texts;
+            }
+            record
+        };
+        let recorded = || {
+            json!([{"id": "timeline-tree/branch-description", "bytes": TEXT.len(),
+                    "fingerprint": fingerprint(TEXT)}])
+        };
+        let source = |name: &str, current: Value, candidate: Value| {
+            let directory = fixture.directory.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            let jsonl: String = [current, candidate]
+                .into_iter()
+                .map(|record| format!("{record}\n"))
+                .collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let legacy = source("legacy", run("current", None), run("candidate", None));
+        let named = source(
+            "named",
+            run("current", Some(recorded())),
+            run("candidate", Some(recorded())),
+        );
+        let mut options = fixture.options(fixture.directory.join("mixed"));
+        options.pool = vec![legacy, named];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the current runs mix records that name their configured texts"),
+            "{error}"
+        );
+        assert!(
+            error.contains("report the runs that name their texts and the older runs separately"),
+            "{error}"
+        );
+        // The candidate arm is checked on its own: both sources' current runs
+        // recorded none, while one candidate run names its text.
+        let legacy_current = source(
+            "legacy-current",
+            run("current", None),
+            run("candidate", None),
+        );
+        let named_candidate = source(
+            "named-candidate",
+            run("current", None),
+            run("candidate", Some(recorded())),
+        );
+        let mut options = fixture.options(fixture.directory.join("mixed-candidate"));
+        options.pool = vec![legacy_current, named_candidate];
+        let error = fixture.pooled(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains("the candidate runs mix records that name their configured texts"),
+            "{error}"
+        );
+    }
+
+    /// A re-judge refuses saved runs of one arm whose texts only some of them
+    /// recorded, before any judge call: a re-judged record written before the
+    /// runner recorded texts would otherwise be counted and labeled as one
+    /// comparison with a recorded run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_rejudge_refuses_mixed_text_provenance() {
+        const TEXT: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "rejudge-mixed",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 4, "seconds": 120, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let recorded = || {
+            json!([{"id": "timeline-tree/branch-description", "bytes": TEXT.len(),
+                    "fingerprint": fingerprint(TEXT)}])
+        };
+        let run = |arm: &str, run: usize, texts: Option<Value>| {
+            let mut record = json!({"arm": arm, "scenario": "case", "run": run,
+                   "session": null, "stop": "idle", "turns": 2, "window": 24000.0,
+                   "durationMs": 1.0, "failed": false, "judgeOutcome": "judged",
+                   "error": null, "judgeError": null, "judgeReasks": 0,
+                   "probes": [{"id": "ran", "kind": "must_show",
+                               "verdict": "present", "quote": null}]});
+            if let Some(texts) = texts {
+                record["texts"] = texts;
+            }
+            record
+        };
+        let source = |name: &str, runs: &[Value]| {
+            let directory = fixture.directory.join(name);
+            for arm in ["current", "candidate"] {
+                let views = directory.join("outputs").join(arm).join("case");
+                std::fs::create_dir_all(&views).unwrap();
+                for run in 0..2 {
+                    std::fs::write(
+                        views.join(format!("run-{run}.judge-view.jsonl")),
+                        "SAVED VIEW",
+                    )
+                    .unwrap();
+                }
+            }
+            let jsonl: String = runs.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(directory.join("runs.jsonl"), &jsonl).unwrap();
+            directory
+        };
+        let mixed_current = source(
+            "mixed-current",
+            &[
+                run("current", 0, None),
+                run("current", 1, Some(recorded())),
+                run("candidate", 0, Some(recorded())),
+                run("candidate", 1, Some(recorded())),
+            ],
+        );
+        let mut options = fixture.options(fixture.directory.join("rejudged-current"));
+        options.rejudge = Some(mixed_current);
+        let error = fixture.rejudge(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "--rejudge: the current runs mix records that name their configured texts"
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("report the runs that name their texts and the older runs separately"),
+            "{error}"
+        );
+        // The candidate arm is checked on its own: its runs mix while the
+        // current arm recorded none.
+        let mixed_candidate = source(
+            "mixed-candidate",
+            &[
+                run("current", 0, None),
+                run("current", 1, None),
+                run("candidate", 0, None),
+                run("candidate", 1, Some(recorded())),
+            ],
+        );
+        let mut options = fixture.options(fixture.directory.join("rejudged-candidate"));
+        options.rejudge = Some(mixed_candidate);
+        let error = fixture.rejudge(&options).await.unwrap_err().to_string();
+        assert!(
+            error.contains(
+                "--rejudge: the candidate runs mix records that name their configured texts"
+            ),
+            "{error}"
+        );
+        assert!(
+            fixture.judge().is_empty(),
+            "a mixed set is refused before any judge call"
+        );
     }
 
     /// A report over saved runs counts the declines their records carry and
@@ -9586,6 +15948,10 @@ mod tests {
 
     /// The candidate text every fixture's candidate arm carries.
     const CANDIDATE: &str = "CANDIDATE SUMMARY PROMPT. Summarize the transcript briefly.";
+    /// The baseline text every fixture's current arm carries. It opens with
+    /// the shipped prompt's first words, which the fixture's summarizer
+    /// answers, and is not the candidate.
+    const BASELINE: &str = "You summarize a coding session. BASELINE SUMMARY PROMPT.";
     /// The text the workspace file `notes.txt` holds; a run's request carries
     /// it only once the `read` tool has returned it.
     const FILE_TEXT: &str = "The notes file says the read tool carried this line back.";
@@ -9820,6 +16186,7 @@ mod tests {
         fn options(&self, out: PathBuf) -> Options {
             Options {
                 scenarios: self.scenarios.clone(),
+                baseline: pairs(&[("context-compaction/summary", BASELINE)]),
                 texts: pairs(&[("context-compaction/summary", CANDIDATE)]),
                 model: self.target(),
                 judge: self.target(),
@@ -9833,6 +16200,13 @@ mod tests {
                 extra_tool: false,
                 fail_child: None,
                 fail_child_holds_stdout: false,
+                leave_member: None,
+                stall_cleanup: false,
+                cleanup_budget_ms: None,
+                stall_export: None,
+                stall: None,
+                broken: None,
+                judge_budget_ms: None,
                 defaults: None,
                 node: None,
                 js_runtime: None,
@@ -10099,6 +16473,13 @@ mod tests {
         // tool's description.
         const BRANCH: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
         let mut options = fixture.judge_options(fixture.directory.join("out"));
+        options.baseline = pairs(&[
+            ("context-compaction/summary", BASELINE),
+            (
+                "timeline-tree/branch-description",
+                "BASELINE BRANCH TOOL DESCRIPTION",
+            ),
+        ]);
         options.texts = pairs(&[
             ("context-compaction/summary", CANDIDATE),
             ("timeline-tree/branch-description", BRANCH),
@@ -10173,6 +16554,109 @@ mod tests {
             assert!(
                 rendered["event"]["data"]["request"]["messages"].is_array(),
                 "{arm}: the request after the history change carries the whole list: {rendered}"
+            );
+        }
+    }
+
+    /// A text's fingerprint is FNV-1a 64 over its bytes, in lowercase hex: the
+    /// canonical test vectors pin it, so a report's fingerprints stay
+    /// comparable across runs.
+    #[test]
+    fn a_texts_fingerprint_is_fnv1a_64() {
+        assert_eq!(fingerprint(""), "cbf29ce484222325");
+        assert_eq!(fingerprint("a"), "af63dc4c8601ec8c");
+        assert_eq!(fingerprint("foobar"), "85944171f73967e8");
+    }
+
+    /// Each arm is given the text its pair names, and the run's record and
+    /// the report state which: the current arm's requests carry the baseline,
+    /// the candidate arm's the candidate, and each record names both by length
+    /// and fingerprint. An evaluation on a head that already carries the
+    /// candidate therefore compares two texts it was given, not the candidate
+    /// with itself (model-prompts §8.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn each_arm_records_the_configured_text_its_pair_names() {
+        const BASELINE: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const CANDIDATE: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        let fixture = Fixture::start(
+            "arm-texts",
+            judged,
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 2, "seconds": 60, "window": 24000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.baseline = pairs(&[("timeline-tree/branch-description", BASELINE)]);
+        options.texts = pairs(&[("timeline-tree/branch-description", CANDIDATE)]);
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        let configured = |arm: &str| {
+            records
+                .iter()
+                .find(|record| record["arm"] == arm)
+                .unwrap_or_else(|| panic!("a {arm} run"))["texts"]
+                .clone()
+        };
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            let texts = configured(arm);
+            let texts = texts.as_array().unwrap_or_else(|| panic!("{arm}: {texts}"));
+            assert_eq!(texts.len(), 1, "{arm}: {texts:?}");
+            assert_eq!(texts[0]["id"], "timeline-tree/branch-description", "{arm}");
+            assert_eq!(texts[0]["bytes"], text.len(), "{arm}: {texts:?}");
+            assert_eq!(
+                texts[0]["fingerprint"],
+                fingerprint(text),
+                "{arm}: the record names the configured text"
+            );
+        }
+        assert_ne!(
+            configured("current")[0]["fingerprint"],
+            configured("candidate")[0]["fingerprint"],
+            "the arms were given different texts"
+        );
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            assert!(
+                report.contains(&format!(
+                    "| {arm} configured texts | `timeline-tree/branch-description`: {} bytes, \
+                     fingerprint {} |",
+                    text.len(),
+                    fingerprint(text)
+                )),
+                "{arm}: the report names the configured text: {report}"
+            );
+        }
+        let described = |arm: &str| -> Vec<String> {
+            fixture
+                .arm(arm)
+                .iter()
+                .filter_map(|request| {
+                    let request: Value = serde_json::from_str(request).ok()?;
+                    request["tools"].as_array()?.iter().find_map(|tool| {
+                        (tool["function"]["name"] == "branch")
+                            .then(|| tool["function"]["description"].as_str().map(str::to_owned))
+                            .flatten()
+                    })
+                })
+                .collect()
+        };
+        for (arm, text) in [("current", BASELINE), ("candidate", CANDIDATE)] {
+            let descriptions = described(arm);
+            assert!(
+                !descriptions.is_empty(),
+                "{arm}: the requests declare the branch tool"
+            );
+            assert!(
+                descriptions.iter().all(|description| description == text),
+                "{arm}: the branch tool description is the pair's text: {descriptions:?}"
             );
         }
     }
@@ -10266,6 +16750,65 @@ mod tests {
                 "{arm}: the first request of a line is given in full"
             );
         }
+    }
+
+    /// A run that reaches its turn budget before the step after the first idle
+    /// never compacts and never asks the follow-up request: the identity probe
+    /// has no request to read, so the run is incomplete, is not judged, and
+    /// stays out of the probe's denominator and the floor (model-prompts
+    /// §8.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_that_reaches_the_turn_budget_before_the_after_idle_step_is_incomplete() {
+        let fixture = Fixture::start(
+            "incomplete-turn-cap",
+            |text| judged(text).or_else(|| Some(content("done"))),
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 1, "seconds": 60, "window": 24000},
+                "afterIdle": {"request": "Re-run the tests."},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["stop"], "turns", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "unobserved", "{record}");
+            let incomplete = record["incomplete"].as_str().unwrap_or_default();
+            assert!(
+                incomplete.contains("before the step after the first idle"),
+                "{record}"
+            );
+        }
+        assert!(
+            fixture.judge().is_empty(),
+            "an incomplete fixture is not sent to the judge"
+        );
+        assert!(
+            report.contains("| arm | scenario | run | incomplete |"),
+            "the report lists the incomplete fixture apart: {report}"
+        );
+        assert!(
+            report.contains("| case/ran (must_show) | – | – |"),
+            "the probe counts no run in either arm: {report}"
+        );
+        assert!(
+            report.contains("| attempted runs | current 1, candidate 1 |"),
+            "the report counts the attempt: {report}"
+        );
+        assert!(
+            report.contains("| incomplete fixtures | current 1, candidate 1 |"),
+            "the report counts the incomplete fixture apart: {report}"
+        );
+        assert!(
+            report.contains("| failed runs | – | – |"),
+            "an incomplete run leaves the failed-run comparison: {report}"
+        );
     }
 
     /// Asserts that a run's `judge-view.jsonl` is its export line for line,
@@ -10512,10 +17055,18 @@ mod tests {
             // product tool removal (the registry drops a mounted name it
             // cannot resolve) and any divergence in the mounted order; a
             // product tool addition is the `tools-product` preflight
-            // check's catch, at run time.
+            // check's catch, at run time. `web_search` is dynamic and
+            // declared only while a search service is usable; the run's own
+            // Sessions have none (the probes carry it), so the first request
+            // omits that name while every other mounted name keeps its place.
+            let expected: Vec<&str> = RUN_TOOLS
+                .iter()
+                .copied()
+                .filter(|name| *name != "web_search")
+                .collect();
             assert_eq!(
-                offered, RUN_TOOLS,
-                "{arm}: the run Session offers exactly the run's tool set"
+                offered, expected,
+                "{arm}: the run Session offers the run's static tool set"
             );
             assert!(
                 requests[1].contains(FILE_TEXT),
@@ -10549,6 +17100,8 @@ mod tests {
         .await;
         let candidate = fixture.directory.join("candidate.md");
         std::fs::write(&candidate, CANDIDATE).unwrap();
+        let baseline = fixture.directory.join("baseline.md");
+        std::fs::write(&baseline, BASELINE).unwrap();
         let out = fixture.directory.join("out");
         let relative = relative_to_working_directory(&out);
         let mut options = Options::parse_from(
@@ -10557,6 +17110,8 @@ mod tests {
                 fixture.scenarios.to_str().unwrap(),
                 "--text",
                 "context-compaction/summary",
+                "--baseline",
+                baseline.to_str().unwrap(),
                 "--candidate",
                 candidate.to_str().unwrap(),
                 "--model",
@@ -10732,17 +17287,71 @@ mod tests {
         /// then answers that one and every later one as idle at
         /// [`PEER_SEQUENCE`].
         HeldIdle,
+        /// The submitted turn starts and ends on `main`, and no other line is
+        /// ever opened: a scenario's switch can never reach its target.
+        SwitchNeverFires,
+        /// The target line `2` starts and ends its first turn, and every move
+        /// to it answers `unknown_branch`: the run can stop on its budget
+        /// while the switch still has retries left.
+        SwitchMoveRetries,
+        /// The target line `2` starts and ends its first turn, and the move to
+        /// it never answers: the run must stop on its deadline instead of
+        /// waiting on the reply.
+        SwitchMoveStalls,
+        /// The target line `2` starts and ends its first turn and the move
+        /// answers, and the input after the move never does.
+        SwitchSubmitStalls,
+        /// The target line `2` starts and ends its first turn while the move
+        /// waits for the note it owes it: the move answers, the line writes
+        /// its note afterwards, and the run's turn budget ends it before the
+        /// note releases the follow-up.
+        SwitchNoteAfterTheLastTurn,
+        /// The target line `2` starts and ends its first turn, the move to it
+        /// never answers, and the Session's close never answers either: a run
+        /// that stopped on its wall clock must still return, with cleanup
+        /// bounded.
+        SwitchMoveAndCloseStall,
+        /// The first move names the explicit line `7`, and the tool line `2`
+        /// opens while that move waits for its target's first turn. No other
+        /// line opens afterwards, so the later move to the latest tool line
+        /// can only run on `2`.
+        ChainedToolLineBeforeActivation,
+        /// The first move names the explicit line `7` and fires before any
+        /// tool line exists; `2` opens after that move's input, and its first
+        /// turn fires the later move to the latest tool line.
+        ChainedToolLineAfterActivation,
+        /// The setup's context window read answers `context_usage_unavailable`,
+        /// so the check is deferred, and the deferred read answers
+        /// `session_reloading`: a failure that is not the deferral itself.
+        DeferredUsageFails,
+        /// The Session is created at its opening sequence, which
+        /// `session.create` reports, and the submitted turn starts and ends
+        /// at once: a scenario's `session_open` call has a sequence to use.
+        OpensAtTheSessionStart,
+        /// The submitted turn starts and ends once; the step after the first
+        /// idle submits its request, and the peer writes the second turn's end
+        /// before that request can start, so the run reaches its turn budget
+        /// between the submission and the model call.
+        AfterIdleSubmitAtTheCap,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
     /// how many it had read when it first wrote a call's `step/tool-result`,
-    /// and how many `session.idle` calls it read while it held the line busy.
+    /// how many `session.idle` calls it read while it held the line busy, and
+    /// whether it read the attach and how many closes.
     #[cfg(unix)]
     #[derive(Default)]
     struct PeerReads {
         declines: Mutex<Vec<String>>,
         settled_at: AtomicUsize,
         idles: AtomicUsize,
+        usages: AtomicUsize,
+        /// The `branchId` of every `session.branch_set_default`, in order.
+        moves: Mutex<Vec<String>>,
+        /// The parameters of every `session.branch_create`, in order.
+        opens: Mutex<Vec<Value>>,
+        attached: tokio::sync::Notify,
+        closes: AtomicUsize,
     }
 
     /// How long [`PeerScript::HeldIdle`] keeps the line busy: five quiet
@@ -10777,12 +17386,27 @@ mod tests {
             }
             format!("{frame}\n").into_bytes()
         }
-        /// One `session.event` notice of `event`.
-        fn notice(event: Value) -> Vec<u8> {
+        /// One `session.event` notice of `event` on `branch`.
+        fn notice_on(branch: &str, event: Value) -> Vec<u8> {
             let notice = json!({"jsonrpc": "2.0", "method": "session.event",
-                                "params": {"sessionId": "peer", "branchId": "main",
+                                "params": {"sessionId": "peer", "branchId": branch,
                                            "event": event}});
             format!("{notice}\n").into_bytes()
+        }
+        /// One `session.event` notice of `event` on `main`.
+        fn notice(event: Value) -> Vec<u8> {
+            notice_on("main", event)
+        }
+        /// One `branch/create` notice of tool line `branch` at `sequence`.
+        fn created(sequence: u64, branch: &str) -> Value {
+            json!({"type": "branch", "name": "create", "id": format!("e{sequence}"),
+                   "sequence": sequence,
+                   "data": {"branch": branch, "source": {"kind": "tool"}}})
+        }
+        /// One `turn` notice at `sequence`.
+        fn turn(sequence: u64, name: &str) -> Value {
+            json!({"type": "turn", "name": name, "id": format!("e{sequence}"),
+                   "sequence": sequence, "data": {}})
         }
         /// The refusal a client gets while the call has no waiter.
         fn not_pending() -> Value {
@@ -10847,11 +17471,19 @@ mod tests {
                 _ => Vec::new(),
             };
             let mut declines = 0;
+            // The `session.submit` calls read so far: the stalling scripts
+            // hold the one after the move.
+            let mut submits = 0;
+            // The default branch the chained scripts' moves leave.
+            let mut default = "main".to_owned();
             let mut first: Option<Instant> = None;
             // The line is busy until the peer writes the call's result, the
             // way a running turn is: `session.idle` stays unanswered and the
             // driver's own deadline reports the line busy.
-            let mut settled = false;
+            let mut settled = matches!(
+                script,
+                PeerScript::OpensAtTheSessionStart | PeerScript::AfterIdleSubmitAtTheCap
+            );
             // [`PeerScript::HeldIdle`]'s hold: the calls it kept, and the
             // deadline it answers them at. The deadline stands after the
             // release, so a later call starts no second hold.
@@ -10878,6 +17510,30 @@ mod tests {
                 let Some(line) = line.unwrap() else { break };
                 let request: Value = serde_json::from_str(&line).unwrap();
                 let method = request["method"].as_str().unwrap_or_default();
+                if method == "session.branch_set_default" {
+                    recorded.moves.lock().unwrap().push(
+                        request["params"]["branchId"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned(),
+                    );
+                }
+                if method == "session.branch_create" {
+                    recorded
+                        .opens
+                        .lock()
+                        .unwrap()
+                        .push(request["params"].clone());
+                }
+                if method == "session.attach" {
+                    recorded.attached.notify_one();
+                }
+                if method == "session.close" {
+                    recorded.closes.fetch_add(1, Ordering::SeqCst);
+                    if matches!(script, PeerScript::SwitchMoveAndCloseStall) {
+                        continue;
+                    }
+                }
                 if method == "session.idle" {
                     if matches!(script, PeerScript::HeldIdle) {
                         let at = *hold_until.get_or_insert_with(|| Instant::now() + HELD);
@@ -10985,6 +17641,17 @@ mod tests {
                             write.write_all(&frame(&request, body)).await.unwrap();
                             (declines == 3).then_some(("r1", 1))
                         }
+                        PeerScript::SwitchNeverFires => None,
+                        PeerScript::SwitchMoveRetries => None,
+                        PeerScript::SwitchMoveStalls
+                        | PeerScript::SwitchSubmitStalls
+                        | PeerScript::SwitchNoteAfterTheLastTurn
+                        | PeerScript::SwitchMoveAndCloseStall => None,
+                        PeerScript::ChainedToolLineBeforeActivation
+                        | PeerScript::ChainedToolLineAfterActivation => None,
+                        PeerScript::DeferredUsageFails => None,
+                        PeerScript::OpensAtTheSessionStart => None,
+                        PeerScript::AfterIdleSubmitAtTheCap => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -10998,23 +17665,201 @@ mod tests {
                     }
                     continue;
                 }
+                // The stalling scripts hold their reply: the move in one, the
+                // input after it in the other.
+                if method == "session.branch_set_default"
+                    && matches!(
+                        script,
+                        PeerScript::SwitchMoveStalls | PeerScript::SwitchMoveAndCloseStall
+                    )
+                {
+                    continue;
+                }
+                if method == "session.submit" {
+                    submits += 1;
+                    if submits > 1 && matches!(script, PeerScript::SwitchSubmitStalls) {
+                        continue;
+                    }
+                }
                 let body = match method {
-                    "session.create" => json!({"result": {"sessionId": "peer"}}),
-                    "session.context.usage" => json!({"result": {"contextWindow": window}}),
+                    "hello" => json!({"result": {
+                        "instanceId": "peer", "serverVersion": "peer",
+                        "protocolVersion": 4,
+                        "features": ["session.create", "session.history"],
+                        "daemonProfile": {"kind": "mock"},
+                    }}),
+                    "session.create" => match &script {
+                        PeerScript::OpensAtTheSessionStart => json!({"result": {
+                            "sessionId": "peer", "sequence": 12}}),
+                        _ => json!({"result": {"sessionId": "peer"}}),
+                    },
+                    "session.context.usage" => {
+                        let read = recorded.usages.fetch_add(1, Ordering::SeqCst) + 1;
+                        match (matches!(script, PeerScript::DeferredUsageFails), read) {
+                            (true, 1) => json!({"error": {"code": -32000,
+                                "message": "the context window is not known yet",
+                                "data": {"appError": "context_usage_unavailable"}}}),
+                            (true, _) => json!({"error": {"code": -32000,
+                                "message": "the Session is reloading",
+                                "data": {"appError": "session_reloading"}}}),
+                            _ => json!({"result": {"contextWindow": window}}),
+                        }
+                    }
                     "session.idle" => json!({"result": {"sequence": PEER_SEQUENCE}}),
+                    "session.context.compact" => json!({"result": {"status": "completed"}}),
+                    "session.branch_set_default"
+                        if matches!(script, PeerScript::SwitchMoveRetries) =>
+                    {
+                        json!({"error": {"code": -32000, "message": "unknown branch: 2",
+                                         "data": {"appError": "session_invalid_input"}}})
+                    }
+                    "session.submit" => {
+                        json!({"result": {"event": {"id": format!("input-{submits}")}}})
+                    }
                     _ => json!({"result": {}}),
                 };
                 write.write_all(&frame(&request, body)).await.unwrap();
+                // The line a chained script moves to writes its note after the
+                // move's acknowledgment: the run waits for that note before it
+                // sends the input the line answers.
+                if method == "session.branch_set_default"
+                    && matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                            | PeerScript::SwitchNoteAfterTheLastTurn
+                    )
+                {
+                    let target = request["params"]["branchId"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned();
+                    let note = json!({
+                        "type": "input", "name": "message", "id": format!("note-{target}"),
+                        "sequence": 6,
+                        "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                            "text": format!(
+                                "<dim-branch-line branch=\"{target}\" parent=\"main\" source=\"tool\" default=\"true\">\nThis line is now the session's default branch, switched from line {default}.\n</dim-branch-line>"
+                            )}]}
+                    });
+                    write.write_all(&notice_on(&target, note)).await.unwrap();
+                    default = target;
+                }
+                // A chained script consumes the input it answered: the move
+                // after it fires once its line has taken that input.
+                if method == "session.submit"
+                    && matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                    )
+                {
+                    let consumed = json!({
+                        "type": "input", "name": "consumed", "id": format!("consumed-{submits}"),
+                        "sequence": 7, "data": {"input_id": format!("input-{submits}")}
+                    });
+                    write
+                        .write_all(&notice_on(&default, consumed))
+                        .await
+                        .unwrap();
+                }
                 if method == "session.submit" {
+                    if matches!(script, PeerScript::AfterIdleSubmitAtTheCap) {
+                        // The first turn runs and ends; the step after the idle
+                        // submits its request, and the peer ends the second
+                        // turn before that request can start.
+                        let events = if submits == 1 {
+                            vec![("start", 1), ("end", 2)]
+                        } else {
+                            vec![("end", 3)]
+                        };
+                        for (name, sequence) in events {
+                            write
+                                .write_all(&notice(json!({"type": "turn", "name": name,
+                                                         "sequence": sequence, "data": {}})))
+                                .await
+                                .unwrap();
+                        }
+                        continue;
+                    }
                     write
                         .write_all(&notice(
                             json!({"type": "turn", "name": "start", "sequence": 1, "data": {}}),
                         ))
                         .await
                         .unwrap();
+                    if matches!(
+                        script,
+                        PeerScript::ChainedToolLineBeforeActivation
+                            | PeerScript::ChainedToolLineAfterActivation
+                    ) {
+                        let before = matches!(script, PeerScript::ChainedToolLineBeforeActivation);
+                        let written = match (before, submits) {
+                            // The tool line opens while the first move waits
+                            // for its own target's first turn; the line that
+                            // starts afterwards fires that move.
+                            (true, 1) => vec![("2", created(2, "2")), ("7", turn(3, "start"))],
+                            // The first move's input: its target's turn starts,
+                            // and its end stops the run on the turn budget.
+                            (true, 2) => vec![("7", turn(4, "start")), ("7", turn(5, "end"))],
+                            // The first move fires before any tool line exists.
+                            (false, 1) => vec![("7", turn(2, "start"))],
+                            // The tool line opens after that, and its first
+                            // turn starts before the run stops.
+                            (false, 2) => vec![
+                                ("2", created(3, "2")),
+                                ("2", turn(4, "start")),
+                                ("2", turn(5, "end")),
+                            ],
+                            _ => Vec::new(),
+                        };
+                        for (branch, event) in written {
+                            write.write_all(&notice_on(branch, event)).await.unwrap();
+                        }
+                        continue;
+                    }
                     // The held line asks nothing: the run's only work is the
-                    // turn the peer holds open.
-                    if matches!(script, PeerScript::HeldIdle) {
+                    // turn the peer holds open. A switch that never fires
+                    // likewise asks nothing: its turn starts and ends.
+                    if matches!(
+                        script,
+                        PeerScript::HeldIdle
+                            | PeerScript::SwitchNeverFires
+                            | PeerScript::DeferredUsageFails
+                            | PeerScript::OpensAtTheSessionStart
+                    ) {
+                        if matches!(
+                            script,
+                            PeerScript::SwitchNeverFires
+                                | PeerScript::DeferredUsageFails
+                                | PeerScript::OpensAtTheSessionStart
+                        ) {
+                            write
+                                .write_all(&notice(json!({"type": "turn", "name": "end",
+                                                           "sequence": 2, "data": {}})))
+                                .await
+                                .unwrap();
+                        }
+                        continue;
+                    }
+                    if matches!(
+                        script,
+                        PeerScript::SwitchMoveRetries
+                            | PeerScript::SwitchMoveStalls
+                            | PeerScript::SwitchSubmitStalls
+                            | PeerScript::SwitchNoteAfterTheLastTurn
+                            | PeerScript::SwitchMoveAndCloseStall
+                    ) {
+                        for (name, sequence) in [("start", 1), ("end", 2)] {
+                            write
+                                .write_all(&notice_on(
+                                    "2",
+                                    json!({"type": "turn", "name": name,
+                                           "sequence": sequence, "data": {}}),
+                                ))
+                                .await
+                                .unwrap();
+                        }
                         continue;
                     }
                     let request = match &script {
@@ -11090,6 +17935,7 @@ mod tests {
         scenario.budget.seconds = 10.;
         let driven = drive(
             &mut client,
+            &RunSettings::default(),
             &scenario,
             &std::env::temp_dir(),
             &peer_model(),
@@ -11105,6 +17951,659 @@ mod tests {
         assert!(
             error.contains("the decline of c1 failed") && error.contains("session_reloading"),
             "{error}"
+        );
+    }
+
+    /// A `session.branch_create` whose `at` is `session_open` is sent with the
+    /// sequence `session.create` reported, so the line starts where the
+    /// Session did without the scenario naming a number.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_open_call_starts_the_line_where_the_session_did() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-drive-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::OpensAtTheSessionStart).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        scenario.calls = vec![Call {
+            method: "session.branch_create".into(),
+            params: json!({"parentBranchId": "main", "at": SESSION_OPEN,
+                           "prompt": "the line's job"}),
+        }];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let opened = reads.opens.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "idle", "{:?}", driven.error);
+        assert_eq!(opened.len(), 1, "one line is opened before the message");
+        assert_eq!(
+            opened[0]["at"], 12,
+            "the reply's sequence fills the placeholder: {}",
+            opened[0]
+        );
+        assert_eq!(opened[0]["parentBranchId"], "main");
+        assert_eq!(opened[0]["sessionId"], "peer");
+    }
+
+    /// A `session_open` call needs the sequence `session.create` reports: a
+    /// reply without one fails the run in its calls step, before the message,
+    /// and the call is never sent.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_open_call_without_a_session_sequence_is_a_setup_failure() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-missing-{}",
+            std::process::id()
+        ));
+        let (socket, reads) = scripted_peer(&directory, 8_000, PeerScript::SwitchNeverFires).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        scenario.calls = vec![Call {
+            method: "session.branch_create".into(),
+            params: json!({"parentBranchId": "main", "at": SESSION_OPEN,
+                           "prompt": "the line's job"}),
+        }];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let opened = reads.opens.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "setup_failed", "{:?}", driven.error);
+        assert!(opened.is_empty(), "the call is not sent without a sequence");
+        assert!(
+            driven.error.unwrap_or_default().contains("no sequence"),
+            "the error names the missing sequence"
+        );
+    }
+
+    /// A switch whose target never appears is its own outcome and a failed
+    /// run: the run ends on its turn budget with the switch pending, and the
+    /// runner records `switch_target_not_reached` rather than dropping it
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_switch_that_never_fires_is_a_failed_outcome() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-switch-never-{}",
+            std::process::id()
+        ));
+        let (socket, _) = scripted_peer(&directory, 8_000, PeerScript::SwitchNeverFires).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+            former_message: None,
+        });
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            driven.stop, "switch_target_not_reached",
+            "{:?}",
+            driven.error
+        );
+        let error = driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2") && error.contains("turns"),
+            "{error}"
+        );
+        assert!(
+            failed(driven.stop, None, JudgeOutcome::Judged),
+            "the outcome is a failed run on its own"
+        );
+    }
+
+    /// A switch whose target has started its first turn is not reported as
+    /// one that never fired: when the move keeps answering `unknown_branch`
+    /// and the run stops on its budget, the run records the unfinished move
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_switch_the_budget_stops_after_its_trigger_reports_the_move() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-switch-retry-{}",
+            std::process::id()
+        ));
+        let (socket, _) = scripted_peer(&directory, 8_000, PeerScript::SwitchMoveRetries).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+            former_message: None,
+        });
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            driven.stop, "switch_target_not_reached",
+            "{:?}",
+            driven.error
+        );
+        let error = driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2")
+                && error.contains("did not complete")
+                && error.contains("turns"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("first turn did not start"),
+            "the target's first turn started: {error}"
+        );
+        assert!(
+            driven.switch_retries >= 1,
+            "the move was retried while the line was not registered"
+        );
+        assert!(
+            failed(driven.stop, None, JudgeOutcome::Judged),
+            "the outcome is a failed run on its own"
+        );
+    }
+
+    /// A run that stops on its turn budget while a move waits for its note is
+    /// not scored: the move happened, but the input that must answer under
+    /// the note was never sent, so the run is incomplete instead of ending on
+    /// `turns` with no error (Timeline branches §12.4).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_run_that_reaches_the_turn_budget_before_the_note_is_not_scored() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-note-turn-budget-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::SwitchNoteAfterTheLastTurn).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+            former_message: None,
+        });
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(moves, ["2"], "the move happened before the run stopped");
+        assert_eq!(driven.turns, 1, "the run stopped on its turn budget");
+        assert_eq!(driven.stop, "switch_incomplete", "{:?}", driven.error);
+        let error = driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2") && error.contains("follow-up") && error.contains("turns"),
+            "{error}"
+        );
+        assert!(
+            driven.switch_notes.expected.is_empty(),
+            "the run sent no scored follow-up"
+        );
+        assert!(
+            failed(driven.stop, driven.error.as_deref(), JudgeOutcome::Judged),
+            "the incomplete switch is a failed run and enters no probe rate"
+        );
+    }
+
+    /// A run that reaches its turn budget after the step after the first idle
+    /// submitted a request, but before that request reached the model, has no
+    /// request for the identity probe to read: the runner keeps the
+    /// submission, and the export decides that it was never observed
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_budget_after_the_after_idle_submit_leaves_the_request_unobserved() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-after-idle-cap-{}",
+            std::process::id()
+        ));
+        let (socket, _) =
+            scripted_peer(&directory, 8_000, PeerScript::AfterIdleSubmitAtTheCap).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 2;
+        scenario.budget.seconds = 10.;
+        scenario.budget.window = 8_000;
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "turns", "{:?}", driven.error);
+        assert_eq!(driven.turns, 2, "the run stopped on its turn budget");
+        let after: Vec<&FixtureInput> = driven
+            .inputs
+            .iter()
+            .filter(|input| input.what == AFTER_IDLE_INPUT)
+            .collect();
+        assert_eq!(
+            after.len(),
+            1,
+            "the step after the idle submitted its request"
+        );
+        assert_eq!(after[0].line, "main");
+        assert_eq!(after[0].input.as_deref(), Some("input-2"));
+        assert_eq!(
+            driven.inputs.len(),
+            2,
+            "the message and the request after the idle are the fixture's inputs"
+        );
+        assert!(
+            driven.incomplete.is_none(),
+            "the runner has no export yet: the export decides the observation"
+        );
+    }
+
+    /// A chained move to the latest tool line uses the line the run has seen
+    /// opened, even when it opened while the move before it waited: a line
+    /// that exists when the move is activated is the one its role names, so
+    /// the move runs instead of waiting for a creation that never comes
+    /// (model-prompts §9.8).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chained_switch_uses_the_tool_line_the_run_has_seen() {
+        let directory =
+            std::env::temp_dir().join(format!("dim-scenario-eval-chained-{}", std::process::id()));
+        let (socket, reads) = scripted_peer(
+            &directory,
+            8_000,
+            PeerScript::ChainedToolLineBeforeActivation,
+        )
+        .await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.moves = vec![
+            Switch {
+                to: SwitchTarget::Id("7".into()),
+                message: "to the line that waited".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+        ];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            moves,
+            ["7", "2"],
+            "the chained move moves to the tool line the run had seen opened: {:?}",
+            driven.error
+        );
+        assert_ne!(
+            driven.stop, "switch_target_not_reached",
+            "the move's target existed: {:?}",
+            driven.error
+        );
+    }
+
+    /// A chained move to the latest tool line waits for a creation when the
+    /// run has seen none: the line that opens after the move is activated is
+    /// the one its role names, and its first turn fires the move
+    /// (model-prompts §9.8).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_chained_switch_waits_for_the_tool_line_opened_after_it_was_activated() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-chained-later-{}",
+            std::process::id()
+        ));
+        let (socket, reads) = scripted_peer(
+            &directory,
+            8_000,
+            PeerScript::ChainedToolLineAfterActivation,
+        )
+        .await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 1;
+        scenario.budget.seconds = 10.;
+        scenario.moves = vec![
+            Switch {
+                to: SwitchTarget::Id("7".into()),
+                message: "to the line that waited".into(),
+                branch_id: None,
+                former_message: None,
+            },
+            Switch {
+                to: SwitchTarget::Role(SwitchRole::LatestToolLine),
+                message: "to the tool line".into(),
+                branch_id: None,
+                former_message: None,
+            },
+        ];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let moves: Vec<String> = reads.moves.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(
+            moves,
+            ["7", "2"],
+            "the chained move moves to the tool line opened after it was activated: {:?}",
+            driven.error
+        );
+        assert_ne!(
+            driven.stop, "switch_target_not_reached",
+            "the move's target existed: {:?}",
+            driven.error
+        );
+    }
+
+    /// A switch call that never answers is bounded by the scenario's wall
+    /// clock: the run records the timeout and returns instead of waiting on
+    /// the connection, so its worker is released (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_stalled_switch_call_stops_on_the_scenario_deadline() {
+        /// A run that has not returned by now waited on the reply.
+        const GUARD: Duration = Duration::from_secs(10);
+        for (script, name) in [
+            (PeerScript::SwitchMoveStalls, "move"),
+            (PeerScript::SwitchSubmitStalls, "submit"),
+        ] {
+            let directory = std::env::temp_dir().join(format!(
+                "dim-scenario-eval-switch-stall-{name}-{}",
+                std::process::id()
+            ));
+            let (socket, _) = scripted_peer(&directory, 8_000, script).await;
+            let mut client = driver_client(socket).await;
+            let mut scenario = scenario(Vec::new());
+            scenario.budget.seconds = 0.5;
+            scenario.switch = Some(Switch {
+                to: SwitchTarget::Id("2".into()),
+                message: "next".into(),
+                branch_id: None,
+                former_message: None,
+            });
+            let driven = tokio::time::timeout(
+                GUARD,
+                drive(
+                    &mut client,
+                    &RunSettings::default(),
+                    &scenario,
+                    &std::env::temp_dir(),
+                    &peer_model(),
+                    &ProducerState::default(),
+                    None,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{name}: the run waited on a reply that never came"));
+            let _ = std::fs::remove_dir_all(directory);
+            assert_eq!(driven.stop, "seconds", "{name}: {:?}", driven.error);
+            let error = driven.error.unwrap_or_default();
+            assert!(
+                error.contains("line 2")
+                    && error.contains("did not answer")
+                    && error.contains("budget ran out"),
+                "{name}: {error}"
+            );
+            assert!(
+                failed(driven.stop, None, JudgeOutcome::Judged),
+                "{name}: the timeout is a failed run on its own"
+            );
+        }
+    }
+
+    /// A run that stopped on its wall clock gives its cleanup a bounded
+    /// grace: its Session's close waits behind the move the run stopped
+    /// waiting on, and the run must still return the outcome it reached, so
+    /// the worker that runs it is released (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_run_closes_within_a_bounded_grace() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-close-grace-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::SwitchMoveAndCloseStall).await;
+        let server = app_server::serve_product(&directory.join("product"), |_| {})
+            .await
+            .unwrap();
+        let run_home = directory.join("run-home");
+        private_directory(&run_home).unwrap();
+        let settings = RunSettings {
+            overrides: Overrides::default(),
+            model_config: None,
+            unix_path: Some(socket),
+            defaults: None,
+            node: None,
+            js_runtime: None,
+            boundary: None,
+            plugin_tools: false,
+            stall_cleanup: false,
+            cleanup_budget_ms: None,
+            stall_export: None,
+            judge_budget_ms: None,
+        };
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 0.5;
+        scenario.switch = Some(Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "next".into(),
+            branch_id: None,
+            former_message: None,
+        });
+        let cancel = CancellationToken::new();
+        let model = peer_model();
+        let judge = peer_model();
+        let producer = ProducerState::default();
+        let finished = {
+            let run = drive_once(
+                &server,
+                &settings,
+                &run_home,
+                &directory,
+                &scenario,
+                &model,
+                &judge,
+                JudgeWindow {
+                    window: 128_000,
+                    max_output: 2_048,
+                },
+                &cancel,
+                &producer,
+                None,
+                None,
+            );
+            tokio::pin!(run);
+            // The client connects and the Session attaches with real I/O;
+            // only the run's own deadlines are on the paused clock below.
+            tokio::select! {
+                _ = reads.attached.notified() => {}
+                result = &mut run => panic!(
+                    "the run ended before it attached: {:?}",
+                    result.map(|finished| finished.driven.stop)
+                ),
+            }
+            tokio::time::pause();
+            // Advance the paused clock in small steps until the close is on
+            // the wire, then past the cleanup grace. The switch deadline and
+            // the close bound are the only waits this drives, so no real
+            // sleep stands in for either.
+            let closer = reads.clone();
+            let advancing = tokio::spawn(async move {
+                let step = Duration::from_millis(100);
+                for _ in 0..600 {
+                    tokio::time::advance(step).await;
+                    tokio::task::yield_now().await;
+                    if closer.closes.load(Ordering::SeqCst) == 0 {
+                        continue;
+                    }
+                    for _ in 0..=SETTLE_BOUND.as_millis() / step.as_millis() + 2 {
+                        tokio::time::advance(step).await;
+                        tokio::task::yield_now().await;
+                    }
+                    return;
+                }
+            });
+            tokio::pin!(advancing);
+            tokio::select! {
+                biased;
+                result = &mut run => {
+                    advancing.abort();
+                    tokio::time::resume();
+                    result.expect("the run failed to finish")
+                }
+                _ = &mut advancing => {
+                    tokio::time::resume();
+                    tokio::time::timeout(Duration::from_secs(10), &mut run)
+                        .await
+                        .expect("the run kept waiting for cleanup after its timeout")
+                        .expect("the run failed to finish")
+                }
+            }
+        };
+        assert!(
+            reads.closes.load(Ordering::SeqCst) >= 1,
+            "the run tried to close the Session"
+        );
+        assert_eq!(
+            finished.driven.stop, "seconds",
+            "{:?}",
+            finished.driven.error
+        );
+        let error = finished.driven.error.as_deref().unwrap_or_default();
+        assert!(
+            error.contains("line 2")
+                && error.contains("did not answer")
+                && error.contains("budget ran out"),
+            "{error}"
+        );
+        server.shutdown();
+        let _ = server.join().await;
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    /// A run that stopped on its wall clock keeps that outcome when the
+    /// context window read it deferred fails afterwards: the read is
+    /// cleanup, and what it returns cannot replace `seconds`
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_timed_out_run_keeps_its_outcome_when_the_deferred_window_read_fails() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-window-after-timeout-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::DeferredUsageFails).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        // The run is past its wall clock as soon as it submits: the timeout
+        // needs no clock of its own.
+        scenario.budget.seconds = 0.;
+        let workspace = std::env::temp_dir();
+        let model = peer_model();
+        let producer = ProducerState::default();
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &workspace,
+            &model,
+            &producer,
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "seconds", "{:?}", driven.error);
+        assert!(driven.timed_out, "the run stopped on its wall clock");
+        assert_eq!(
+            reads.usages.load(Ordering::SeqCst),
+            2,
+            "the deferred read ran once after the timeout"
+        );
+        assert!(
+            driven.error.is_none(),
+            "the deferred read's failure is not the timeout's error: {:?}",
+            driven.error
         );
     }
 
@@ -11124,6 +18623,7 @@ mod tests {
         scenario.budget.seconds = 10.;
         let driven = drive(
             &mut client,
+            &RunSettings::default(),
             &scenario,
             &std::env::temp_dir(),
             &peer_model(),
@@ -11160,6 +18660,7 @@ mod tests {
         scenario.budget.seconds = 10.;
         let driven = drive(
             &mut client,
+            &RunSettings::default(),
             &scenario,
             &std::env::temp_dir(),
             &peer_model(),
@@ -11200,6 +18701,7 @@ mod tests {
         scenario.budget.seconds = 10.;
         let driven = drive(
             &mut client,
+            &RunSettings::default(),
             &scenario,
             &std::env::temp_dir(),
             &peer_model(),
@@ -11240,6 +18742,7 @@ mod tests {
         scenario.budget.seconds = 10.;
         let driven = drive(
             &mut client,
+            &RunSettings::default(),
             &scenario,
             &std::env::temp_dir(),
             &peer_model(),
@@ -11279,6 +18782,7 @@ mod tests {
         scenario.budget.seconds = 10.;
         let driven = drive(
             &mut client,
+            &RunSettings::default(),
             &scenario,
             &std::env::temp_dir(),
             &peer_model(),
@@ -11313,6 +18817,7 @@ mod tests {
         scenario.budget.seconds = 10.;
         let driven = drive(
             &mut client,
+            &RunSettings::default(),
             &scenario,
             &std::env::temp_dir(),
             &peer_model(),
@@ -11351,6 +18856,7 @@ mod tests {
         let started = Instant::now();
         let driven = drive(
             &mut client,
+            &RunSettings::default(),
             &scenario,
             &std::env::temp_dir(),
             &peer_model(),
@@ -12531,6 +20037,7 @@ mod tests {
         let options = Options {
             out: out.clone(),
             scenarios: PathBuf::new(),
+            baseline: Vec::new(),
             texts: Vec::new(),
             model: model(),
             judge: model(),
@@ -12543,6 +20050,13 @@ mod tests {
             extra_tool: false,
             fail_child: None,
             fail_child_holds_stdout: false,
+            leave_member: None,
+            stall_cleanup: false,
+            cleanup_budget_ms: None,
+            stall_export: None,
+            stall: None,
+            broken: None,
+            judge_budget_ms: None,
             defaults: None,
             node: None,
             js_runtime: None,
@@ -12841,6 +20355,13 @@ mod tests {
             extra_tool: false,
             fail_child: None,
             fail_child_holds_stdout: false,
+            leave_member: None,
+            stall_cleanup: false,
+            cleanup_budget_ms: None,
+            stall_export: None,
+            stall: None,
+            broken: None,
+            judge_budget_ms: None,
             native_tools: native
                 .iter()
                 .map(|name| ((*name).to_owned(), ToolSource::Builtin))
@@ -12970,8 +20491,7 @@ mod tests {
         /// Holds the candidate arm's model calls until the failure cancels
         /// it; the current arm's child never reaches a model call.
         fn hold_the_candidate(text: &str) -> Option<Duration> {
-            text.contains("/candidate/")
-                .then(|| Duration::from_secs(60))
+            text.contains("/candidate/").then_some(HELD_PAST_GUARD)
         }
         let fixture = Fixture::holding(
             "failed-sibling",
@@ -13010,7 +20530,9 @@ mod tests {
             })
         };
         options.fail_child = Some(("current".into(), marker));
-        let settled = fixture.evaluate(&options).await;
+        let settled = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns after its failed run settles the sibling");
         let error = settled
             .expect_err("the failing run fails the evaluation")
             .to_string();
@@ -13033,6 +20555,895 @@ mod tests {
         assert!(
             child_tree_gone(pid).await,
             "the sibling's process and its group are gone (pid {pid})"
+        );
+    }
+
+    /// A run that stopped on its wall clock and whose Session's close and
+    /// server shutdown never settle keeps its timeout, is not judged, and
+    /// frees the worker that ran it: its child returns the record and exits,
+    /// and the next scenario runs on the same slot (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_timed_out_run_whose_cleanup_stalls_frees_its_worker() {
+        /// Holds the stalled scenario's run answer and every judge answer
+        /// but the next scenario's: a run that entered the judge after an
+        /// unsettled close would wait on it instead of returning its record.
+        fn hold_the_stalled_case(text: &str) -> Option<Duration> {
+            (text.contains("Run the stalled probes.")
+                || (text.contains("You check statements")
+                    && !text.contains("Finish the next scenario.")))
+            .then_some(HELD_PAST_GUARD)
+        }
+        let fixture = Fixture::holding(
+            "stalled-cleanup",
+            reads_the_workspace_file,
+            hold_the_stalled_case,
+            json!({
+                "message": "Run the stalled probes.",
+                "budget": {"turns": 4, "seconds": 0.2, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        // The second scenario is the same run with time to finish: it must
+        // run on the slot the stalled run frees.
+        let next = fixture.scenarios.join("next");
+        std::fs::create_dir_all(next.join("workspace")).unwrap();
+        std::fs::write(next.join("workspace").join("notes.txt"), FILE_TEXT).unwrap();
+        std::fs::write(
+            next.join("scenario.json"),
+            serde_json::to_string_pretty(&json!({
+                "message": "Finish the next scenario.",
+                "budget": {"turns": 4, "seconds": 60, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.stall_cleanup = true;
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns although the first scenario's cleanup never settles")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records.iter().filter(|record| record["scenario"] == "case") {
+            assert_eq!(record["stop"], "seconds", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
+            assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its cleanup bound, not at a longer one: {record}"
+            );
+            let error = record["judgeError"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not close within the cleanup grace"),
+                "the run says why it was not judged: {record}"
+            );
+        }
+        for record in records.iter().filter(|record| record["scenario"] == "next") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        for arm in ["current", "candidate"] {
+            assert!(
+                !out.join("outputs")
+                    .join(arm)
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "a Session that did not close leaves no export to judge ({arm})"
+            );
+            assert!(
+                out.join("outputs")
+                    .join(arm)
+                    .join("next")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the next scenario exports its Timeline ({arm})"
+            );
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            2,
+            "only the next scenario's runs are judged"
+        );
+    }
+
+    /// A run that stopped on its wall clock and whose Session closes within
+    /// the grace still exports its Timeline and is judged: the timeout is the
+    /// run's outcome, not a reason to skip the judge. The run stays open on a
+    /// steer that is not due, reaches its wall clock with an idle Session,
+    /// and the close settles.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_timed_out_run_that_closes_is_judged() {
+        let fixture = Fixture::with_window(
+            "timed-out-judged",
+            reads_the_workspace_file,
+            json!({
+                "description": "Timed out",
+                "message": "Run the quick probe.",
+                "steers": [{"afterSeconds": 120, "text": "This steer is not due."}],
+                "budget": {"turns": 12, "seconds": 1.0, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        let out = fixture.directory.join("out");
+        let options = fixture.options(out.clone());
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns")
+            .expect("the evaluation records both arms");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 2, "{report}");
+        for record in &records {
+            assert_eq!(record["stop"], "seconds", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the stop, close, export and judge do not sit at a longer bound: {record}"
+            );
+        }
+        for arm in ["current", "candidate"] {
+            assert!(
+                out.join("outputs")
+                    .join(arm)
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the closed run exports its Timeline ({arm})"
+            );
+        }
+        assert_eq!(fixture.judge().len(), 2, "both runs reach the judge");
+    }
+
+    /// A timed-out run whose Session closes still gets a bounded judge: a
+    /// judge whose provider never answers leaves the record a failed judge
+    /// call naming the grace and keeps the timeout, and the child prints its
+    /// record and exits, so the worker runs the next scenario. The run's whole
+    /// cleanup deadline is the test hook's one second; the held answer is a
+    /// minute, and the guard only turns a hang into a failed assertion.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_timed_out_run_whose_judge_never_answers_frees_its_worker() {
+        fn hold_the_first_judge(text: &str) -> Option<Duration> {
+            (text.contains("You check statements") && text.contains("Run the quick probe."))
+                .then_some(HELD_PAST_GUARD)
+        }
+        let fixture = Fixture::holding(
+            "timed-out-judge",
+            reads_the_workspace_file,
+            hold_the_first_judge,
+            json!({
+                "description": "Timed out",
+                "message": "Run the quick probe.",
+                "steers": [{"afterSeconds": 120, "text": "This steer is not due."}],
+                "budget": {"turns": 12, "seconds": 1.0, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        // The second scenario must run on the slot the first frees; its
+        // judge is answered at once.
+        let next = fixture.scenarios.join("next");
+        std::fs::create_dir_all(next.join("workspace")).unwrap();
+        std::fs::write(next.join("workspace").join("notes.txt"), FILE_TEXT).unwrap();
+        std::fs::write(
+            next.join("scenario.json"),
+            serde_json::to_string_pretty(&json!({
+                "message": "Finish the next scenario.",
+                "budget": {"turns": 4, "seconds": 60, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.cleanup_budget_ms = Some(1_000);
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though the first scenario's judge never answers")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records.iter().filter(|record| record["scenario"] == "case") {
+            assert_eq!(record["stop"], "seconds", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
+            assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its cleanup bound, not at a longer one: {record}"
+            );
+            let error = record["judgeError"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not finish within the cleanup grace"),
+                "the run says why its judge is unfinished: {record}"
+            );
+            assert!(
+                out.join("outputs")
+                    .join(record["arm"].as_str().unwrap())
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the closed run still exports its Timeline: {record}"
+            );
+        }
+        for record in records.iter().filter(|record| record["scenario"] == "next") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            4,
+            "the first scenario's judge was asked and held; the second's was answered"
+        );
+    }
+
+    /// A timed-out run whose Session closes but whose Timeline export never
+    /// finishes keeps its wall-clock stop, leaves no export and no judgment,
+    /// and frees the worker: the export runs under the same cleanup deadline
+    /// as the rest of the cleanup, and the next scenario runs on the slot
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_timed_out_run_whose_export_stalls_frees_its_worker() {
+        let fixture = Fixture::with_window(
+            "stalled-export",
+            reads_the_workspace_file,
+            json!({
+                "description": "Timed out",
+                "message": "Run the quick probe.",
+                "steers": [{"afterSeconds": 120, "text": "This steer is not due."}],
+                "budget": {"turns": 12, "seconds": 0.5, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        // The second scenario is the same run with time to finish: it must
+        // run on the slot the stalled run frees, and be judged.
+        let next = fixture.scenarios.join("next");
+        std::fs::create_dir_all(next.join("workspace")).unwrap();
+        std::fs::write(next.join("workspace").join("notes.txt"), FILE_TEXT).unwrap();
+        std::fs::write(
+            next.join("scenario.json"),
+            serde_json::to_string_pretty(&json!({
+                "message": "Finish the next scenario.",
+                "budget": {"turns": 4, "seconds": 60, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.stall_export = Some("case".into());
+        // Long enough for the close to settle on a loaded host; the export is
+        // the step that never finishes.
+        options.cleanup_budget_ms = Some(1_000);
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though the first scenario's export never finishes")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records.iter().filter(|record| record["scenario"] == "case") {
+            assert_eq!(record["stop"], "seconds", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
+            assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its cleanup bound, not at a longer one: {record}"
+            );
+            let error = record["judgeError"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("export did not finish within the cleanup grace"),
+                "the run says why its Timeline was not exported: {record}"
+            );
+        }
+        for record in records.iter().filter(|record| record["scenario"] == "next") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        for arm in ["current", "candidate"] {
+            assert!(
+                !out.join("outputs")
+                    .join(arm)
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "a run whose export did not finish leaves no export ({arm})"
+            );
+            assert!(
+                out.join("outputs")
+                    .join(arm)
+                    .join("next")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the next scenario exports its Timeline ({arm})"
+            );
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            2,
+            "only the next scenario's runs are judged"
+        );
+    }
+
+    /// A child that blocks after its run stopped on its wall clock never
+    /// reaches its own cleanup: the parent's hard bound kills its process
+    /// group, records the run as a wall-clock stop with no export and no
+    /// judgment, and frees the worker for the next arm, and no process of the
+    /// child's outlives the evaluation (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_stuck_after_its_wall_clock_stops_at_the_parent_bound() {
+        let fixture = Fixture::with_window(
+            "stuck-child",
+            reads_the_workspace_file,
+            json!({
+                "description": "Timed out",
+                "message": "Run the quick probe.",
+                "steers": [{"afterSeconds": 120, "text": "This steer is not due."}],
+                "budget": {"turns": 12, "seconds": 0.2, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.stall = Some(Stall {
+            run: None,
+            point: StallPoint::AfterWallClock,
+            // The bound under test is the parent's two seconds after the
+            // child reaches its stall; the guard only turns a hang into a
+            // failed assertion.
+            bound_ms: 2_000,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though each child blocks after its wall clock")
+            .expect("the evaluation records both arms");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 2, "both arms: {report}");
+        for record in &records {
+            assert_eq!(record["stop"], "seconds", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not exit within the parent's bound"),
+                "the run says why it has no outcome: {record}"
+            );
+            let judge_error = record["judgeError"].as_str().unwrap_or_default();
+            assert!(
+                judge_error.contains("was not exported"),
+                "the run says why it was not judged: {record}"
+            );
+            assert!(
+                !out.join("outputs")
+                    .join(record["arm"].as_str().unwrap())
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "a killed child leaves no export: {record}"
+            );
+        }
+        for arm in ["current", "candidate"] {
+            let params = out
+                .join("children")
+                .join(arm)
+                .join("case")
+                .join("run-0.json");
+            assert!(
+                out.join("children")
+                    .join(arm)
+                    .join("case")
+                    .join("run-0.stall")
+                    .exists(),
+                "the child reached its stall before the bound ({arm})"
+            );
+            let pid = SPAWNED
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(path, _)| path == &params)
+                .map(|(_, pid)| *pid)
+                .expect("the run's serve child was spawned");
+            assert!(
+                child_tree_gone(pid).await,
+                "the killed child and its group are gone ({arm}, pid {pid})"
+            );
+        }
+    }
+
+    /// A run that did not stop on its wall clock keeps the outcome it reached
+    /// when its served App Server's shutdown never settles: the join is
+    /// bounded by the settle grace, the teardown failure is attached as an
+    /// error, and the child prints its outcome and exits, so the next scenario
+    /// runs on the same slot (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_whose_server_never_settles_keeps_its_outcome() {
+        let fixture = Fixture::with_window(
+            "server-join-stall",
+            reads_the_workspace_file,
+            judged_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        // The shutdown under test never settles, and the settle grace is the
+        // test hook's 200ms, so the bound is reached without a real wait. The
+        // run itself does not stop on its wall clock.
+        options.stall_cleanup = true;
+        options.stall = Some(Stall {
+            run: Some(("current".into(), "case".into())),
+            point: StallPoint::AfterShutdown,
+            // The parent's own bound stays past the child's settle grace, so
+            // the child's ending is the teardown, not the supervisor's.
+            bound_ms: 5_000,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a server never settles")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records
+            .iter()
+            .filter(|record| record["scenario"] == "case" && record["arm"] == "current")
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not finish shutting down within"),
+                "the run names the teardown failure: {record}"
+            );
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its settle grace, not at a longer one: {record}"
+            );
+            assert!(
+                out.join("outputs")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the printed outcome keeps its export: {record}"
+            );
+        }
+        let marker = out
+            .join("children")
+            .join("current")
+            .join("case")
+            .join("run-0.stall");
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default(),
+            "before its server's shutdown settles",
+            "the child reached its served server's shutdown"
+        );
+        for record in records
+            .iter()
+            .filter(|record| !(record["scenario"] == "case" && record["arm"] == "current"))
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            4,
+            "both case runs reached the judge; the next scenario's runs were answered"
+        );
+    }
+
+    /// The fixture's basic scenario at a window the judge's view fits: one
+    /// message, a plain answer, and the workspace file's read.
+    fn judged_scenario() -> Value {
+        json!({
+            "description": "A quick probe",
+            "message": "Run the quick probe.",
+            "budget": {"turns": 4, "seconds": 60, "window": 131072},
+            "probes": [{"id": "ran", "kind": "must_show",
+                        "text": "the run has a transcript"}]
+        })
+    }
+
+    /// A second scenario beside the fixture's own: it must run on the slot a
+    /// stalled or failed first scenario frees, and its judge answers at once.
+    fn next_scenario(fixture: &Fixture, window: u64) {
+        let next = fixture.scenarios.join("next");
+        std::fs::create_dir_all(next.join("workspace")).unwrap();
+        std::fs::write(next.join("workspace").join("notes.txt"), FILE_TEXT).unwrap();
+        std::fs::write(
+            next.join("scenario.json"),
+            serde_json::to_string_pretty(&json!({
+                "message": "Finish the next scenario.",
+                "budget": {"turns": 4, "seconds": 60, "window": window},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// A child that exits before it prints its outcome, with a member of its
+    /// group still holding its standard output, is one run's supervisor
+    /// failure: the evaluation keeps its next scheduled run and judges it
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_that_exits_before_its_outcome_leaves_the_next_run_intact() {
+        let fixture = Fixture::with_window(
+            "exit-before-outcome",
+            reads_the_workspace_file,
+            judged_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        // The read grace the member outlives is the test hook's 200ms.
+        options.stall_cleanup = true;
+        let marker = fixture.directory.join("leave.marker");
+        options.leave_member = Some((true, marker.clone()));
+        options.broken = Some(BrokenRun {
+            run: ("current".into(), "case".into()),
+            outcome: BrokenOutcome::Silent,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns after one run exits before its outcome")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records
+            .iter()
+            .filter(|record| record["scenario"] == "case" && record["arm"] == "current")
+        {
+            assert_eq!(record["stop"], "error", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("exited before its outcome was read"),
+                "the run says why it has no outcome: {record}"
+            );
+            assert!(
+                !out.join("outputs")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "an unread outcome leaves no export: {record}"
+            );
+        }
+        for record in records.iter().filter(|record| record["scenario"] == "next") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        let members = left_members(&marker);
+        assert_eq!(members.len(), 4, "each child left its member");
+        for pid in members {
+            assert!(
+                child_tree_gone(pid).await,
+                "the member and its group are gone (pid {pid})"
+            );
+        }
+    }
+
+    /// A child that exits before its outcome line with nothing holding its
+    /// output is a malformed run: the evaluation fails it as it failed
+    /// before (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_that_exits_without_its_outcome_fails_the_evaluation() {
+        let fixture = Fixture::start(
+            "silent-child",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.broken = Some(BrokenRun {
+            run: ("current".into(), "case".into()),
+            outcome: BrokenOutcome::Silent,
+        });
+        let error = fixture
+            .evaluate(&options)
+            .await
+            .expect_err("a run without an outcome fails the evaluation")
+            .to_string();
+        assert!(
+            error.contains("printed no judgeOutcome line"),
+            "the error names the missing outcome: {error}"
+        );
+    }
+
+    /// A child whose completed output line is not JSON is still a malformed
+    /// run: the parse error is surfaced, not recorded as a timeout
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_garbled_outcome_line_fails_the_evaluation() {
+        let fixture = Fixture::start(
+            "garbled-child",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.broken = Some(BrokenRun {
+            run: ("current".into(), "case".into()),
+            outcome: BrokenOutcome::Garbled,
+        });
+        let error = fixture
+            .evaluate(&options)
+            .await
+            .expect_err("a garbled outcome fails the evaluation")
+            .to_string();
+        assert!(
+            error.contains("EOF while parsing"),
+            "the error is the parse error of the completed line: {error}"
+        );
+    }
+
+    /// A child that never prints its outcome is a supervisor failure, not a
+    /// wall-clock stop the supervisor invents: the record names the parent's
+    /// bound, and the run that follows on the same worker is judged
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_stuck_before_its_outcome_is_a_supervisor_failure() {
+        let fixture = Fixture::with_window(
+            "stuck-before-outcome",
+            reads_the_workspace_file,
+            judged_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.stall = Some(Stall {
+            run: Some(("current".into(), "case".into())),
+            point: StallPoint::BeforeOutcome,
+            bound_ms: 2_000,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a child never prints its outcome")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records
+            .iter()
+            .filter(|record| record["scenario"] == "case" && record["arm"] == "current")
+        {
+            assert_eq!(record["stop"], "error", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "not_asked", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not exit within the parent's bound"),
+                "the run names the supervisor's bound: {record}"
+            );
+            assert!(
+                record["judgeError"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("was not exported"),
+                "the run says why it was not judged: {record}"
+            );
+            assert!(
+                out.join("children")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.stall")
+                    .exists(),
+                "the child reached its stall before the bound: {record}"
+            );
+            assert!(
+                !out.join("outputs")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "a child with no outcome leaves no export: {record}"
+            );
+        }
+        for record in records
+            .iter()
+            .filter(|record| !(record["scenario"] == "case" && record["arm"] == "current"))
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+    }
+
+    /// A child that printed its complete outcome and then cannot exit keeps
+    /// its outcome: the run's stop, its export and its judgment stand, and
+    /// the teardown failure is attached as an error (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_that_printed_its_outcome_and_blocks_keeps_it() {
+        let fixture = Fixture::with_window(
+            "stuck-after-outcome",
+            reads_the_workspace_file,
+            judged_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        options.jobs = 1;
+        options.stall = Some(Stall {
+            run: Some(("current".into(), "case".into())),
+            point: StallPoint::AfterOutcome,
+            bound_ms: 2_000,
+        });
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a child cannot exit")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records
+            .iter()
+            .filter(|record| record["scenario"] == "case" && record["arm"] == "current")
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+            let error = record["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("did not exit within the parent's bound"),
+                "the run names the teardown failure: {record}"
+            );
+            assert!(
+                out.join("outputs")
+                    .join("current")
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the printed outcome keeps its export: {record}"
+            );
+        }
+        for record in records
+            .iter()
+            .filter(|record| !(record["scenario"] == "case" && record["arm"] == "current"))
+        {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+    }
+
+    /// A run whose judge outlives the judge phase's budget keeps the stop it
+    /// reached and its export, records a failed judge call, and frees the
+    /// worker: the next scenario runs on the same slot (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_whose_judge_outlives_its_phase_budget_keeps_its_stop() {
+        fn hold_the_case_judge(text: &str) -> Option<Duration> {
+            (text.contains("You check statements") && text.contains("Run the quick probe."))
+                .then_some(HELD_PAST_GUARD)
+        }
+        let fixture = Fixture::holding(
+            "judge-phase-budget",
+            reads_the_workspace_file,
+            hold_the_case_judge,
+            json!({
+                "description": "An idle run",
+                "message": "Run the quick probe.",
+                "budget": {"turns": 4, "seconds": 60, "window": 131072},
+                "probes": [{"id": "ran", "kind": "must_show",
+                            "text": "the run has a transcript"}]
+            }),
+            &[("notes.txt", FILE_TEXT)],
+            131_072,
+        )
+        .await;
+        next_scenario(&fixture, 131_072);
+        let out = fixture.directory.join("out");
+        let mut options = fixture.options(out.clone());
+        // Both case runs hold a slot while their judges time out; the next
+        // scenarios run once those slots are free.
+        options.jobs = 2;
+        options.judge_budget_ms = Some(1_000);
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a judge never answers")
+            .expect("the evaluation records both scenarios");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 4, "two scenarios, both arms: {report}");
+        for record in records.iter().filter(|record| record["scenario"] == "case") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], true, "{record}");
+            assert_eq!(record["judgeOutcome"], "call_failed", "{record}");
+            assert_eq!(record["error"], Value::Null, "{record}");
+            assert!(
+                record["judgeError"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("did not finish within its phase budget"),
+                "the run says why its judge is unfinished: {record}"
+            );
+            assert!(
+                out.join("outputs")
+                    .join(record["arm"].as_str().unwrap())
+                    .join("case")
+                    .join("run-0.timeline.jsonl")
+                    .exists(),
+                "the closed run still exports its Timeline: {record}"
+            );
+            assert!(
+                record["durationMs"].as_f64().unwrap_or_default() < 20_000.0,
+                "the run ends within its phase budget, not at a longer one: {record}"
+            );
+        }
+        for record in records.iter().filter(|record| record["scenario"] == "next") {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        assert_eq!(
+            fixture.judge().len(),
+            4,
+            "both case runs asked their held judge; both next runs were answered"
         );
     }
 
@@ -13122,6 +21533,94 @@ mod tests {
         );
     }
 
+    /// A child whose group keeps the write end of its standard output open
+    /// after the child exits must not hold the evaluation: the parent's read
+    /// of the outcome is bounded and the group is killed when the bound runs
+    /// out, so the run still returns its record. The second arm runs on the
+    /// slot the first frees.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_child_that_leaves_a_stdout_holder_stops_at_the_read_bound() {
+        let fixture = Fixture::start(
+            "stdout-holder",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let out = fixture.directory.join("out");
+        let mut options = fixture.judge_options(out.clone());
+        options.jobs = 1;
+        options.stall_cleanup = true;
+        let marker = fixture.directory.join("leave.marker");
+        options.leave_member = Some((true, marker.clone()));
+        // Two runs, each starting its own child and served Session: the
+        // guard only turns a hang into a failed assertion, and the member
+        // holds its stdout for 90 seconds. The bound under test is the test
+        // hook's 200 ms read grace.
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns though a child left its stdout open")
+            .expect("the evaluation records both arms");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 2, "both arms: {report}");
+        for record in &records {
+            assert_eq!(record["stop"], "idle", "{record}");
+            assert_eq!(record["judgeOutcome"], "judged", "{record}");
+        }
+        let members = left_members(&marker);
+        assert_eq!(members.len(), 2, "each arm's child left its member");
+        for pid in members {
+            assert!(
+                child_tree_gone(pid).await,
+                "the stdout holder and its group are gone (pid {pid})"
+            );
+        }
+    }
+
+    /// A child that exits successfully and leaves a member that does not
+    /// hold its standard output still leaves no member behind: the group is
+    /// killed once the output is read.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_successful_child_leaves_no_group_member() {
+        let fixture = Fixture::start(
+            "successful-member",
+            reads_the_workspace_file,
+            isolated_scenario(),
+            &[("notes.txt", FILE_TEXT)],
+        )
+        .await;
+        let out = fixture.directory.join("out");
+        let mut options = fixture.judge_options(out.clone());
+        let marker = fixture.directory.join("leave.marker");
+        options.leave_member = Some((false, marker.clone()));
+        let report = tokio::time::timeout(SUBPROCESS_EVAL_GUARD, fixture.evaluate(&options))
+            .await
+            .expect("the evaluation returns")
+            .expect("the evaluation records both arms");
+        let records = fixture.records(&out);
+        assert_eq!(records.len(), 2, "{report}");
+        let members = left_members(&marker);
+        assert_eq!(members.len(), 2, "each arm's child left its member");
+        for pid in members {
+            assert!(
+                child_tree_gone(pid).await,
+                "the successful child's member and its group are gone (pid {pid})"
+            );
+        }
+    }
+
+    /// The pids a `leave_member` child recorded, in the order it left them.
+    #[cfg(unix)]
+    fn left_members(marker: &Path) -> Vec<u32> {
+        std::fs::read_to_string(marker.with_extension("member"))
+            .expect("the leaving child recorded its member")
+            .lines()
+            .map(|line| line.trim().parse().expect("a member's pid"))
+            .collect()
+    }
+
     /// Whether a serve child and the process group it leads have no member
     /// left, probed for up to five seconds: the harness kills the group, and
     /// the kill and the reaping of its leader settle a moment later.
@@ -13200,6 +21699,213 @@ mod tests {
             !offered.iter().any(|tool| tool == "plugin"),
             "the member declares no plugin tool: {offered:?}"
         );
+    }
+
+    /// The two note policies the user-line move turns on reach the model, on
+    /// the committed scenario: its `session.branch_create` call opens a user
+    /// line, main opens a tool line, and the move goes from main to the tool
+    /// line and then to the user line, after which the tool line and the user
+    /// line each receive an input. The current arm's requests carry no
+    /// guidance block, and the candidate arm carries each note with its
+    /// `{other}` placeholder replaced by the line id (Timeline branches §12.4,
+    /// model-prompts §9.8).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_user_line_switch_carries_both_notes_into_the_requests() {
+        const DESCRIPTION: &str = "CANDIDATE BRANCH TOOL DESCRIPTION";
+        const BASELINE_DESCRIPTION: &str = "BASELINE BRANCH TOOL DESCRIPTION";
+        const DEFAULT_NOTE: &str =
+            "- CANDIDATE default guidance for {parent}, switched from {other}.";
+        const USER_NOTE: &str = "- CANDIDATE user-line guidance for {other}.";
+        const FORMER_NOTE: &str = "- CANDIDATE former-default guidance for {other}.";
+        let case =
+            repository().join("xtask/scenario-eval/timeline-branches/user-line-becomes-default");
+        let scenario: Value =
+            serde_json::from_slice(&std::fs::read(case.join("scenario.json")).unwrap()).unwrap();
+        let workspace: Vec<(String, String)> = workspace_files(&case)
+            .into_iter()
+            .map(|(path, text)| {
+                (
+                    path.strip_prefix("workspace")
+                        .expect("a file under workspace")
+                        .to_string_lossy()
+                        .into_owned(),
+                    text,
+                )
+            })
+            .collect();
+        let workspace: Vec<(&str, &str)> = workspace
+            .iter()
+            .map(|(path, text)| (path.as_str(), text.as_str()))
+            .collect();
+        // The follow-ups the scenario sends: the tool line's input, then the
+        // user line's input and the former default's input.
+        let moves = scenario["moves"].as_array().cloned().unwrap_or_default();
+        let tool_input = moves[0]["message"].as_str().unwrap().to_owned();
+        let user_input = moves[1]["message"].as_str().unwrap().to_owned();
+        let former_input = moves[1]["formerMessage"].as_str().unwrap().to_owned();
+        let fixture = Fixture::with_window(
+            "user-line-notes",
+            user_line_notes,
+            scenario,
+            &workspace,
+            131_072,
+        )
+        .await;
+        let mut options = fixture.options(fixture.directory.join("out"));
+        options.baseline = pairs(&[
+            ("timeline-tree/branch-description", BASELINE_DESCRIPTION),
+            ("timeline-tree/default-note", ""),
+            ("timeline-tree/user-default-note", ""),
+            ("timeline-tree/former-default-note", ""),
+        ]);
+        options.texts = pairs(&[
+            ("timeline-tree/branch-description", DESCRIPTION),
+            ("timeline-tree/default-note", DEFAULT_NOTE),
+            ("timeline-tree/user-default-note", USER_NOTE),
+            ("timeline-tree/former-default-note", FORMER_NOTE),
+        ]);
+        let report = fixture.evaluate(&options).await.unwrap();
+        assert!(
+            report.contains("candidate is inconclusive: no comparison is a regression"),
+            "{report}"
+        );
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(
+                record["failed"], false,
+                "the scenario reaches idle on every line: {record}"
+            );
+        }
+        for arm in ["current", "candidate"] {
+            let directory = options.out.join("outputs").join(arm).join("case");
+            let export = std::fs::read_to_string(directory.join("run-0.timeline.jsonl")).unwrap();
+            let created = |kind: &str| -> String {
+                export
+                    .lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .find(|line| {
+                        line["event"]["type"] == "branch"
+                            && line["event"]["name"] == "create"
+                            && line["event"]["data"]["source"]["kind"] == kind
+                    })
+                    .and_then(|line| line["event"]["data"]["branch"].as_str().map(str::to_owned))
+                    .unwrap_or_else(|| panic!("{arm}: a {kind} line was created"))
+            };
+            let tool = created("tool");
+            let user = created("user");
+            let requests = fixture.arm(arm);
+            let descriptions: Vec<String> = requests
+                .iter()
+                .filter_map(|request| {
+                    let request: Value = serde_json::from_str(request).ok()?;
+                    request["tools"].as_array()?.iter().find_map(|tool| {
+                        (tool["function"]["name"] == "branch")
+                            .then(|| tool["function"]["description"].as_str().map(str::to_owned))
+                            .flatten()
+                    })
+                })
+                .collect();
+            let expected_description = if arm == "current" {
+                BASELINE_DESCRIPTION
+            } else {
+                DESCRIPTION
+            };
+            assert!(
+                !descriptions.is_empty()
+                    && descriptions
+                        .iter()
+                        .all(|description| description == expected_description),
+                "{arm}: the branch tool description is the pair's text: {descriptions:?}"
+            );
+            if arm == "current" {
+                assert!(
+                    requests
+                        .iter()
+                        .all(|request| !carried(request, "How you work here:")),
+                    "the empty note baselines write no guidance block"
+                );
+                continue;
+            }
+            let default_note = format!(
+                "How you work here:\n{}",
+                DEFAULT_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", "main")
+            );
+            let user_note = format!(
+                "How you work here:\n{}",
+                USER_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", &tool)
+            );
+            let former_note = format!(
+                "How you work here:\n{}",
+                FORMER_NOTE
+                    .replace("{parent}", "main")
+                    .replace("{other}", &user)
+            );
+            // The request that consumed each follow-up is the first that
+            // carries it: it must carry the note the move wrote on that line,
+            // so the line's answer was made under the policy text.
+            let consuming = |input: &str| -> &String {
+                requests
+                    .iter()
+                    .find(|request| carried(request, input))
+                    .unwrap_or_else(|| panic!("{arm}: a request answers {input:?}"))
+            };
+            assert!(
+                carried(consuming(&tool_input), &default_note),
+                "the request that answers the tool line's follow-up carries the move's default note: {default_note}"
+            );
+            assert!(
+                carried(consuming(&user_input), &user_note),
+                "the request that answers the user line's follow-up carries its note with the tool line id: {user_note}"
+            );
+            assert!(
+                carried(consuming(&former_input), &former_note),
+                "the request that answers the former default's input carries its note with the user line id: {former_note}"
+            );
+            for attribute in [
+                format!(
+                    "<dim-branch-line branch=\"{user}\" parent=\"main\" source=\"user\" default=\"true\">"
+                ),
+                format!(
+                    "<dim-branch-line branch=\"{tool}\" parent=\"main\" source=\"tool\" default=\"false\">"
+                ),
+            ] {
+                assert!(
+                    requests.iter().any(|request| carried(request, &attribute)),
+                    "a request carries {attribute}"
+                );
+            }
+        }
+    }
+
+    /// The run model of the user-line scenario: main opens the tool line on
+    /// its first request, every line answers with text, and the judge gives
+    /// each probe its verdict. A request that carries the tool result or a
+    /// line's birth identity is not main's first: the tool's result says
+    /// `Line created:`, and a line's first input says `You are line `.
+    fn user_line_notes(text: &str) -> Option<Value> {
+        if text.contains("You check statements") {
+            return Some(content(
+                r#"[{"id":"user-line-carries-the-work","verdict":"present","quote":"turn/end"},
+                    {"id":"former-default-answers-and-coordinates","verdict":"present","quote":"turn/end"},
+                    {"id":"former-default-leaves-the-new-scope","verdict":"absent","quote":"nothing"},
+                    {"id":"user-line-does-not-end-itself","verdict":"absent","quote":"nothing"}]"#,
+            ));
+        }
+        if text.contains("Open one line to diagnose the early-expiry bug")
+            && !text.contains("Line created:")
+            && !text.contains("You are line ")
+        {
+            return Some(tool_call(
+                "branch",
+                r#"{"action":"create","prompt":"diagnose the early-expiry bug in token.py and write notes.md"}"#,
+            ));
+        }
+        Some(content("Done."))
     }
 }
 
@@ -13322,12 +22028,16 @@ mod run_tools_tests {
         let directory = app_server::scratch("run-tools").unwrap();
         let workspace = directory.join("workspace");
         private_directory(&workspace).unwrap();
+        let probe_home = directory.join("probe-home");
+        configure_search(&probe_home).unwrap();
+        let product_home = directory.join("product/home");
+        configure_search(&product_home).unwrap();
         let models = fixture_models(&directory);
         let sockets = Sockets::new().unwrap();
         let probe = RegistryProbe::default();
         let serving = probe.clone();
         let server = app_server::serve_home(
-            &directory.join("probe-home"),
+            &probe_home,
             &workspace,
             directory.join("probe-output"),
             native_probe_settings(

@@ -1,6 +1,8 @@
 const RELEASE: bool = matches!(option_env!("DIM_RELEASE_BUILD"), Some(value) if !value.is_empty());
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    dim_agent_capabilities::workspace_tools::files::install_process_umask();
     dim_agent_capabilities::build::install(None, None, RELEASE);
     #[cfg(target_os = "linux")]
     unsafe {

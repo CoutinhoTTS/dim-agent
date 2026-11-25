@@ -79,6 +79,7 @@ rutis-bridge.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 rusqlite = "0.41.1"
+vt100 = "0.15"
 
 [lints]
 workspace = true

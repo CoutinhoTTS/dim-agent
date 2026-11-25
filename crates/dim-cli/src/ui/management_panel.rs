@@ -12,14 +12,11 @@
 //! │   deploy      enabled                         │
 //! │   Issues                                      │
 //! │     /w/.agents/skills/old/SKILL.md: no name   │
-//! │   Writes commit messages from the staged diff.│
-//! │   /home/u/.agents/skills/commit/SKILL.md      │
-//! ╰───── Enter toggle · Ctrl+R reload · Esc close ┘
+//! ╰─ Enter use · Tab toggle · Ctrl+R reload · Esc close ─╯
 //! ```
 //!
-//! The entry's actions decide the keys it offers: the hint names only those,
-//! and Enter, Space, Ctrl+E, Ctrl+N, Ctrl+R, Ctrl+T, Ctrl+X and Tab keep one
-//! meaning in every area. A remove asks in the hint before it sends; an
+//! The hint shows the available actions. In Skills, Enter inserts the selected
+//! enabled Skill into the draft and Tab toggles it. A remove asks before it sends; an
 //! inspect shows the adapter's detail in place of the list.
 
 use std::cell::Cell;
@@ -470,7 +467,18 @@ impl ManagementPanel {
         if key.code == KeyCode::Char('t') && key.mods.contains(Modifiers::CTRL) {
             return self.run();
         }
-        if key.code == KeyCode::Tab {
+        let key = if self.area == Area::Skills {
+            match key.code {
+                KeyCode::Enter => {
+                    return self
+                        .selected()
+                        .filter(|e| e.actions.contains(&ActionKind::UseSkill))
+                        .map_or(Effect::None, |e| Effect::UseSkill(e.label.clone()));
+                }
+                KeyCode::Tab => KeyEvent::new(KeyCode::Enter, key.mods),
+                _ => key,
+            }
+        } else if key.code == KeyCode::Tab {
             // Tab moves the list in other panels; here it opens the entry.
             if !self.entry_offers(ActionKind::Inspect) {
                 return Effect::None;
@@ -479,9 +487,7 @@ impl ManagementPanel {
                 id: entry.id.clone(),
                 source: entry.source.clone(),
             });
-        }
-        // Space toggles as Enter does, as in `/settings > Execution`.
-        let key = if matches!(key.code, KeyCode::Char(' ')) {
+        } else if matches!(key.code, KeyCode::Char(' ')) {
             KeyEvent::new(KeyCode::Enter, key.mods)
         } else {
             key
@@ -677,7 +683,9 @@ impl ManagementPanel {
         }
         let inner = width.saturating_sub(4).max(1);
         let mut footer = Vec::new();
-        if let Some(entry) = self.selected() {
+        if self.area != Area::Skills
+            && let Some(entry) = self.selected()
+        {
             for line in &entry.detail {
                 for row in wrap_words(&safe(line), inner.saturating_sub(2).max(1)) {
                     footer.push(format!("  {}", fg(&row, &p.muted)));
@@ -791,6 +799,8 @@ fn title(area: &Area) -> &'static str {
 /// run kind's operation uses that word instead of `run`.
 fn label(area: &Area, kind: ActionKind) -> &'static str {
     match kind {
+        ActionKind::UseSkill => "Enter use",
+        ActionKind::Toggle if *area == Area::Skills => "Tab toggle",
         ActionKind::Toggle => "Enter toggle",
         ActionKind::Edit => "Ctrl+E edit",
         ActionKind::Reload => "Ctrl+R reload",
@@ -805,6 +815,7 @@ fn label(area: &Area, kind: ActionKind) -> &'static str {
 /// The keys the area and the selected entry offer, as one hint.
 fn hint(area: &Area, kinds: &[ActionKind]) -> String {
     let mut parts: Vec<&str> = [
+        ActionKind::UseSkill,
         ActionKind::Toggle,
         ActionKind::Edit,
         ActionKind::Reload,
@@ -951,7 +962,7 @@ mod tests {
                             "commit",
                             Some(true),
                             Vec::new(),
-                            vec![ActionKind::Toggle],
+                            vec![ActionKind::Toggle, ActionKind::UseSkill],
                         ),
                         entry(
                             "user:review",
@@ -1020,10 +1031,8 @@ mod tests {
         KeyEvent::new(KeyCode::Char(code), Modifiers::CTRL)
     }
 
-    /// The rows group entries under their source, name each entry's state,
-    /// and the selected one says what it is below the list.
     #[test]
-    fn rows_group_by_source_and_name_the_selected_entry() {
+    fn skills_list_states_by_source_without_previewing_the_selection() {
         let panel = opened();
         let text = shown(&panel, 72, 20).join("\n");
         assert!(text.contains("user"), "{text}");
@@ -1031,16 +1040,16 @@ mod tests {
         assert!(text.contains("enabled"), "{text}");
         assert!(text.contains("disabled  shadowed by commit"), "{text}");
         assert!(
-            text.contains("commit does its work.")
-                && text.contains("/w/.agents/skills/user:commit/SKILL.md"),
-            "the selected entry says what it is: {text}"
+            !text.contains("commit does its work.")
+                && !text.contains("/w/.agents/skills/user:commit/SKILL.md"),
+            "{text}"
         );
         assert!(
             text.contains("/w/.agents/skills/old/SKILL.md: no name"),
             "the issues follow the entries: {text}"
         );
         assert!(
-            text.contains("Enter toggle · Ctrl+R reload · Esc close"),
+            text.contains("Enter use · Tab toggle · Ctrl+R reload · Esc close"),
             "{text}"
         );
         for width in [16, 24, 40] {
@@ -1051,12 +1060,14 @@ mod tests {
         }
     }
 
-    /// The entry's actions decide its keys: Enter toggles what offers it,
-    /// Ctrl+R reloads, and the hint names only what the selection offers.
     #[test]
     fn keys_follow_the_actions_of_the_selected_entry() {
         let mut panel = opened();
-        match panel.handle_key(key(KeyCode::Enter)) {
+        assert_eq!(
+            panel.handle_key(key(KeyCode::Enter)),
+            Effect::UseSkill("commit".into())
+        );
+        match panel.handle_key(key(KeyCode::Tab)) {
             Effect::Management(request) => {
                 assert_eq!(request.area, Area::Skills);
                 assert_eq!(
@@ -1089,7 +1100,7 @@ mod tests {
         panel.handle_key(key(KeyCode::End));
         let text = shown(&panel, 72, 20).join("\n");
         assert!(
-            text.contains("Enter toggle · Ctrl+R reload · Esc close"),
+            text.contains("Tab toggle · Ctrl+R reload · Esc close"),
             "{text}"
         );
         match panel.handle_key(ctrl('r')) {
@@ -1112,12 +1123,6 @@ mod tests {
         assert!(matches!(
             panel.handle_key(key(KeyCode::Enter)),
             Effect::None
-        ));
-        // Space toggles as Enter does.
-        panel.handle_key(key(KeyCode::Home));
-        assert!(matches!(
-            panel.handle_key(key(KeyCode::Char(' '))),
-            Effect::Management(_)
         ));
     }
 
@@ -1558,9 +1563,9 @@ mod tests {
     }
 
     fn opened_catalogue() -> ManagementPanel {
-        let mut panel = ManagementPanel::new(Area::Skills, None);
+        let mut panel = ManagementPanel::new(Area::Scheduled, None);
         panel.set_result(&view_reply(
-            Area::Skills,
+            Area::Scheduled,
             ManagementAction::List,
             catalogue(),
         ));
@@ -1711,7 +1716,7 @@ mod tests {
             _ => panic!("expected an inspect"),
         }
         panel.set_result(&reply(
-            Area::Skills,
+            Area::Scheduled,
             ManagementAction::Inspect {
                 id: "job-1".into(),
                 source: None,
@@ -1748,7 +1753,7 @@ mod tests {
     fn a_long_detail_scrolls() {
         let mut panel = opened_catalogue();
         panel.set_result(&reply(
-            Area::Skills,
+            Area::Scheduled,
             ManagementAction::Inspect {
                 id: "job-1".into(),
                 source: None,
@@ -1878,7 +1883,7 @@ mod tests {
             _ => panic!("expected a run"),
         }
         panel.set_result(&reply(
-            Area::Skills,
+            Area::Scheduled,
             ManagementAction::Run {
                 id: "job-1".into(),
                 source: None,
@@ -1940,7 +1945,7 @@ mod tests {
         let mut after = catalogue();
         after.groups[0].entries.retain(|entry| entry.id != "job-1");
         panel.set_result(&view_reply(
-            Area::Skills,
+            Area::Scheduled,
             ManagementAction::Remove {
                 id: "job-1".into(),
                 source: None,
@@ -1960,7 +1965,7 @@ mod tests {
         panel.handle_key(ctrl('x'));
         panel.handle_key(key(KeyCode::Enter));
         panel.set_result(&reply(
-            Area::Skills,
+            Area::Scheduled,
             ManagementAction::Remove {
                 id: "job-1".into(),
                 source: None,
@@ -1987,7 +1992,7 @@ mod tests {
         let mut panel = opened_catalogue();
         panel.handle_key(key(KeyCode::Enter));
         panel.set_result(&reply(
-            Area::Skills,
+            Area::Scheduled,
             ManagementAction::Toggle {
                 id: "job-1".into(),
                 source: None,
@@ -2010,7 +2015,7 @@ mod tests {
         let mut panel = opened_catalogue();
         panel.handle_key(ctrl('t'));
         panel.set_result(&reply(
-            Area::Skills,
+            Area::Scheduled,
             ManagementAction::Run {
                 id: "job-1".into(),
                 source: None,

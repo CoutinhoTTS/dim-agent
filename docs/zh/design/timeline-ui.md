@@ -108,7 +108,7 @@ scrollback 在 live 交互区以确认框替换输入框，不提交到历史；
 ╰── ~/repo (main) · ⑂ main ▸ parser race ▸ the guard · after message 4 ─╯
 ```
 
-`after message N` 是切点时父线历史中的用户消息数，包括它继承的部分。
+`after message N` 是切点时父线历史中的用户消息数，包括它继承的部分。祖先链上任一段已保留的历史没有覆盖到分支起点时，这个数未知：本条 attachment 从没打开过的父线，以及停在分支起点之前的已加载窗口，都让标签不写它。计数不会去读完整的父线历史（[有界窗口](../../design/clients.md#opening-a-conversation-with-a-bounded-window)），所以线宁可不写计数，也不写一个偏小的数；读到起点的那次读取（比如在显示的线上用 `/earlier` 翻到起点）会把计数补上。
 
 这个标签的工作区部分先于线让步。左侧状态很宽时，它先整体缩短（截掉路径前段，再放弃分支，再只保留截断的路径），而不是直接消失；只有连这些都放不下时边框才丢掉它。显示线时仍是原来那三档：完整标签、只剩 `⑂`、不画，所以路径信息永远不会挤掉线的信息。标签写的是 Session 实际工作的目录，不是进程的启动目录；attach 到别的目录的 Session（显式 `--cwd`、`/resume` 到另一个 worktree）时它连同那个目录的分支一起跟过去。还没有 Session 的 Home 写回启动工作区。文件提及、粘贴路径和拖入的文件仍以本地 `--cwd` 为基准（[CLI 附件输入](../../design/cli-attachment-input.md)），所以跨工作区 resume 之后，标签写的目录可能与它们不同；不同时 `@` 面板会在标题里写出该基准。
 
@@ -206,9 +206,13 @@ applied 的输入可以跨过一次 stop 继续待消费，正是下一个 turn 
 
 与 #427 §14 相同：切换时写一行 `⑂ 名字 · id` 边界，等该线的历史加载完后接着是它的 transcript，只含它自己的事件（每个分支各自编号，[sessions service D11](appserver/sessions-service.md)）。它继承的历史属于父线，离它只有一个标记的距离。
 
+窗口有三种状态：加载中、完成、失败。首次读取失败不再算作“仍在加载”：线上用 `读取分支历史失败；重新打开重试：<原因>` 代替 transcript，界面回到空闲轮询而不是逐帧唤醒，后台也不自动重读。重新在 `/lines` 里选中这条线，或重新打开 `/tasks` 面板，会重新开始这次读取。失败只属于首次读取：之后任务清单刷新或 `/earlier` 的一页读取失败时，已加载的 transcript 保持原样，只报告那次读取自己的错误。`main` 保持[原生 CLI 契约](../../../crates/dim-cli/README.md)里原有的打开失败：失败可见、拒绝提交、保留草稿。
+
+线在首窗加载完成之前创建失败时，既没有 transcript，也没有能结束这次等待的读取。界面按普通的切换边界显示它被切出的那条线（目录不知道父线时显示 `main`），失败通知写明是哪次创建失败。`/lines` 仍把这条线标为 `creation failed`，并拒绝显示它。
+
 ## 6. Lines 面板
 
-`/lines` 是 Timeline 的地图。子线先按它在父线上被切出的位置排序，再按打开顺序。每行以线的用途开头，后面写 `after message N` 和它的 id：
+`/lines` 是 Timeline 的地图。子线先按它在父线上被切出的位置排序，再按打开顺序；计数未知时，排序仍按 `branchPoint`。每行以线的用途开头，后面写 `after message N` 和它的 id；计数未知的行省掉计数，其余照写：
 
 ```
 ┌ Lines ───────────────────────────────────────────────────────────┐
@@ -246,7 +250,7 @@ Session worker 通过实时 `session.event` 中非空白的 assistant 正文判�
 
 | # | 需求 | 归属 | 说明 |
 | --- | --- | --- | --- |
-| R1 | `LineView.cut`：父线序号及该处的消息数 | CLI projection | 由 `branch/create.at` 与父线的用户输入折叠而来；无格式变化 |
+| R1 | `LineView.cut`：父线序号及该处的消息数 | CLI projection | 由 `branch/create.at` 与父线的用户输入折叠而来；无格式变化。祖先链上已保留的历史没有覆盖分支起点时为 `None`；计数未知时 `/lines` 同样按 `branchPoint` 排序 |
 | R2 | 用户消息行的切点（`ViewRow.cut`）、模型是否已消费（`ViewRow.pending`）与标记行的线（`ViewRow.line`） | CLI projection | 来自客户端已有的序号与输入状态 |
 | R3 | `session.branch_create` 与 `session.fork` 调用 | CLI session host | 已有方法；从过期 attachment 发出的请求在本地拒绝 |
 | R4 | 后续、可选：显示 fork 的来源（源上的 `↗ forked`，fork 里的 `forked from S`） | App Server，需格式决定 | `session/forked` 不带数据，fork 设计也不加来源列 |

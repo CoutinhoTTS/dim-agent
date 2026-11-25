@@ -1574,7 +1574,7 @@ fn a_new_session_shows_the_effort_its_creation_adopted() {
         terminal.until("Welcome to DIM");
         terminal.write(b"first message\r");
         terminal.until("test / model · high");
-        terminal.until("effortful input accepted");
+        terminal.until_visible("effortful input accepted");
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
@@ -2015,6 +2015,162 @@ fn a_resumed_session_draws_the_adopted_model_and_effort() {
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
+}
+
+/// The startup `--model` lands on the line the attach reply names: a move
+/// between attach and the update must not write it on another line.
+#[test]
+fn a_resumed_tui_adopts_the_startup_model_on_the_attached_line() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        let mut record = attach_record(&attach);
+        record["defaultBranch"] = json!({"branchId":"line-1","sequence":5});
+        wire.reply(&attach, record);
+        let history = wire.read("session.history");
+        wire.reply(
+            &history,
+            json!({"events":[configured_event(4, "line-model", json!({}))],
+                "through":5,"nextAfter":5,"done":true}),
+        );
+        let update = wire.read("session.model.update");
+        assert_eq!(
+            update["params"]["branchId"],
+            json!("line-1"),
+            "the startup model follows the attach reply's line"
+        );
+        assert_eq!(update["params"]["modelId"], json!("replacement"));
+        wire.reply(
+            &update,
+            json!({"outcome":"adopted","model":{"providerId":"test","modelId":"replacement"}}),
+        );
+        wire.no_context();
+        let providers = wire.read("account.providers");
+        wire.reply(&providers, json!([]));
+        wire.hold();
+    });
+    let mut command = home.command();
+    command.args(["--model", "replacement"]);
+    let mut terminal = Terminal::resume_tui(command);
+    terminal.until("test / line-model");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+/// The capability declaration a configuration states for `model_id`.
+fn effort_snapshot(model_id: &str, efforts: &[&str]) -> Value {
+    let mut capabilities = dim_agent_types::ModelCapabilities::with_limits(64_000, 2_048);
+    capabilities.reasoning = true;
+    json!({"target":{"providerId":"test","modelId":model_id},
+        "capabilities":capabilities,
+        "reasoning":{"supported":true,"effortOptions":efforts}})
+}
+
+/// A resumed Session folds the configuration of the line its cursor names: the
+/// attach reply's model is the root's (design §14), so a Session whose
+/// conversation is on a line shows the configuration that line adopted, read
+/// through `session.model.get` at the reply's cursor, and only the root takes
+/// the reply's. The reply's cursor stays the shown line's, and the directory
+/// answers only for a server that does not carry the field.
+#[test]
+fn a_resumed_line_mode_session_folds_the_default_branchs_cursor() {
+    for (line, cursor, listed) in [
+        ("main", 8, "main"),
+        ("line-1", 5, "line-1"),
+        ("line-1", 5, "main"),
+    ] {
+        let home = Home::new();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&[
+                "session.branches",
+                "session.history.display",
+                "session.history.detail",
+                "session.history.display.tail",
+                "session.history.display.transcript",
+                "session.model.get",
+            ]);
+            let branches = wire.read("session.branches");
+            let mut entries = vec![json!({"branchId":"main","state":"open","head":8})];
+            if line != "main" {
+                entries.push(json!({"branchId":line,"parentBranchId":"main","branchPoint":1,"state":"open","head":8}));
+            }
+            wire.reply(&branches, json!({"defaultBranchId":listed,"branches":entries}));
+            let attach = wire.read("session.attach");
+            let mut record = attach_record(&attach);
+            record["defaultBranch"] = json!({"branchId":line,"sequence":cursor});
+            record["capabilitySnapshot"] = effort_snapshot("model", &["low", "high"]);
+            wire.reply(&attach, record);
+            let update = wire.read("session.model.update");
+            assert_eq!(
+                update["params"]["branchId"],
+                json!(line),
+                "the startup model follows the attach reply's line"
+            );
+            assert_eq!(update["params"]["modelId"], json!("replacement"));
+            wire.reply(
+                &update,
+                json!({"outcome":"adopted","model":{"providerId":"test","modelId":"replacement"}}),
+            );
+            let window = wire.read("session.history.display");
+            assert_eq!(window["params"]["branchId"], json!(line));
+            wire.reply(
+                &window,
+                json!({"items":[],"through":cursor,"nextBefore":1,"nextAfter":cursor,"done":true}),
+            );
+            if line != "main" {
+                let read = wire.read("session.model.get");
+                assert_eq!(read["params"]["branchId"], json!(line));
+                assert_eq!(read["params"]["through"], json!(cursor));
+                assert!(
+                    read["params"].get("before").is_none(),
+                    "a line's configuration is read at one cutoff, not paged out of its history"
+                );
+                wire.reply(
+                    &read,
+                    json!({"branchId":line,"through":cursor,
+                        "configuration":{"model":{"providerId":"test","modelId":"line-model"},
+                            "capabilitySnapshot":effort_snapshot("line-model", &["none", "minimal"])}}),
+                );
+            }
+            let idle = wire.read("session.idle");
+            assert_eq!(idle["params"]["branchId"], json!(line));
+            wire.reply(&idle, json!({"sequence":cursor}));
+            loop {
+                let request = wire.read_any();
+                match request["method"].as_str().unwrap() {
+                    "session.history" => {
+                        let through = request["params"]["through"].as_u64().unwrap_or(cursor);
+                        wire.reply(
+                            &request,
+                            json!({"events":[],"through":through,"nextAfter":through,"done":true}),
+                        );
+                    }
+                    "session.history.display" => {
+                        let through = request["params"]["after"].as_u64().unwrap_or(cursor);
+                        wire.reply(
+                            &request,
+                            json!({"items":[],"through":through,"nextAfter":through,"done":true}),
+                        );
+                    }
+                    other => panic!("unexpected {other}: {request}"),
+                }
+            }
+        });
+        let mut command = home.command();
+        command.args(["--resume", "session", "--model", "replacement"]);
+        let mut terminal = Terminal::launch(command);
+        terminal.editor();
+        terminal.write(b"/effort\r");
+        terminal.until(match line {
+            "main" => "Reasoning effort choices: low, high",
+            _ => "Reasoning effort choices: none, minimal",
+        });
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
 }
 
 /// An adoption written by another client reaches the label as it arrives.
@@ -2669,12 +2825,11 @@ fn tui_skill_rows_come_from_the_catalog_and_complete_without_sending() {
         let mut terminal = Terminal::resume_tui(command);
         terminal.until("test / model");
 
-        // The enabled Skill is listed and its row completes the reference into
-        // the draft, which draws the Skill's name; no message is sent.
         terminal.write(b"/comm");
         terminal.until("/skill:commit");
-        terminal.raw(b"\r");
-        terminal.until_plain("/commit ");
+        terminal.raw(b"\t");
+        terminal.write(b"task");
+        terminal.until_plain("/skill:commit task");
         terminal.write(b"\x03");
 
         // A disabled or shadowed Skill is not offered: Tab completes nothing.
@@ -5128,7 +5283,7 @@ fn tui_rapid_queue_controls_settle_each_held_input_once() {
             } else {
                 terminal.write(b"steer once\r");
             }
-            terminal.until("queue controls settled");
+            terminal.until_visible("queue controls settled");
             if !fullscreen {
                 assert_eq!(
                     strip_ansi(&terminal.transcript)
@@ -5517,7 +5672,7 @@ fn tui_escape_withdraws_the_queue_before_the_run_stops() {
             terminal.until("\x1b[?2026l");
             terminal.write(draft.as_bytes());
             terminal.write(b"\x1b");
-            terminal.until("interrupt settled");
+            terminal.until_visible("interrupt settled");
             terminal.write(b"\r");
             checked_done.recv_timeout(PATIENCE).unwrap();
             home.kill(&terminal);
@@ -5743,7 +5898,7 @@ fn tui_tasks_panel_stops_the_selected_command_or_member() {
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"req-other","sequence":20,"create_at":1,"type":"collaboration","name":"request","data":{"turn_id":"t","request_id":"r4","call_id":"call-4","target":{"kind":"agent","agent_id":"writer"},"prompt":"Check the docs"}}}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"del-other","sequence":21,"create_at":1,"type":"collaboration","name":"delivered","data":{"op_event_id":"req-other","status":"ok","agent_id":"writer","session_id":"other-member","input_event_id":"other-input"}}}));
         let stop = past_observations(wire, "session.stop");
-        assert_eq!(stop["params"], json!({"sessionId":"member","branchId":"main","reason":"stopped by the user"}));
+        assert_eq!(stop["params"], json!({"sessionId":"member","reason":"stopped by the user"}));
         wire.reply(&stop, json!({}));
         wire.notice("session.event", json!({"sessionId":"session","branchId":"main","event":{"id":"res-1","sequence":22,"create_at":1,"type":"collaboration","name":"result","data":{"request_event_id":"req-1","agent_id":"reviewer","session_id":"member","text":"","status":"cancelled","reason":"stopped by the user"}}}));
         let submit = past_observations(wire, "session.submit");
@@ -7596,7 +7751,7 @@ fn tui_models_picker_draws_its_hint_in_the_interface_language() {
 }
 
 #[test]
-fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
+fn tui_models_picker_scrolls_across_batches_and_reopens_without_a_cache() {
     let home = Home::new();
     let daemon = home.daemon(|wire| {
         wire.hello(&[]);
@@ -7612,24 +7767,100 @@ fn tui_models_picker_reads_pages_on_demand_and_reopens_without_a_cache() {
         wire.reply(&first, json!({"models":[],"empty":[{"providerId":"empty","providerName":"Empty","reason":{"kind":"no_models","listable":true}}],"next":{"providerId":"empty","modelId":""}}));
         let next = wire.read("provider.models.query");
         assert_eq!(next["params"]["after"], json!({"providerId":"empty","modelId":""}));
-        let snapshot = json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":"second","name":"Second","capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}]}});
-        wire.reply(&next, picker_page("test", "Test", snapshot.clone()));
+        let snapshot = |id| json!({"catalog":{"version":1,"disabledModelIds":[],"models":[{"id":id,"name":id,"capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}]}});
+        let mut second = picker_page("test", "Test", snapshot("second"));
+        second["next"] = json!({"providerId":"test","modelId":"second"});
+        wire.reply(&next, second);
+        let filtered = wire.read("provider.models.query");
+        assert_eq!(filtered["params"]["after"], json!({"providerId":"test","modelId":"second"}));
+        let mut skipped = picker_page("test", "Test", snapshot("second-disabled"));
+        skipped["models"][0]["disabled"] = json!(true);
+        skipped["next"] = json!({"providerId":"test","modelId":"second-disabled"});
+        wire.reply(&filtered, skipped);
+        let third = wire.read("provider.models.query");
+        assert_eq!(third["params"]["after"], json!({"providerId":"test","modelId":"second-disabled"}));
+        wire.reply(&third, picker_page("test", "Test", snapshot("third")));
         let reopened = wire.read("provider.models.query");
         assert!(reopened["params"]["after"].is_null());
-        wire.reply(&reopened, picker_page("test", "Changed", snapshot));
+        wire.reply(&reopened, picker_page("test", "Changed", snapshot("second")));
         wire.hold();
     });
     let mut terminal = Terminal::resume_tui(home.command());
     terminal.until("test / model");
     terminal.write(b"/models\r");
-    terminal.until("Empty: no models");
-    terminal.until_anywhere("Next page");
-    terminal.write(b"\r");
     terminal.until("Test / second");
+    terminal.until_anywhere("Empty: no models");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Test / third");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Selected: Test / third");
+    terminal.raw(b"\x1b[A");
+    terminal.until("Selected: Test / second");
+    let shown = strip_ansi(&terminal.transcript);
+    assert!(!shown.contains("Next page") && !shown.contains("Previous page"));
+    assert!(!shown.contains("Test / second-disabled"));
     terminal.raw(b"\x1b");
     terminal.until("Ask anything...");
     terminal.write(b"/models\r");
     terminal.until("Changed / second");
+    home.kill(&terminal);
+    terminal.wait();
+    daemon.join().unwrap();
+}
+
+#[test]
+fn tui_models_picker_rereads_loaded_batches_after_clearing_preferences() {
+    let home = Home::new();
+    let daemon = home.daemon(|wire| {
+        wire.hello(&[]);
+        let attach = wire.read("session.attach");
+        wire.reply(&attach, attach_record(&attach));
+        let history = wire.read("session.history");
+        wire.reply(&history, json!({"events":[],"through":8,"nextAfter":8,"done":true}));
+        wire.no_context();
+        let accounts = wire.read("account.providers");
+        wire.reply(&accounts, json!([]));
+
+        let cursor = json!({"providerId":"test","modelId":"first"});
+        let page = |id, version| picker_page("test", "Test", json!({"catalog":{
+            "version":version,"disabledModelIds":[],"models":[{"id":id,"name":id,
+                "capabilities":dim_agent_types::CatalogCapabilities::with_limits(128_000,16_384)}]
+        }}));
+        for (version, target) in [(7, "second"), (8, "first"), (9, "second"), (10, "")] {
+            let first = wire.read("provider.models.query");
+            assert!(first["params"]["after"].is_null());
+            let mut first_page = page("first", version);
+            first_page["next"] = cursor.clone();
+            wire.reply(&first, first_page);
+            let second = wire.read("provider.models.query");
+            assert_eq!(second["params"]["after"], cursor);
+            wire.reply(&second, page("second", version));
+            if !target.is_empty() {
+                let clear = wire.read("provider.preferences.update");
+                assert_eq!(clear["params"]["modelId"], target);
+                assert_eq!(clear["params"]["expectedVersion"], version);
+                wire.reply(&clear, json!({}));
+            }
+        }
+        wire.hold();
+    });
+    let mut terminal = Terminal::resume_tui(home.command());
+    terminal.until("test / model");
+    terminal.write(b"/models\r");
+    terminal.until("Selected: Test / first");
+    terminal.raw(b"\x1b[B");
+    terminal.until("Test / second");
+
+    for (arrow, target) in [
+        (b"\x1b[B", "second"),
+        (b"\x1b[A", "first"),
+        (b"\x1b[B", "second"),
+    ] {
+        terminal.raw(arrow);
+        terminal.until(&format!("Selected: Test / {target}"));
+        terminal.write(b"\x18");
+        terminal.until("Saved model preferences cleared");
+    }
     home.kill(&terminal);
     terminal.wait();
     daemon.join().unwrap();
@@ -7750,7 +7981,7 @@ fn member_tool_approval_requires_trusted_details_in_both_terminal_modes() {
         assert!(!terminal.transcript.contains("Full access"));
         assert!(!terminal.transcript.contains("Allow always"));
         terminal.write(b"y");
-        terminal.until("member approvals finished");
+        terminal.until_visible("member approvals finished");
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();
@@ -7792,7 +8023,7 @@ fn member_approval_without_the_detail_method_offers_only_rejection() {
         terminal.write(b"ry");
         wait_checked.recv_timeout(PATIENCE).unwrap();
         terminal.write(b"n");
-        terminal.until("unsupported approval rejected");
+        terminal.until_visible("unsupported approval rejected");
         home.kill(&terminal);
         terminal.wait();
         daemon.join().unwrap();

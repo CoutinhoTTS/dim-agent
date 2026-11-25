@@ -1,6 +1,7 @@
 mod allocation;
 mod app_server;
 mod catalog;
+mod plugin_docs;
 mod plugins;
 mod prompt_eval;
 mod rule;
@@ -62,7 +63,8 @@ async fn run() -> std::result::Result<(), Box<dyn std::error::Error>> {
         Some("prompt-eval") => prompt_eval::run().await?,
         Some("check") => {
             xtask_check::check_all(&root())?;
-            catalog::check(&root()).await?;
+            catalog::collect().await?;
+            plugin_docs::check(&root(), &plugins::local_graph().await?)?;
         }
         Some("types") => xtask_check::types::write(&root())?,
         _ => {
@@ -308,7 +310,7 @@ async fn graph() -> std::result::Result<(), Box<dyn std::error::Error>> {
         graphs.insert("process", diagnostics(process_rows(agent.root()), &scopes));
     }
     let mermaid = mermaid(&graphs);
-    let mut out = root().join("docs/architecture/rust-agent/generated");
+    let mut out = root().join("target/architecture");
     if native {
         out = out.join("aimux");
     }
@@ -347,11 +349,11 @@ async fn graph() -> std::result::Result<(), Box<dyn std::error::Error>> {
     instances(&session, &out)?;
     agent.close().await?;
     if !native {
-        plugins::write(&root(), &plugins::local_graph().await?)?;
-        app_server::write(&root(), app_server::graph().await?)?;
-        catalog::write(&root()).await?;
+        plugins::write(&out, &plugins::local_graph().await?)?;
+        app_server::write(&out, app_server::graph().await?)?;
+        std::fs::write(out.join("catalog.md"), catalog::collect().await?.render())?;
     }
-    xtask_check::boundaries::write(&root())?;
+    xtask_check::boundaries::write(&root(), &out)?;
     println!("generated {}", out.display());
     Ok(())
 }

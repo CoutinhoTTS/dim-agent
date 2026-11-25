@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This repository is Dim: a Rust coding agent (Agent v4), its App Server and the native `dimcode` CLI. See [README](README.md) and the [documentation index](docs/INDEX.md).
+This repository is Dim: a Rust coding agent (Agent v4), its App Server and the native `dimcode` CLI. See [README](README.md) and the [documentation index](docs/INDEX.md). For product-level review of Issues and PRs, see [Product Architect Guidance](PRODUCT.md).
 
 ## Working conventions
 
@@ -80,30 +80,22 @@ Run at the workspace root:
 | `./dev check` | Daily: formatting and Clippy for the CLI and App Server |
 | `cargo clippy --workspace --all-targets --locked -- -D warnings` | Before merging |
 | `cargo test --workspace --locked` | Before merging |
-| `cargo run --locked -p xtask-check` | Pure static repository checks only (crate/module boundaries, plugin docs, `npm/branch-services.d.ts`, plugin locks, comment links, `literal_main`), without compiling business crates |
-| `cargo run --locked -p xtask -- check` | After changing capabilities, assembly or crate dependencies (runs `xtask-check` plus runtime-assembled `catalog.md`) |
+| `cargo run --locked -p xtask-check` | Pure static repository checks only (crate/module boundaries, `npm/branch-services.d.ts`, plugin locks, comment links, `literal_main`, i18n table keys), without compiling business crates |
+| `cargo run --locked -p xtask -- check` | After changing capabilities, assembly or crate dependencies (runs `xtask-check` plus live service-face and plugin-documentation checks) |
 | `node --test scripts/*.test.mjs` | After changing development or release scripts |
 | `cargo build --locked -p dimcode -p dim-app-server && node scripts/tui-tmux/run.mjs` | Before and after changing terminal UI behavior; local only, never in CI ([suite](docs/architecture/tui-e2e.md)) |
 
 The full CI sequence, including the ignored CLI profile and Node-backed flow tests, is in `.github/workflows/ci.yml`. Release preparation and draft publication follow [.agents/skills/dim-release/SKILL.md](.agents/skills/dim-release/SKILL.md).
 
-## Architecture graphs and boundary checks
-
-Assembly graphs and crate dependencies are computed from the actual code by `xtask`. **Do not hand-write architecture graphs, and do not edit the output under `docs/architecture/rust-agent/generated/`.**
+## Additional development commands
 
 | Command (workspace root) | Purpose |
 | --- | --- |
-| `cargo run --locked -p xtask -- graph` | Regenerate `docs/architecture/rust-agent/generated/`: `services.mmd` / `services.md` (service assembly), `instances.mmd` (instance keys), `crates.mmd` (crate dependencies) and their `.json` snapshots, and `catalog.md` (the service catalog and the parts that are Capabilities) |
-| `cargo run --locked -p xtask -- module-graph DIR` | Emit `modules.json` and `modules.mmd` into `DIR` on demand for local inspection without committing them |
-| `cargo run --locked -p xtask-check` | Run the pure static checks without compiling workspace runtime crates (crate/module boundaries, `crates.*` freshness, plugin pages, `npm/branch-services.d.ts`, plugin locks, comment links, `literal_main`); also supports `module-graph DIR` and `types` |
-| `cargo run --locked -p xtask -- check` | Run `xtask-check` plus the runtime-assembled `catalog.md` check against the real App Server assembly |
 | `cargo run --locked -p xtask -- types` | Regenerate `npm/branch-services.d.ts`, the TypeScript declarations of the services marked `#[rutis::service]`, after changing one of them or a type it uses |
 | `cargo run --release --locked -p xtask -- measure` | Resource measurement; pass `--model-config PATH` (e.g. `crates/dim-agent-aimux/examples/offline.json`) |
 | `cargo run --release --locked -p xtask -- context-replay` | Opt-in context memory baseline: 100 mock turns against a temporary SQLite store |
 | `cargo run --release --locked -p xtask -- restore-replay DB SESSION` | Restore a stored session and measure restore/prepare/close memory |
 | `cargo run --release --locked -p xtask -- context-breakdown DB SESSION` | Split one prepare into read/project/messages/request memory |
-
-Run `check` after adding or removing a Capability or changing assembly or crate dependencies, and `graph` after changing assembly. `check` also validates the plugin pages under `docs/architecture/rust-agent/plugins/` against the code, so update a capability's page with it, and fails when the generated service catalog is stale; use the `.json` snapshot diff to confirm the change is as intended. Hand-written diagrams in documentation only describe the target structure; the generated output is authoritative for the current implementation.
 
 ## Agent v4 development rules
 
@@ -118,13 +110,13 @@ Dim's architecture and the way Dim uses rutis are documented apart ([ADR 006](do
 
 A rule is stated once, at its layer. The Rust spelling of a rule is a binding, not the rule. See the [architecture overview](docs/architecture/README.md#design-documents) for the full document index.
 
-Before designing or changing a plugin, capability or event, read [design rules §4](docs/architecture/rust-agent/principles.md) (extending behavior through the Timeline), [ADR 002](docs/adr/002-plugin-scope.md) (scope, no wiring modules, configuration, language-neutral contracts) the [plugin contract](docs/design/plugin-contract.md) (how Dim's architecture applies to plugins) and [How Dim uses rutis](docs/design/rutis-usage.md) (how parts are mounted, name services and cross languages). Every plugin design document contains a "Rule check" section that says which parts are Capabilities ([principles §1](docs/architecture/rust-agent/principles.md)) and answers each of these rules (§4 rules 1–9, §1 and ADR 002 D1–D5; or states why one does not apply), and a "Requirements raised to mechanism owners" section in the format of §4 rule 8. Pull requests answer the checklist in the pull request template.
+Before designing or changing a plugin, capability or event, read [design rules §4](docs/architecture/rust-agent/principles.md) (extending behavior through the Timeline), [ADR 002](docs/adr/002-plugin-scope.md) (scope, no wiring modules, configuration, language-neutral contracts) the [plugin contract](docs/design/plugin-contract.md) (how Dim's architecture applies to plugins) and [How Dim uses rutis](docs/design/rutis-usage.md) (how parts are mounted, name services and cross languages). Every plugin design document contains a "Rule check" section that says which parts are Capabilities ([principles §1](docs/architecture/rust-agent/principles.md)) and answers each of these rules (§4 rules 1–9, §1, the §7.2 owner checks and ADR 002 D1–D5; or states why one does not apply), and a "Requirements raised to mechanism owners" section in the format of §4 rule 8. Pull requests answer the checklist in the pull request template.
 
 1. A feature is split into parts by the owner of their state, and each part lives in that owner's scope: the process, a Session or a branch ([ADR 002 D1](docs/adr/002-plugin-scope.md)). A part declares every dependency, including those only needed for load order. How a part is mounted and names its dependencies is [How Dim uses rutis](docs/design/rutis-usage.md); the current Rust spelling is below. `apply` acquires resources and registers their cleanup immediately, then registers services and subscriptions. Once `apply` completes, services and subscriptions are available. Input consumption and background work start only after the Session or branch is published (`activated()`); if assembly fails, they never start. They end on `closing()` without waiting for unload, and a Session is closing from the moment its close starts. A process part whose background work depends on the initial process assembly waits for the host-wide `processActivity.activated()` in its own tasks; `apply` does not block on it, and a row reload does not reset it ([plugin contract §7.1](docs/design/plugin-contract.md#71-phases)).
 2. Behavior that produces or consumes events with critical effects (affecting a part's execution, or context content and its processing or insertion) writes facts to the Timeline, and the Dispatcher delivers them. Parts coordinate through facts and the named services they declare; direct calls are limited to handles they own.
 3. Event handlers register their own tasks and return. Network and tool waits run in the part's own tasks; on cancellation, release resources first, then write the terminal state. Events appended inside a handler go to the Timeline tail and are consumed later by the Dispatcher.
 4. State belongs to the part that owns it. The Timeline owns persistent state, and business memory state must be rebuildable from the Timeline; only I/O resources are excepted, and they are settled to a terminal state on reload. Async operations and cancellation belong to the part that started them. Timeline writes go through the branch's `timeline` service, and producers guarantee the validity of what they write. External input enters only through the Session and branch input entries, validated at the boundary. Ordinary callers read through the Session and branch facades and cannot write arbitrary events.
-5. Crate dependency restrictions are enforced by `xtask check`; run `check` / `graph` as described [above](#architecture-graphs-and-boundary-checks) after adding or removing a part or changing assembly or crate dependencies.
+5. Crate dependency restrictions are enforced by `xtask check`; run `check` as described [above](#verification-commands) after adding or removing a part or changing assembly or crate dependencies.
 6. When requirements change, update or delete old assertions to match. Use `tests/integration` for everyday behavior verification. The event format fixtures in `crates/dim-agent-types/tests/fixtures/` are a frozen compatibility baseline; do not change them as a side effect of other work.
 7. Before writing code, read the relevant design section (including the part's page under [`plugins/`](docs/architecture/rust-agent/plugins/README.md)) and neighboring implementation, and reuse existing mechanisms: Dispatcher subscriptions, owner state cells, and host ports (see `tests/extension-a` and `tests/extension-b` for examples).
 8. Settle a generation's accepted work and required terminal facts before removing its services. Detaching a client is not closing a Session. Runtime handles are not durable identities.
@@ -142,4 +134,4 @@ Rust parts are written this way; the full binding is [How Dim uses rutis, append
 - `AgentBuilder::session_value` provides a host value under a Session name, `AgentBuilder::process_value` under a process name.
 - Background tasks wait for publication: branch parts depend on `BranchLifecycle` (branch started and published), Session parts on `SessionLifecycle` (Session published by its Agent), and both wait for `activated()`.
 - Owner state is published through `StateCell` and read externally through `Session::get/on`; a branch's runtime memory state lives in its TimelineContext. External input enters through `Session::input`/`Branch::input`. Ordinary callers read through `Session::query/get/on` or `Branch::query`; the facades' service reads take only `PublicService` types registered in the matching group.
-- Host ports include `PrepareModelHost`, `ModelHost` and `ToolHost`; the [generated services](docs/architecture/rust-agent/generated/services.md) list them all.
+- Host ports include `PrepareModelHost`, `ModelHost` and `ToolHost`.

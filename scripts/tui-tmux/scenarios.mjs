@@ -1036,6 +1036,114 @@ const scenarios = [
       await exitWith(terminal);
     },
   },
+  ...['scrollback', 'fullscreen'].map((mode) => ({
+    name: `${mode}_skill_draft_at_home_and_over_a_question`,
+    area: 'skills',
+    title: 'A Skill completes at Home and keeps the task draft in focus over a question',
+    async run(tui) {
+      await tui.setup({
+        files: {
+          '.agents/skills/review-demo/SKILL.md': '---\nname: review-demo\ndescription: Review a draft\n---\nUse the fixture reviewer.',
+        },
+        respond: (request) => {
+          if (lastMessage(request).role === 'user' && userText(request).includes('ask before review')) {
+            const question = {header: 'Review', question: 'Which draft?', options: [{label: 'First'}, {label: 'Second'}]};
+            return {toolCalls: [{name: 'ask_user', arguments: {questions: [question]}}]};
+          }
+          return {text: ANSWER};
+        },
+      });
+      const args = ['--cwd', path.join(tui.root, 'workspace')];
+      if (mode === 'fullscreen') args.push('--fullscreen');
+      const terminal = await tui.launch(args, {waitForComposer: true});
+      terminal.send('/review-de');
+      await terminal.waitFor('Tab / Enter complete');
+      terminal.key('Enter');
+      terminal.send('ask before review');
+      await terminal.waitFor('/skill:review-demo ask before review');
+      assert.equal(turnRequests(tui.model).length, 0);
+      terminal.key('Enter');
+      await terminal.waitFor('Which draft?');
+      for (const finish of ['Escape', 'Enter']) {
+        terminal.send('/skills');
+        terminal.key('Enter');
+        await terminal.waitFor('Enter use');
+        terminal.key('Enter');
+        terminal.key('Home');
+        terminal.send('check the draft ');
+        await terminal.waitFor('check the draft /skill:review-demo');
+        terminal.key('C-o');
+        await terminal.waitFor('/new');
+        terminal.key('Escape');
+        await terminal.waitFor('check the draft /skill:review-demo');
+        terminal.send('after restore');
+        await terminal.waitFor('check the draft /skill:review-demo after restore');
+        assert.equal(turnRequests(tui.model).length, 1);
+        terminal.key(finish);
+        await terminal.waitFor('Which draft?');
+      }
+      terminal.key('Down', 'Enter');
+      await terminal.waitFor('Review your answers');
+      terminal.key('Enter');
+      await waitForRequest(tui.model, (request) => request.messages?.some((m) => m.role === 'tool' && JSON.stringify(m.content).includes('Second')));
+      await waitForRequest(tui.model, (request) => request.messages?.some((m) => m.role === 'user' && JSON.stringify(m.content).includes('check the draft /skill:review-demo after restore')));
+      await terminal.waitFor(ANSWER);
+      terminal.send('/new');
+      terminal.key('Enter');
+      await terminal.waitFor('─ new session ─');
+      await terminal.untilComposer();
+      terminal.send('/review-de');
+      await terminal.waitFor('Tab / Enter complete');
+      terminal.key('Tab');
+      terminal.send('back at home');
+      await terminal.waitFor('/skill:review-demo back at home');
+    },
+  })),
+  ...['scrollback', 'fullscreen'].map((mode) => ({
+    name: `${mode}_question_arrives_during_completion`,
+    area: 'skills',
+    title: 'A later question does not take the keys from a command or Skill draft',
+    async run(tui) {
+      let gate;
+      let turn;
+      await tui.setup({
+        files: {'.agents/skills/review-demo/SKILL.md': '---\nname: review-demo\ndescription: Review a draft\n---\nReview.'},
+        respond: async (request) => {
+          if (!request.tools?.length) return {text: ANSWER};
+          if (lastMessage(request).role === 'tool') return {text: `Recorded ${turn}`};
+          await gate.promise;
+          return {toolCalls: [{name: 'ask_user', arguments: {questions: [{header: 'Pick', question: `Choose for ${turn}`, options: [{label: 'One'}, {label: 'Two'}]}]}}]};
+        },
+      });
+      const args = ['--cwd', path.join(tui.root, 'workspace')];
+      if (mode === 'fullscreen') args.push('--fullscreen');
+      const terminal = await tui.launch(args, {waitForComposer: true});
+      for (turn of ['command', 'skill row', 'skill draft']) {
+        gate = Promise.withResolvers();
+        terminal.send(`ask about ${turn}`);
+        terminal.key('Enter');
+        await waitForRequest(tui.model, (r) => r.tools?.length && userText(r).includes(`ask about ${turn}`));
+        terminal.send(turn === 'command' ? '/goal' : '/review-de');
+        await terminal.waitFor(turn === 'command' ? 'follow or change' : 'Tab / Enter complete');
+        if (turn === 'skill draft') {
+          terminal.key('Enter', 'Home');
+          terminal.send('before ');
+          await terminal.waitFor('before /skill:review-demo');
+        }
+        gate.resolve();
+        await terminal.waitFor('answer required');
+        if (turn !== 'skill draft') terminal.key(turn === 'command' ? 'Tab' : 'Enter');
+        if (turn === 'skill row') terminal.key('Home');
+        terminal.send('keep typing');
+        await terminal.waitFor({command: '/goal keep typing', 'skill row': 'keep typing/skill:review-demo', 'skill draft': 'before keep typing/skill:review-demo'}[turn]);
+        terminal.key('Escape');
+        await terminal.waitFor(`Choose for ${turn}`);
+        terminal.key('Down', 'Enter', 'Enter');
+        await terminal.waitFor(`Recorded ${turn}`);
+        assert(userText(turnRequests(tui.model).at(-1).body).includes('Two'));
+      }
+    },
+  })),
   {
     name: 'question_panel_answer_reaches_the_next_request',
     area: 'approvals',
@@ -1293,6 +1401,34 @@ const scenarios = [
       await terminal.waitForAbsent('Background tasks');
       await terminal.waitFor('Noted the cancellation.', {timeout: 30_000});
       await terminal.waitForAbsent('1 in background');
+      await exitWith(terminal);
+    },
+  },
+  {
+    name: 'chatgpt_plan_opens_at_connect',
+    area: 'providers',
+    title: 'ChatGPT plan has its own sign-in entry in the native provider panel',
+    async run(tui) {
+      await tui.setup({respond: () => ({text: ANSWER})});
+      const terminal = await tui.launch([], {waitForComposer: true, server: true});
+      terminal.send('/connect');
+      terminal.key('Enter');
+      terminal.send('OpenAI ChatGPT');
+      await terminal.waitFor(/OpenAI ChatGPT\s+Sign in/);
+      terminal.key('Enter');
+      await terminal.waitFor('Continue with ChatGPT');
+      await terminal.waitFor('Dim stores your ChatGPT connection on this computer.');
+      terminal.key('Escape');
+      await terminal.waitFor(/OpenAI ChatGPT\s+Sign in/);
+      terminal.key('Escape');
+      await terminal.waitFor('302.AI');
+      terminal.send('OpenAI Codex');
+      const codexSearch = await terminal.waitFor('> OpenAI Codex');
+      assert.equal(codexSearch.match(/OpenAI Codex/g)?.length, 1, 'Only the search input names Codex');
+      terminal.key('Escape');
+      await terminal.waitFor('302.AI');
+      terminal.key('Escape');
+      await terminal.waitForAbsent('Enter open');
       await exitWith(terminal);
     },
   },

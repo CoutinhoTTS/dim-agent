@@ -61,15 +61,6 @@ registration, and the local-only admission.
 drives `the_mention_index_drops_roots_whose_walk_is_past_its_ttl` with a
 shortened test TTL.
 
-<!-- generated:plugin WorkspaceToolsOwner — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 进程 |
-| 注入 | `P:PartRegistry` |
-| 提供 | `P:MentionIndex` |
-| 被注入于 | `WorkspaceTools` |
-<!-- /generated -->
-
 ## WorkspaceTools
 
 Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/mod.rs),
@@ -233,10 +224,11 @@ it, is refused before it is read.
 HEIC, HEIF and AVIF are refused with the format named; every other binary file
 is refused as before. `read` never decides for the model: the same image block
 goes into the tool result whatever the model, and the stored result holds what
-was sent, the scaled image. In every conversational request, ModelProvider
-replaces that image block with its content reference, even for a vision model;
-the stored result stays unchanged. Reference computation and the existing
-placeholders for sources without decodable bytes are owned by
+was sent, the scaled image. In a conversational request, ModelProvider sends
+that image block to a vision-capable model and replaces it with its content
+reference or placeholder otherwise; the stored result stays unchanged. The
+routing rule, reference computation and the existing placeholders for sources
+without decodable bytes are owned by
 [Attachments A.1](../../../design/plugins/Attachments.md#a1-image-handling-cli-checks-and-modelprovider).
 
 The model-facing texts and their classes
@@ -265,8 +257,11 @@ is written to.
 - `write` and `edit` declare `fileWritten` with the resolved path once the
   replacement is published, including the parent-sync failure whose result warns
   that the file may have been partially written: the file changed either way.
-  They declare nothing when the call fails before the publish or is cancelled
-  before it.
+  A new file is declared only when the requested path names the inode that was
+  published; a parent renamed during the call leaves the file in the directory
+  that was opened, and that call reports a failure with no declaration. They
+  declare nothing when the call fails before the publish or is cancelled before
+  it.
 - `exec` declares `commandRun` for every command whose process started:
   - the exit status the result observed, `exitCode` for a code and `signal` for a
     name, a non-zero exit included although its result is an error;
@@ -333,6 +328,103 @@ available. No partial diff or misleading complete change count is returned.
 Consumers use the recorded diff rather than rereading the current file; null
 or missing diffs do not provide a comparison.
 
+### New-file creation
+
+`write` creates a missing file, `edit` never does, so this section covers
+`write` alone. A new file's final mode, extended ACL and group match a direct
+creation in the same directory under the same umask, the target is never
+replaced, and the staged content has no directory entry or stays 0600 until
+publication. The replacement path is unchanged: a 0600 sibling that restores the
+original owner, group, mode and extended attributes before the rename.
+
+- **Linux.** The new file starts as an anonymous `O_TMPFILE` inode created
+  `0o666` in the target's parent, is written and synced there, and is published
+  with `linkat("/proc/self/fd/<fd>", AT_SYMLINK_FOLLOW)`, which never replaces an
+  existing name. The kernel settles the mode, the parent's POSIX default ACL
+  and the `setgid` group at creation, and preparation has no directory entry to
+  clean up. The parent is opened once, before anything is created, and staging,
+  the default-ACL probe, publication and the directory sync all run relative to
+  that handle; a directory that is writable and searchable but not readable
+  still admits a new file, and a parent renamed during preparation cannot move
+  the file into a directory other than the one whose metadata it inherited.
+  A filesystem without `O_TMPFILE` (`EOPNOTSUPP`, `EISDIR`, `EINVAL`, `ENOENT`,
+  or an absent `/proc/self/fd`) falls back to the named 0600 sibling. A
+  filesystem or process that cannot link the anonymous inode through
+  `/proc/self/fd` (`EOPNOTSUPP`, `EXDEV`, `EINVAL`, `ENOENT`) takes the same
+  fallback; an existing target or an access failure is still reported as one.
+  On the named path, a parent without `system.posix_acl_default` gives the
+  sibling `0o666 & ~umask` through `fchmod` immediately before the link; a
+  parent with a default ACL keeps it at 0600, because an existing inode cannot
+  merge that ACL. The umask is read from `/proc/self/status`. Where a filesystem
+  has no POSIX ACL support, an anonymous inode gets the same mode before the
+  link, because kernels before 4.19 omitted the umask strip in `vfs_tmpfile`
+  (`ac6800e279a2`). When the umask or the parent's default ACL cannot be read,
+  the new file keeps at most the owner bits its inode already has, never more
+  than 0600, rather than publishing a mode that cannot be checked; an
+  unreadable parent reaches that case because the ACL probe needs read
+  permission, which a write-only parent does not grant.
+- **macOS.** The named 0600 sibling is created in the target's parent, so XNU
+  assigns the parent's group and the inheritable file ACL at creation; an
+  `fchmod(fd, 0o666 & ~umask)` immediately before the link sets the mode without
+  changing that ACL. Each product entry, [dimcode](../../../../crates/dimcode/src/main.rs)
+  and [dim-app-server](../../../../crates/dim-app-server/src/main.rs), calls
+  `install_process_umask()` from `main` before any thread starts, because the
+  supported baseline has no `getumask`. The mode a new file gets therefore
+  depends on the process having started through one of those entries: a library
+  or test caller that reaches `write` without capturing the umask publishes new
+  files as 0600 on macOS, unlike Linux, where `write` reads the umask from
+  `/proc/self/status` for every caller. That is the documented contract, and
+  `write` neither captures nor enforces a process umask itself.
+- **Windows.** Unchanged: the private handle is installed with a hard link.
+
+A new file's success belongs to a path that names the file actually written.
+Once the entry is published, the call syncs the directory that received it and
+keeps the sync result, except that on macOS a target without a held parent
+reopens the requested parent by path, so a parent renamed after publication
+makes that sync reach another directory or fail; the named path first removes
+its staging entry and keeps the published file open. Only then does the call
+re-stat the requested path and compare its inode with the published one
+([`Target::path`](../../../../crates/dim-agent-capabilities/src/workspace_tools/files.rs)
+through `owned_temporary`), so the inode number cannot be reused by the time it
+is checked. A parent renamed during the call, including while the directory
+sync runs, leaves the file in the directory that was opened, while the
+requested path names another entry or nothing; that call returns `write_error`,
+declares no `fileWritten` effect and records no text binding for the path,
+whether the sync succeeded or failed, so a later operation never starts from a
+revision the path does not hold. A parent-sync failure is reported with its
+effect only once the check passes.
+
+Known limits:
+
+- A parent whose inheritable ACL grants another user access gives the 0600
+  macOS sibling that ACE during preparation, as the replacement path and the
+  previous behavior do; the published file's ACL still matches a direct
+  creation.
+- The fallback and macOS paths apply the mode between the `fchmod` and the link,
+  and their cleanup is the parent-directory name check-then-unlink the
+  replacement path already uses. A failed publication puts back the mode the
+  sibling started with before that cleanup, and adds a `fchmod` that failed to
+  put it back to the result, so a removal the parent refuses leaves no wider
+  access than the entry began with.
+- The Linux fallback keeps 0600 when the parent carries a POSIX default ACL.
+- On Linux, a parent that is writable and searchable but not readable keeps
+  the new file private, at most the owner bits its inode already has and never
+  more than 0600, because the default-ACL probe needs read permission and an
+  unreadable directory counts as an unknown ACL; only the parent sync then
+  reports the unreadable directory, exactly as the staging path did before this
+  change.
+- On macOS, such a parent still admits creation and publication because no
+  probe touches it, so the file takes `0o666 & ~umask` from the umask captured
+  at startup, usually 0644; only the parent sync reports the unreadable
+  directory, and a library or test caller that does not capture the umask
+  keeps 0600.
+- macOS caches the umask the process had at startup; native code that changes
+  the process umask afterwards is not reflected.
+- A parent whose inheritable ACL denies delete refuses the macOS staging
+  entry's removal, so that entry stays behind after a successful publication.
+  After a failed publication the entry has the mode it started with back, so
+  the refused removal cannot leave unpublished content wider than it began.
+
 ### Rule check
 
 The read-only [`session.exec.output`](../../../design/background-task-output.md)
@@ -372,9 +464,10 @@ does, what it returns or its reach is protocol; a sentence that advises when or
 how to use it is policy. A name that a policy sentence states stays protocol.
 
 - `read` — protocol: "Read a file from the filesystem.", "Text comes back with
-  line numbers" and "A PNG, JPEG, WebP or GIF image comes back as an image block
-  with one line giving its path and pixel size."; policy: "use offset and limit
-  for large files".
+  line numbers" and "A PNG, JPEG, WebP or GIF image comes back with one line giving
+  its path and pixel size, and as an image itself when the model accepts images in
+  that format; otherwise it comes back as an img: reference or an omission
+  placeholder."; policy: "use offset and limit for large files".
 - `write` — protocol throughout: it states what the call writes, that it creates
   the file and that it overwrites the whole content.
 - `edit` — protocol: "Edit an existing file by replacing exact text matches."
@@ -440,6 +533,41 @@ tool that starts writing one into `content` moves that text into this section.
 [local_product.rs](../../../../tests/integration/tests/local_product.rs).
 
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
+drives new-file creation: `a_new_file_takes_the_process_umask` runs a child
+process under umasks 022, 002, 300 and 700 on both Unix platforms and checks
+that a replacement keeps its original mode, `a_new_file_takes_the_creation_mode_on_the_named_fallback` repeats the mode check over the
+named staging path on Linux, `a_new_file_in_a_write_only_parent_is_created`
+checks that a write-only parent still admits a new file and leaves it private,
+`a_new_file_takes_the_parents_acl_on_macos` covers five inheritable ACL shapes
+under the same umasks, and `a_new_file_under_a_deny_delete_acl_keeps_its_staging_entry`
+fixes the residue limit. The in-crate Linux test
+`a_new_file_stays_on_its_opened_parent_through_publication` renames the opened
+parent after preparation and checks that the file follows the directory and
+that the call reports `write_error` for the path put back at the old name, with
+no `fileWritten` effect and no text binding. The in-crate Unix test
+`a_bounded_new_file_records_no_success_after_a_parent_rename` fixes the same
+record for a target below a boundary's held parent. The named and Linux tests
+`a_named_new_file_records_no_success_after_a_parent_moves_during_sync`,
+`an_anonymous_new_file_records_no_success_after_a_parent_moves_during_sync`
+and `a_fallback_new_file_records_no_success_after_a_parent_moves_during_sync`
+move the parent at the directory-sync boundary, once with the sync succeeding
+and once with it failing, and check that neither outcome records the old path.
+The Linux tests
+`an_unsupported_anonymous_publication_falls_back_to_named_staging`,
+`a_fallback_publication_does_not_replace_an_existing_entry`,
+`an_unknown_policy_clamps_an_anonymous_new_file_to_its_owner_bits`,
+`an_unread_umask_keeps_an_anonymous_new_file_private` and
+`an_anonymous_new_file_has_no_entry_and_does_not_overwrite` need a filesystem
+with `O_TMPFILE` and fail with that reason when the test directory has none, so
+they never pass on the named fallback. The in-crate macOS tests
+`a_failed_publication_does_not_leave_a_widened_staging_entry` and
+`a_failed_publication_restores_the_staging_entrys_starting_mode` fix the
+restored starting mode under a deny-delete ACL, the second under a umask that
+narrows the staging entry below 0600. The Linux tests that need
+`setfacl`, a foreign-group `setgid` directory or a filesystem without
+`O_TMPFILE` are `#[ignore]`d manual cases, named in their run instructions.
+
+[workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
 drives `edit` over its replacement list:
 `edit_applies_every_replacement_in_order_in_one_call`,
 `a_later_replacement_matches_the_text_the_previous_one_produced`,
@@ -460,8 +588,9 @@ animated GIF's first frame, transparent pixels on white, a WebP EXIF chunk
 larger than its file refused, a missing file reported as `file_not_found`, the
 pixel guard before decoding, and the refusals.
 [read_image_flow.rs](../../../../crates/dim-app-server/tests/read_image_flow.rs)
-runs a model's `read` on a PNG. The request-only reference rule for vision and
-text-only models, and preservation of the stored tool result, are covered by
+runs a model's `read` on a PNG. The per-request routing of images for vision
+and text-only models — pixels, a reference or a placeholder — and preservation
+of the stored tool result are covered by
 [host_flows.rs](../../../../crates/dim-agent-capabilities/tests/host_flows.rs).
 
 The App Server's [native execution flow](../../../../crates/dim-app-server/tests/transport_flow/shell_input.rs)
@@ -469,15 +598,6 @@ reads a live capture through C1, holds its real SQLite terminal commit, checks
 bounds and branch/Session ownership, then verifies replay and close behavior.
 The existing idle-unload/recovery flow in `local_execution.rs` also checks an
 empty live preview and unavailable historical captures.
-
-<!-- generated:plugin WorkspaceTools — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:HostPlatform`、`P:MentionIndex`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionMethods`、`S:TreeCommands` |
-| 提供 | `S:ToolHost`、`S:dyn HostDispatch#toolHost` |
-| 被注入于 | `ToolRegistry` |
-<!-- /generated -->
 
 ## FileReads
 
@@ -521,15 +641,6 @@ a filesystem lock, permission grant or cross-process compare-and-swap.
 `a_compaction_that_keeps_the_read_leaves_the_write_admitted`,
 `an_edit_after_a_compaction_that_cut_its_read_succeeds`,
 `a_compaction_that_cuts_a_written_binding_refuses_the_next_write`.
-
-<!-- generated:plugin FileReads — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Timeline` |
-| 提供 | `B:FileReads` |
-| 被注入于 | — |
-<!-- /generated -->
 
 ## BackgroundExec
 
@@ -638,12 +749,3 @@ The `transport_flow/shell_input.rs` flow
 `node_object_faces_use_session_and_branch_owners_across_the_bridge` resolves
 `backgroundExec` through the real Node loader and verifies owner operations
 and Session isolation.
-
-<!-- generated:plugin BackgroundExec — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`P:HostPlatform`、`S:GuideEntries`、`S:SessionLifecycle` |
-| 提供 | `B:BackgroundExec`、`B:dyn HostDispatch#backgroundExec` |
-| 被注入于 | — |
-<!-- /generated -->

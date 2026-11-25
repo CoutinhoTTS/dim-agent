@@ -51,8 +51,12 @@ struct ModelState {
 }
 
 /// The terminal fact's durable failure: the host facts, including the attempt
-/// count the recovery loop recorded.
-fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
+/// count the recovery loop recorded, and this attempt's retry boundary.
+fn model_failure(
+    facts: ModelFailureFacts,
+    retried: bool,
+    shown_thinking_part_id: Option<String>,
+) -> ModelFailure {
     ModelFailure {
         kind: facts.kind,
         status: facts.status,
@@ -66,7 +70,19 @@ fn model_failure(facts: ModelFailureFacts) -> ModelFailure {
             .retry_after_stop
             .map(|wait| u64::try_from(wait.as_millis()).unwrap_or(u64::MAX)),
         retry_forbidden: facts.retry_forbidden,
+        retried,
+        thinking_part_id: retried.then_some(shown_thinking_part_id).flatten(),
     }
+}
+
+/// What one request's output leaves for its terminal fact.
+struct Terminal<'a> {
+    /// Calls a failed terminal closes in the same batch.
+    started: &'a [StartedCall],
+    /// Whether a retry replaced an earlier attempt of this request.
+    retried: bool,
+    /// The thinking block the final attempt left open, when it showed one.
+    shown_thinking_part_id: Option<String>,
 }
 
 struct ModelProvider {
@@ -91,8 +107,13 @@ impl ModelProvider {
         model: (&str, &str),
         failure_chain: Option<&FailureChain>,
         result: std::result::Result<FinishReason, HostError>,
-        started: &[StartedCall],
+        terminal: Terminal<'_>,
     ) -> dim_agent_runtime::Result<()> {
+        let Terminal {
+            started,
+            retried,
+            shown_thinking_part_id,
+        } = terminal;
         let (provider_id, model_id) = model;
         let outcome = match result {
             Ok(finish_reason) => ModelOutputOutcome::Completed { finish_reason },
@@ -131,7 +152,11 @@ impl ModelProvider {
                     error: message,
                     budget,
                     presentation: presentation.map(|value| *value),
-                    failure: Some(Box::new(model_failure(*facts))),
+                    failure: Some(Box::new(model_failure(
+                        *facts,
+                        retried,
+                        shown_thinking_part_id,
+                    ))),
                 }
             }
         };
@@ -435,7 +460,11 @@ impl ModelProvider {
                     (&provider_id, &model_id),
                     failure_chain.as_ref(),
                     Err(HostError::failed(CAPABILITY_RELOADING)),
-                    &started,
+                    Terminal {
+                        started: &started,
+                        retried: false,
+                        shown_thinking_part_id: None,
+                    },
                 )?;
             }
             let Some(next) = reply.next else {
@@ -482,18 +511,36 @@ impl ModelProvider {
         } else {
             let result = AssertUnwindSafe(async {
                 crate::context_policy::check_cancel(&cancel)?;
-                let request = images::adapt(&call.request, self.files.as_deref(), &cancel).await?;
-                self.context
-                    .validate(&call.request_id, request.clone(), cancel.clone())
-                    .await?;
                 let resolved = match &self.resolver {
-                    Some(resolver) => resolver.0.resolve(request.clone(), cancel.clone()).await?,
+                    Some(resolver) => {
+                        resolver
+                            .0
+                            .resolve(call.request.clone(), cancel.clone())
+                            .await?
+                    }
                     None => ResolvedModelConnection {
                         connection: ModelConnection::Local,
                         failure_policy: None,
                         recovery: None,
                     },
                 };
+                let destination = match &resolved.connection {
+                    ModelConnection::Http(connection) => images::ImageDestination {
+                        protocol: Some(connection.protocol),
+                        preset: connection.preset.as_deref(),
+                    },
+                    ModelConnection::Bedrock(_) => images::ImageDestination {
+                        protocol: Some(ModelProtocol::Bedrock),
+                        preset: None,
+                    },
+                    ModelConnection::Local => images::ImageDestination::default(),
+                };
+                let request =
+                    images::adapt(&call.request, self.files.as_deref(), destination, &cancel)
+                        .await?;
+                self.context
+                    .validate(&call.request_id, request.clone(), cancel.clone())
+                    .await?;
                 recovery::invoke(
                     &self.host,
                     &request,
@@ -548,7 +595,11 @@ impl ModelProvider {
                 (&call.request.provider_id, &call.request.model_id),
                 call.failure_chain.as_ref(),
                 result,
-                &output.started,
+                Terminal {
+                    started: &output.started,
+                    retried: output.retried(),
+                    shown_thinking_part_id: output.shown_thinking_part_id(),
+                },
             );
             state.current = None;
             (outcome, submitted)
@@ -745,7 +796,11 @@ impl DynPlugin for ModelProviderPlugin {
                                     (&call.request.provider_id, &call.request.model_id),
                                     call.failure_chain.as_ref(),
                                     Err(HostError::Cancelled(reason)),
-                                    &[],
+                                    Terminal {
+                                        started: &[],
+                                        retried: false,
+                                        shown_thinking_part_id: None,
+                                    },
                                 );
                             }
                             state.stop_reason = None;

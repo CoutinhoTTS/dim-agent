@@ -36,13 +36,13 @@ pub use prompt_migration::{Migrated, migrate_prompt_references};
 pub use query::{QueryStatementStats, sqlite_memory};
 pub use reclaim::Reclaimed;
 pub(crate) use sqlite::AssemblyProgress;
-#[cfg(feature = "testing")]
-pub use sqlite::set_upgrade_report_delay;
 pub use sqlite::{
     FORMAT as STORE_FORMAT, SqliteStorage, SqliteStoragePlugin, StorageReport, Vacuumed,
     vacuum_store,
 };
 pub(crate) use sqlite::{ImportUser, ReplaceUser, UserDecision, UserDocument, UserWriteError};
+#[cfg(feature = "testing")]
+pub use sqlite::{set_upgrade_report_delay, take_upgrade_steps};
 pub use text::initialize_session_text_index;
 #[cfg(feature = "testing")]
 pub use timeline::testing as timeline_testing;
@@ -53,6 +53,7 @@ pub use timeline::testing as timeline_testing;
 pub fn rebuild_text_index(connection: &rusqlite::Connection) -> dim_agent_runtime::Result<()> {
     text::backfill(connection)
 }
+pub(crate) use timeline::WorktreeCreation;
 pub use timeline::{
     PreparedWorktree, SessionStore, SessionStorePlugin, SqliteTimelineStore, TurnWindow,
     WorktreeDirectoryRecord, WorktreeUsage,

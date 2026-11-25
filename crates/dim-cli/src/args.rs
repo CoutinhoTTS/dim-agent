@@ -2245,14 +2245,12 @@ fn parse_count(flag: &str, value: &str) -> Result<usize> {
         .map_err(|_| format!("{flag} must be a whole number").into())
 }
 
-/// The product home: `DIMCODE_HOME`, else `~/.dimcode-alpha` for an alpha
-/// build and `~/.dimcode` otherwise, so an alpha never writes a release's
-/// sessions or settings.
+/// The product home: `DIMCODE_HOME`, else a separate home for alpha, nightly or release.
 pub fn default_home() -> PathBuf {
-    let directory = if crate::update::channel(env!("CARGO_PKG_VERSION")) == "alpha" {
-        ".dimcode-alpha"
-    } else {
-        ".dimcode"
+    let directory = match crate::update::channel(env!("CARGO_PKG_VERSION")) {
+        "alpha" => ".dimcode-alpha",
+        "nightly" => ".dimcode-nightly",
+        _ => ".dimcode",
     };
     std::env::var_os("DIMCODE_HOME")
         .map(PathBuf::from)

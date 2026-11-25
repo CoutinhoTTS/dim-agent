@@ -1,5 +1,5 @@
 //! `graph` assembles the App Server product profile through `serve` and
-//! records its process plugins in `generated/app-server/`.
+//! records its process plugins in `target/architecture/app-server/`.
 use dim_agent_capabilities::{
     adapters::DefaultPrepareModelPlugin,
     context_model::ProductContextModel,
@@ -48,6 +48,16 @@ pub struct Overrides {
     /// The roster's closing sentence in place of its built-in text
     /// (timeline branches §12.4).
     pub roster_closing: Option<Arc<str>>,
+    /// The `How you work here:` bullets of the note a move writes on a tool
+    /// line it makes the default branch, in place of its built-in text
+    /// (timeline branches §12.4).
+    pub default_note: Option<Arc<str>>,
+    /// The same bullets on a line the user opened that becomes the default
+    /// branch (timeline branches §12.4).
+    pub user_default_note: Option<Arc<str>>,
+    /// The same bullets on the former default branch of either source
+    /// (timeline branches §12.4).
+    pub former_default_note: Option<Arc<str>>,
     /// Goal's objective policy sentence in place of the shipped one
     /// (model-prompts §8.1).
     pub goal_objective: Option<Arc<str>>,
@@ -89,6 +99,22 @@ pub struct RunSettings {
     /// run turns it off, so the tools the process registers are the ceiling
     /// its Sessions can declare.
     pub plugin_tools: bool,
+    /// A test hook: a timed-out run's Session close and its server's shutdown
+    /// never settle, to check that its child still returns the outcome and
+    /// frees the worker that runs it. The product and the evaluations set it
+    /// off.
+    pub stall_cleanup: bool,
+    /// A test hook: a timed-out run's whole cleanup budget in milliseconds, in
+    /// place of the run's cleanup budget. The product and the evaluations set
+    /// it off.
+    pub cleanup_budget_ms: Option<u64>,
+    /// A test hook: this scenario's Timeline export never completes, to check
+    /// that a timed-out run keeps its outcome without an export. The product
+    /// and the evaluations set it off.
+    pub stall_export: Option<String>,
+    /// A test hook: the judge phase's budget in milliseconds, in place of the
+    /// runner's own phase budget. The product and the evaluations set it off.
+    pub judge_budget_ms: Option<u64>,
 }
 
 impl Default for RunSettings {
@@ -102,6 +128,10 @@ impl Default for RunSettings {
             js_runtime: None,
             boundary: None,
             plugin_tools: true,
+            stall_cleanup: false,
+            cleanup_budget_ms: None,
+            stall_export: None,
+            judge_budget_ms: None,
         }
     }
 }
@@ -234,6 +264,9 @@ pub async fn serve_home(
         dim_agent_capabilities::timeline_tree::BranchToolConfig {
             description: run.overrides.branch_description.clone(),
             roster_closing: run.overrides.roster_closing.clone(),
+            default_note: run.overrides.default_note.clone(),
+            user_default_note: run.overrides.user_default_note.clone(),
+            former_default_note: run.overrides.former_default_note.clone(),
             max_open_lines: None,
         },
         PromptSourcesConfig {
@@ -374,8 +407,8 @@ pub fn process_layer(mut snapshot: RuntimeDiagnostics) -> RuntimeDiagnostics {
 }
 
 /// Writes the process graph of the product profile.
-pub fn write(root: &Path, graph: Value) -> Result<()> {
-    let out = root.join("docs/architecture/rust-agent/generated/app-server");
+pub fn write(out: &Path, graph: Value) -> Result<()> {
+    let out = out.join("app-server");
     std::fs::create_dir_all(&out)?;
     let graphs = BTreeMap::from([("process", graph)]);
     std::fs::write(

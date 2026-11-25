@@ -19,7 +19,7 @@ pub enum Kind {
     /// A row of a plain list panel (sessions).
     Item,
     Command(&'static Command),
-    Skill(String),
+    Skill,
 }
 
 /// One palette row: label (bold), detail, and the key that runs it at the

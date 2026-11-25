@@ -131,8 +131,7 @@ builder 在两个宿主里建出的两个 Agent 不会挂上彼此的部件。
 
 每个名称只声明一次。跨语言的服务在其 Rust 类型上用 `#[rutis::service]` 声明名称。仅限 Rust 的服务，
 或由外来部件提供的名称，注册在宿主的 loader 服务目录中。
-`xtask graph` 从真实装配写出权威的表，即[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)，
-表过期时 `xtask check` 失败（R4）。Dim 定义的每个名称的用途见[插件契约 §4](plugin-contract.md#4-dim-的服务)。
+Dim 定义的每个名称的用途见[插件契约 §4](plugin-contract.md#4-dim-的服务)。
 
 *现状：*所有跨语言的服务都标记了 `#[rutis::service]`，包括 Session 和分支级的服务；rutis 0.17 移除了
 构建脚本中的服务清单（`Exports::service_in`），也就是原来的另一种形式。标记过的类型在某个实例中提供时，
@@ -213,8 +212,7 @@ Dim 的部件如何消费总线事件，以及 Dim 定义了哪些公开总线�
 - **所需机制：**`xtask graph` 写出服务目录表（名称、组、提供者、是否跨语言、方法），并根据部件注入的名字
   （`dispatcher`、`timeline`）标出哪些部件是 Capability。
 - **影响：**运行时没有影响。
-- **所有者：**`xtask`。已交付（[#381](https://github.com/arcships/dim/issues/381)）：`xtask graph` 从 App Server
-  产品配置及其中的一个 Session 写出[生成的服务目录](../../architecture/rust-agent/generated/catalog.md)，表过期时 `xtask check` 失败。
+- **所有者：**`xtask`（[#381](https://github.com/arcships/dim/issues/381)）。
 
 ### R5. 外来插件登记自己的部件
 
@@ -392,7 +390,9 @@ Agent（`AgentBuilder::build`），宿主以 `partRegistry` 把它提供给自�
 - **可选依赖与由配置选择的依赖。** 同 §3.5：由配置选择的依赖在被选中时门控（工厂填的 `Option<Key<T>>`），
   组合检查此时也覆盖它；缺少它也能工作的依赖用 `get_at` 读取，不列在 `injects` 中。它的名称仍须登记。
 - **启动进展。** `startup_timeout` 限制 loader 启动、reconcile、必需行就绪和打开重放期间连续没有进展的时间。本次打开中一行的首次激活、分支派发序号前进或一份打开回执完成会重置间隔；同一行反复重启不算新的进展。
-  `apply` 运行较久的插件可用 `opening_advanced(ctx)`（`dim_agent_runtime::assembly`）报告真实进展，同样重置该间隔；工作在阻塞线程上运行的插件从那里报告。
+  自身 `apply` 或它拥有的行的恢复运行较久的插件，可用 `opening_advanced(ctx)`（`dim_agent_runtime::assembly`）报告真实进展，同样重置该间隔；工作在阻塞线程上运行的插件从那里报告。
+  这个界限只覆盖步骤之间的间隔，而不是任何单次 await：不上报就停滞的工作仍然会超时。
+  恢复这类多步过程用 `OpeningReporter::new`（`dim_agent_runtime`）只解析一次身份，之后每一步通过同一个上报器上报，整个任务只取一份进程诊断快照，而不是每一步一份。
   只计本次打开范围内的进展，其他 Session 的活动不算；不设固定总时限。
   Session、分支、进程启动和 restart 使用同一规则。分支等待父分支时跟随父分支自身受限的打开过程，
   不另加总时限。没有进展时列出未 Active 的行及缺少的依赖并失败；组合错误或必需提供者失败立即返回。

@@ -177,12 +177,3 @@ Rules: [principles](../principles.md) §1 and §4,
 | ADR 002 D4 Configuration | Not applicable: Questions has no configuration. `interactive` is Session creation data read per call. |
 | ADR 002 D5 Language-neutral contracts | The tool and the method are JSON shapes with documented error codes; this crate and `install` are the Rust binding. |
 | ADR 003 Approval scope | `ask_user` is a model tool call that Permission admits under risk `session`; Questions adds no approval and runs nothing from configuration. |
-
-<!-- generated:plugin Questions — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:SessionConfig`、`S:SessionMethods`、`S:ToolRegistry`、`S:TreeCommands` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->

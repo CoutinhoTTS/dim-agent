@@ -20,6 +20,11 @@ use tokio_util::sync::CancellationToken;
 const TEXT_FLUSH_BYTES: usize = 4 * 1024;
 /// ... or once the oldest buffered text is this old, checked as text arrives.
 const TEXT_FLUSH_AGE: Duration = Duration::from_secs(1);
+/// Thinking progress is shown at most once per this interval, so a long
+/// thought does not send its whole text on every delta; the block end and a
+/// switch to text or a tool call show it at once, a timer shows the last
+/// delta within one interval, and a retry or a cleared progress drops it.
+const THINKING_SHOW_AGE: Duration = Duration::from_millis(250);
 
 /// Progress that an event now holds; it leaves the progress once that event
 /// is published, so a client never sees neither (ADR agent-029, decision 2).
@@ -57,6 +62,13 @@ impl OutputGate {
     }
     pub fn replaced(&self) -> bool {
         self.0.load(Ordering::Acquire) == REPLACED
+    }
+    /// A retried attempt starts over: output the replaced attempt showed no
+    /// longer blocks a steer. A request already replaced stays replaced.
+    fn restart(&self) {
+        let _ = self
+            .0
+            .compare_exchange(RECEIVED, WAITING, Ordering::AcqRel, Ordering::Acquire);
     }
 }
 
@@ -112,6 +124,14 @@ pub(crate) struct Output {
     /// Unix milliseconds at which the current thinking block started.
     thinking_started_at: Option<u64>,
     text_since: Option<Instant>,
+    /// Thinking of the open block not shown as progress yet.
+    thinking_pending: String,
+    /// When the pending thinking is shown at the latest.
+    thinking_show_at: Option<Instant>,
+    /// Whether this attempt committed an event to the Timeline.
+    committed: bool,
+    /// Whether a retry replaced an earlier attempt of this request.
+    retried: bool,
     pub started: Vec<StartedCall>,
     committed_text: String,
     committed_thinking: String,
@@ -143,6 +163,10 @@ impl Output {
             thinking_part_committed: false,
             thinking_started_at: None,
             text_since: None,
+            thinking_pending: String::new(),
+            thinking_show_at: None,
+            committed: false,
+            retried: false,
             started: Vec::new(),
             committed_text: String::new(),
             committed_thinking: String::new(),
@@ -235,12 +259,71 @@ impl Output {
         self.clear_progress();
     }
     /// The request ended: its progress is gone.
-    pub fn clear_progress(&self) {
+    pub fn clear_progress(&mut self) {
+        self.thinking_pending.clear();
+        self.thinking_show_at = None;
         self.progress.update(|progress| {
             if progress.request_id.as_deref() == Some(self.scope.request_id.as_str()) {
                 *progress = ModelProgress::default();
             }
         });
+    }
+    /// Forgets the failed attempt's output. None of it was committed, so the
+    /// retry replaces it and the Timeline keeps nothing of it.
+    fn forget_attempt(&mut self) {
+        self.gate.restart();
+        self.committed = false;
+        self.retried = true;
+        self.text.clear();
+        self.text_part_id = None;
+        self.text_part_committed = false;
+        self.text_since = None;
+        self.thinking_part_id = None;
+        self.thinking_part_committed = false;
+        self.thinking_started_at = None;
+        self.thinking_pending.clear();
+        self.thinking_show_at = None;
+        let (turn_id, request_id) = (&self.scope.turn_id, &self.scope.request_id);
+        self.progress.update(|progress| {
+            if progress.request_id.as_deref() == Some(request_id.as_str()) {
+                *progress = ModelProgress {
+                    turn_id: Some(turn_id.clone()),
+                    request_id: Some(request_id.clone()),
+                    ..ModelProgress::default()
+                };
+            }
+        });
+    }
+    /// Whether a retry replaced an earlier attempt of this request.
+    pub(crate) fn retried(&self) -> bool {
+        self.retried
+    }
+    /// The thinking block the final attempt left open before this terminal,
+    /// when the attempt had not committed it: the row a client shows from
+    /// progress may be this block, or a replaced attempt's.
+    pub(crate) fn shown_thinking_part_id(&self) -> Option<String> {
+        (!self.thinking_part_committed)
+            .then(|| self.thinking_part_id.clone())
+            .flatten()
+    }
+    /// Shows the thinking received since the last time it was shown; this is
+    /// where the thought becomes visible output.
+    fn show_thinking(&mut self) -> Result<bool, HostError> {
+        self.thinking_show_at = None;
+        if self.thinking_pending.is_empty() {
+            return Ok(false);
+        }
+        self.receive()?;
+        let thinking = std::mem::take(&mut self.thinking_pending);
+        let part_id = self.thinking_part_id.clone();
+        let started_at = self.thinking_started_at;
+        self.show(|progress| {
+            progress.text_part_id = None;
+            progress.thinking_part_id = part_id;
+            progress.thinking_started_at = started_at;
+            progress.thinking.push_str(&thinking);
+        });
+        Ok(true)
     }
     /// Visible output arrived; a request replaced by a steer stops here.
     fn receive(&self) -> Result<(), HostError> {
@@ -267,6 +350,7 @@ impl Output {
             None => self.timeline.append(draft),
         }
         .map_err(|error| HostError::failed(error.to_string()))?;
+        self.committed = true;
         let (turn_id, request_id) = match &event.kind {
             EventKind::Text(d) | EventKind::Thinking(d) => (&d.turn_id, &d.request_id),
             EventKind::ToolUseStart(d) => (&d.turn_id, &d.request_id),
@@ -285,11 +369,16 @@ impl Output {
             self.text_part_id = Some(uuid::Uuid::new_v4().to_string());
             self.text_part_committed = false;
         }
+        let pending = std::mem::take(&mut self.thinking_pending);
+        self.thinking_show_at = None;
         self.thinking_part_id = None;
         self.thinking_part_committed = false;
         self.thinking_started_at = None;
         let part_id = self.text_part_id.clone();
         self.show(|progress| {
+            if !pending.is_empty() {
+                progress.thinking.push_str(&pending);
+            }
             progress.text_part_id = part_id;
             progress.thinking_part_id = None;
             progress.thinking_started_at = None;
@@ -351,18 +440,17 @@ impl Output {
         self.flush_text()?;
         self.text_part_id = None;
         self.text_part_committed = false;
-        let started_at = self.open_thinking();
-        let part_id = self.thinking_part_id.clone();
-        self.show(|progress| {
-            progress.text_part_id = None;
-            progress.thinking_part_id = part_id;
-            progress.thinking_started_at = started_at;
-            progress.thinking.push_str(&thinking);
-        });
+        self.open_thinking();
+        self.thinking_pending.push_str(&thinking);
+        if !self.thinking_pending.is_empty() {
+            self.thinking_show_at
+                .get_or_insert_with(|| Instant::now() + THINKING_SHOW_AGE);
+        }
         Ok(())
     }
     fn thinking(&mut self, thinking: String) -> Result<(), HostError> {
         self.flush_text()?;
+        self.show_thinking()?;
         self.text_part_id = None;
         self.text_part_committed = false;
         if thinking.is_empty() {
@@ -372,6 +460,7 @@ impl Output {
             self.replace_tail(true, "");
             return Ok(());
         }
+        self.receive()?;
         let started_at = self.open_thinking();
         let first = !self.thinking_part_committed;
         let event_id = if first {
@@ -399,6 +488,7 @@ impl Output {
     }
     fn tool_start(&mut self, call_id: String, name: String) -> Result<(), HostError> {
         self.flush_text()?;
+        self.show_thinking()?;
         self.text_part_id = None;
         self.text_part_committed = false;
         self.thinking_part_id = None;
@@ -432,6 +522,7 @@ impl Output {
     }
     fn tool_use(&mut self, call: ToolCall) -> Result<(), HostError> {
         self.flush_text()?;
+        self.show_thinking()?;
         self.text_part_id = None;
         self.text_part_committed = false;
         self.thinking_part_id = None;
@@ -462,6 +553,7 @@ impl Output {
     }
     fn content(&mut self, content: Vec<MessagePart>) -> Result<(), HostError> {
         self.flush_text()?;
+        self.show_thinking()?;
         let text = content
             .iter()
             .filter_map(|part| match part {
@@ -536,6 +628,9 @@ impl crate::model_provider::RetryObserver for Output {
             });
         });
     }
+    fn retrying(&mut self) {
+        self.forget_attempt();
+    }
 }
 
 pub(crate) async fn consume_output(
@@ -545,30 +640,75 @@ pub(crate) async fn consume_output(
     replay_safe: &mut bool,
 ) -> Result<FinishReason, HostError> {
     let mut stream = stream.fuse();
-    let result = parse_output(&mut stream, output, cancel.clone(), replay_safe).await;
-    if result.is_err() {
-        cancel.cancel();
-        let _ = output.flush_text();
-        while stream.next().await.is_some() {}
+    let result = parse_output(&mut stream, output, cancel.clone()).await;
+    let error = match result {
+        Ok(finish) => return Ok(finish),
+        Err(error) => error,
+    };
+    cancel.cancel();
+    let flushed = output.flush_text();
+    // A retry may follow only an attempt that left no fact behind and whose
+    // shown text reached the Timeline. What the attempt showed stays until
+    // the recovery policy starts another one: only a retry may clear it and
+    // let a steer replace the request again.
+    *replay_safe = flushed.is_ok() && !output.committed;
+    output.thinking_pending.clear();
+    output.thinking_show_at = None;
+    while stream.next().await.is_some() {}
+    // A failed final flush is a local write failure, not the provider's cut:
+    // the text the client already saw must not be replaced by a retry.
+    if !matches!(error, HostError::Cancelled(_))
+        && let Err(storage) = flushed
+    {
+        return Err(storage);
     }
-    result
+    Err(error)
 }
 
 async fn parse_output(
     stream: &mut (impl futures_util::Stream<Item = Result<ModelChunk, HostError>> + Unpin),
     output: &mut Output,
     cancel: CancellationToken,
-    replay_safe: &mut bool,
 ) -> Result<FinishReason, HostError> {
     let mut message_id = None;
     let mut finish = None;
     let mut partial = HashMap::<String, String>::new();
     let mut visible = false;
     let mut content_seen = false;
+    let mut stop_seen = false;
     let mut published = output.timeline.watch();
     loop {
+        // A cancelled request ends at once; a stop lets the host end its
+        // stream, so the calls it started still close.
+        if !stop_seen && cancel.is_cancelled() {
+            if output.gate.replaced() {
+                return Err(HostError::Cancelled("Model invocation cancelled".into()));
+            }
+            stop_seen = true;
+        }
+        let show_at = output.thinking_show_at;
+        if show_at.is_some_and(|at| Instant::now() >= at) {
+            if output.show_thinking()? {
+                visible = true;
+            }
+            continue;
+        }
+        let until = show_at.unwrap_or_else(Instant::now);
         let next = tokio::select! {
-            chunk = stream.next() => chunk,
+            biased;
+            _ = cancel.cancelled(), if !stop_seen => {
+                if output.gate.replaced() {
+                    return Err(HostError::Cancelled("Model invocation cancelled".into()));
+                }
+                stop_seen = true;
+                continue;
+            }
+            _ = tokio::time::sleep_until(until), if show_at.is_some() => {
+                if output.show_thinking()? {
+                    visible = true;
+                }
+                continue;
+            }
             changed = published.changed(), if !output.handoffs.is_empty() => {
                 if changed.is_ok() {
                     output.show(|_| {});
@@ -577,6 +717,7 @@ async fn parse_output(
                 }
                 continue;
             }
+            chunk = stream.next() => chunk,
         };
         let Some(chunk) = next else { break };
         let chunk = match chunk {
@@ -597,21 +738,16 @@ async fn parse_output(
             }
             other => other?,
         };
-        if !matches!(chunk, ModelChunk::MessageStart { .. }) {
-            *replay_safe = false;
-        }
         if let ModelChunk::Usage(usage) = chunk {
-            output
-                .timeline
-                .append(
-                    EventKind::ModelUsage(ModelUsageData {
-                        turn_id: output.scope.turn_id.clone(),
-                        request_id: output.scope.request_id.clone(),
-                        usage,
-                    })
-                    .into(),
-                )
-                .map_err(|e| HostError::failed(e.to_string()))?;
+            output.commit(
+                EventKind::ModelUsage(ModelUsageData {
+                    turn_id: output.scope.turn_id.clone(),
+                    request_id: output.scope.request_id.clone(),
+                    usage,
+                }),
+                None,
+                None,
+            )?;
             continue;
         }
         if finish.is_some() {
@@ -636,15 +772,10 @@ async fn parse_output(
             ));
         }
         match chunk {
-            ModelChunk::Thinking(delta) => {
-                output.receive()?;
-                visible = true;
-                output.thinking_delta(delta)?;
-            }
+            ModelChunk::Thinking(delta) => output.thinking_delta(delta)?,
             ModelChunk::ThinkingEnd { thinking } => {
-                output.receive()?;
-                visible = true;
                 output.thinking(thinking)?;
+                visible = true;
             }
             ModelChunk::Text(delta) => {
                 output.receive()?;
@@ -797,4 +928,303 @@ async fn parse_output(
     Err(HostError::failed(
         "Provider stream ended without message_stop",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dim_agent_runtime::{
+        MemoryTimelineStore, SessionConfig, Timeline, TimelineKey, TimelineStore,
+    };
+    use dim_agent_types::{ModelFailureKind, ModelRequest};
+    use futures_util::stream;
+    use rutis::Ctx;
+    use rutis::host::CtxHost;
+    use std::time::Duration;
+
+    fn scope() -> ModelCallData {
+        ModelCallData {
+            turn_id: "turn".into(),
+            request_id: "request".into(),
+            request: Arc::new(ModelRequest::new("provider", "model", Vec::new())),
+            configuration: None,
+            prompt: None,
+            failure_chain: None,
+        }
+    }
+
+    async fn timeline(branch: &str) -> Arc<Timeline> {
+        let store = Arc::new(MemoryTimelineStore::default());
+        store
+            .create_session("session", &SessionConfig::default())
+            .await
+            .unwrap();
+        Arc::new(Timeline::new(
+            Ctx::root().unwrap(),
+            TimelineKey {
+                session_id: "session".into(),
+                branch_id: branch.into(),
+            },
+            Vec::new(),
+            store,
+        ))
+    }
+
+    fn cut() -> HostError {
+        HostError::Failed {
+            message: "the stream ended without a finish reason".into(),
+            budget: None,
+            kind: HostErrorKind::Transport,
+            model: Some(Box::new(ModelFailureFacts {
+                kind: ModelFailureKind::MalformedResponse,
+                reason: Some("the stream ended without a finish reason".into()),
+                status: None,
+                provider_code: None,
+                request_id: None,
+                cause: Vec::new(),
+                retry_after: None,
+                attempts: 1,
+                waited: Duration::ZERO,
+                retry_after_stop: None,
+                retry_forbidden: false,
+            })),
+            presentation: None,
+        }
+    }
+
+    /// A text delta smaller than the flush threshold and younger than its age
+    /// leaves the final flush to the cut. Its append fails on a branch the
+    /// store does not hold.
+    #[tokio::test]
+    async fn a_failed_final_flush_is_not_replayable() {
+        let gate = Arc::new(OutputGate::default());
+        let progress = Arc::new(StateCell::new(ModelProgress::default()));
+        let mut output = Output::new(timeline("missing").await, gate, progress, scope());
+        let chunks: Vec<std::result::Result<ModelChunk, HostError>> = vec![
+            Ok(ModelChunk::MessageStart {
+                message_id: "m".into(),
+            }),
+            Ok(ModelChunk::Text("shown".into())),
+            Err(cut()),
+        ];
+        let stream: ModelStream = Box::pin(stream::iter(chunks));
+        let mut replay_safe = true;
+        let result = consume_output(
+            stream,
+            &mut output,
+            CancellationToken::new(),
+            &mut replay_safe,
+        )
+        .await;
+        assert!(
+            !replay_safe,
+            "a failed final flush is a local failure: the attempt may not be retried"
+        );
+        let Err(HostError::Failed { message, model, .. }) = result else {
+            panic!("a cut after a failed flush is a failure")
+        };
+        assert!(
+            model.is_none(),
+            "the local write error is returned instead of the provider's cut: {message}"
+        );
+    }
+
+    /// A thinking delta stays private until the buffer is shown; until then a
+    /// steer still replaces the request.
+    #[tokio::test(start_paused = true)]
+    async fn a_private_thinking_delta_leaves_the_request_replaceable() {
+        let gate = Arc::new(OutputGate::default());
+        let progress = Arc::new(StateCell::new(ModelProgress::default()));
+        let mut output = Output::new(
+            timeline("main").await,
+            gate.clone(),
+            progress.clone(),
+            scope(),
+        );
+        let replaceable = gate.clone();
+        let read = progress.clone();
+        let stream: ModelStream = Box::pin(stream::unfold(0u8, move |step| {
+            let replaceable = replaceable.clone();
+            let read = read.clone();
+            async move {
+                match step {
+                    0 => Some((
+                        Ok(ModelChunk::MessageStart {
+                            message_id: "m".into(),
+                        }),
+                        1,
+                    )),
+                    1 => Some((Ok(ModelChunk::Thinking("private".into())), 2)),
+                    2 => {
+                        assert!(
+                            read.get().thinking.is_empty(),
+                            "nothing was shown before the interval elapsed"
+                        );
+                        assert!(
+                            replaceable.replace(),
+                            "a request whose thinking was never shown is still replaceable"
+                        );
+                        Some((
+                            Ok(ModelChunk::ThinkingEnd {
+                                thinking: "private".into(),
+                            }),
+                            3,
+                        ))
+                    }
+                    3 => Some((
+                        Ok(ModelChunk::MessageStop {
+                            message_id: "m".into(),
+                            reason: ModelStopReason::EndTurn,
+                        }),
+                        4,
+                    )),
+                    _ => None,
+                }
+            }
+        }));
+        let mut replay_safe = true;
+        let result = consume_output(
+            stream,
+            &mut output,
+            CancellationToken::new(),
+            &mut replay_safe,
+        )
+        .await;
+        assert!(
+            matches!(&result, Err(HostError::Cancelled(reason)) if reason == REPLACED_BY_STEER),
+            "the replacement ends the attempt before its thinking is shown: {result:?}"
+        );
+    }
+
+    /// A cancelled request ends before an item that is ready at the same
+    /// time; with both branches ready the choice must not be left to chance.
+    #[tokio::test(start_paused = true)]
+    async fn a_cancelled_request_ends_before_a_ready_item() {
+        for attempt in 0..32 {
+            let gate = Arc::new(OutputGate::default());
+            let progress = Arc::new(StateCell::new(ModelProgress::default()));
+            let mut output = Output::new(timeline("main").await, gate.clone(), progress, scope());
+            gate.replace();
+            let cancel = CancellationToken::new();
+            cancel.cancel();
+            let chunks: Vec<std::result::Result<ModelChunk, HostError>> = vec![Err(cut())];
+            let stream: ModelStream = Box::pin(stream::iter(chunks));
+            let mut replay_safe = true;
+            let result = consume_output(stream, &mut output, cancel, &mut replay_safe).await;
+            assert!(
+                matches!(result, Err(HostError::Cancelled(_))),
+                "attempt {attempt}: cancellation wins over a ready item: {result:?}"
+            );
+        }
+    }
+
+    /// Thinking that keeps arriving still shows within the interval: the
+    /// deadline is not starved by the next chunk.
+    #[tokio::test(start_paused = true)]
+    async fn a_continuous_thinking_stream_shows_within_the_interval() {
+        let gate = Arc::new(OutputGate::default());
+        let progress = Arc::new(StateCell::new(ModelProgress::default()));
+        let mut output = Output::new(timeline("main").await, gate, progress.clone(), scope());
+        let read = progress.clone();
+        let stream: ModelStream = Box::pin(stream::unfold(0u8, move |step| {
+            let read = read.clone();
+            async move {
+                match step {
+                    0 => Some((
+                        Ok(ModelChunk::MessageStart {
+                            message_id: "m".into(),
+                        }),
+                        1,
+                    )),
+                    1..=3 => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        Some((Ok(ModelChunk::Thinking("abc".into())), step + 1))
+                    }
+                    4 => {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        assert_eq!(
+                            read.get().thinking,
+                            "abcabcabc",
+                            "the interval shows the buffered thinking while deltas keep arriving"
+                        );
+                        Some((Ok(ModelChunk::Thinking("d".into())), 5))
+                    }
+                    5 => Some((
+                        Ok(ModelChunk::ThinkingEnd {
+                            thinking: "abcabcd".into(),
+                        }),
+                        6,
+                    )),
+                    6 => Some((
+                        Ok(ModelChunk::MessageStop {
+                            message_id: "m".into(),
+                            reason: ModelStopReason::EndTurn,
+                        }),
+                        7,
+                    )),
+                    _ => None,
+                }
+            }
+        }));
+        let mut replay_safe = true;
+        let result = consume_output(
+            stream,
+            &mut output,
+            CancellationToken::new(),
+            &mut replay_safe,
+        )
+        .await;
+        assert!(result.is_ok(), "the attempt completes: {result:?}");
+        assert_eq!(output.committed_thinking, "abcabcd");
+    }
+
+    /// An expired thinking interval wins over an item that is ready at the
+    /// same time: the buffered thought is shown before the next delta joins
+    /// it. With both branches ready the choice must not be left to chance.
+    #[tokio::test(start_paused = true)]
+    async fn an_expired_thinking_deadline_shows_before_a_ready_item() {
+        for attempt in 0..32 {
+            let gate = Arc::new(OutputGate::default());
+            let progress = Arc::new(StateCell::new(ModelProgress::default()));
+            let mut output = Output::new(timeline("main").await, gate, progress.clone(), scope());
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let stream: ModelStream = Box::pin(stream::unfold(rx, |mut rx| async move {
+                rx.recv().await.map(|chunk| (chunk, rx))
+            }));
+            tx.send(Ok(ModelChunk::MessageStart {
+                message_id: "m".into(),
+            }))
+            .unwrap();
+            tx.send(Ok(ModelChunk::Thinking("first".into()))).unwrap();
+            let mut replay_safe = true;
+            let run = consume_output(
+                stream,
+                &mut output,
+                CancellationToken::new(),
+                &mut replay_safe,
+            );
+            tokio::pin!(run);
+            let first =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+            assert!(
+                first.is_pending(),
+                "attempt {attempt}: the read loop waits for the interval"
+            );
+            tokio::time::advance(THINKING_SHOW_AGE + Duration::from_millis(1)).await;
+            tx.send(Ok(ModelChunk::Thinking("second".into()))).unwrap();
+            let second =
+                std::future::poll_fn(|cx| std::task::Poll::Ready(run.as_mut().poll(cx))).await;
+            assert!(
+                second.is_pending(),
+                "attempt {attempt}: the read loop waits for the next item"
+            );
+            assert_eq!(
+                progress.get().thinking,
+                "first",
+                "attempt {attempt}: the expired interval shows its thought before a ready item joins it"
+            );
+            drop(tx);
+            let _ = run.await;
+        }
+    }
 }

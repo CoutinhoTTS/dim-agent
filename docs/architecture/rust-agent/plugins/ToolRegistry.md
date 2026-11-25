@@ -114,8 +114,10 @@ the Session's private name `tool_provider_changes(instance)`
 notification carries no data because every refresh reads every source.
 Replacing or withdrawing sets updates the source-state watch (`sources_state()`),
 which ToolBinding follows. ToolBinding owns adoption and request pins. Dynamic
-source validation reserves the mount list's names, host tool names and every
-registered tool's name; only a registered tool's own set may offer that name.
+source validation reserves host tool names and every registered tool's name;
+only a registered tool's own set may offer that name. A name the mount list
+lists is not reserved: the list filters host and registered tools, and each
+source decides its own visibility.
 Already bound requests retain their handlers. A refresh is neither a durable
 configuration save nor permission authorization; a new tool is not
 model-visible until adoption, or until the next `bind_current` request of a
@@ -188,12 +190,3 @@ malformed results, retained handlers of an unloaded row, and cancellation withou
 
 None. Registration is [rutis usage R6](../../../design/rutis-usage.md#r6-contributions-register-with-their-owner),
 owned by Dim and built on existing rutis effects and the bridge's calling row.
-
-<!-- generated:plugin ToolRegistry — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:ToolHost` |
-| 提供 | `S:ToolRegistry`、`S:ToolSourcesView`、`S:dyn HostDispatch#toolRegistry`、`S:dyn HostDispatch#toolSourcesView` |
-| 被注入于 | `BranchTool`、`ContextUsage`、`HooksBranch`、`Questions`、`Recall`、`Skills`、`ToolBinding`、`Wait` |
-<!-- /generated -->

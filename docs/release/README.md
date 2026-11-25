@@ -36,9 +36,34 @@ do not publish to npm or create GitHub tags/Releases.
 
 If an agent does not list a skill, ask it to read the linked repository `SKILL.md` by path. An explicit end-to-end publication request can authorize the complete workflow; a preparation or review request does not. Existing authorization does not need to be requested again at each stage.
 
+## Nightly curl channel
+
+Install or upgrade the standalone `dim-nightly` on macOS or GNU/Linux (arm64 or x64, with curl, tar and jq):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/arcships/dim/main/scripts/install-nightly.sh | sh
+```
+
+The entry point is `~/.local/bin/dim-nightly`. The installer leaves npm installations alone and keeps each payload under `${XDG_DATA_HOME:-~/.local/share}/dim-nightly`. The CLI defaults to `~/.dimcode-nightly`. The release environment needs the same build-time account settings as the alpha native builds. Restrict nightly tag creation and manual publication to trusted maintainers. If deployment filters are enabled, allow both `main` and the nightly tag pattern in `release-build`. Rolling assets require a mutable GitHub prerelease.
+
+Nightly (`X.Y.Z-nightly.N`) and npm alpha (`X.Y.Z-alpha.N`) number releases independently. Start a nightly without a version PR in either of two ways:
+
+- Push a new `vX.Y.Z-nightly.N` tag on a commit from `main`.
+- In Actions, open **Publish curl nightly → Run workflow**, select `main`, and enter an unused `vX.Y.Z-nightly.N` tag. The run creates the tag at the `main` commit selected when the workflow was dispatched, before starting any platform builds. Dispatches off `main` and attempts to reuse a tag are rejected. Creating the tag must not start a second run.
+
+Both entry points use the version tag to identify the exact source and share the same build and publish jobs. Check the tag and source, then build and pack macOS and GNU/Linux x64 and arm64 in parallel. On each native runner, run only the packaged CLI's `--version` and compare it with the tag. Publish only when all four archives and their SHA-256 checksums are present; do not publish to npm or GHCR.
+
+Use a separate nightly workflow and concurrency group. Publish to one rolling GitHub prerelease at `releases/tag/Nightly`, not a Release per version. `Nightly` is the channel entry, not a build trigger or a source identifier. Never mark it Latest or modify alpha releases, tags, assets or npm dist-tags.
+
+Run the platform matrix with `fail-fast: true`. On the first platform failure, cancel remaining builds and skip publication and pruning. Do not retry a failed step or run; the tag remains reserved and the next requested release gets a new number. The nightly workflow does not rerun PR/main lint, workspace tests or E2E suites. Test installer upgrades, checksum failures and retention when changing those mechanisms, not before each nightly.
+
+Updates stay within the installation's channel. The npm alpha client keeps checking npm. The nightly client does not check npm; users rerun the same curl installer to upgrade. The installer reads the promoted version from the rolling release, verifies that version's platform archive, and switches only the nightly installation. If either channel is unavailable, it does not fall back to the other.
+
+Serve `scripts/install-nightly.sh` from `main`. Give archives and checksums version-specific names. Serialize publication: upload the complete set before updating the advertised version, never promote an older build over a newer one, and prune only obsolete nightly assets after promotion. Keep the three highest complete nightly versions on the rolling release and retain their source tags, including tags for pruned builds. The [nightly release skill](../../.agents/skills/publishing-dim-nightlies/SKILL.md) covers preparation and publication.
+
 ## Version preparation
 
-Every release starts from a release PR into `main` that commits the `X.Y.Z-alpha.N` the release will publish. The release PR selects that version and writes it into the product fields below, so `main` carries the released number at the commit the release builds and tags. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
+The npm alpha release starts from a release PR into `main` that commits the `X.Y.Z-alpha.N` the release will publish. The release PR selects that version and writes it into the product fields below, so `main` carries the released number at the commit the release builds and tags. All eight npm packages and the executable use the same version; the Git tag adds a leading `v`.
 
 For the next alpha, inspect registry versions across `dimcode-alpha`, `dimcode-web`, the six platform packages and legacy `dimcode`, plus reserved remote tags/GitHub Releases and open release PRs. Continue an existing PR for the same preparation task; otherwise increment the highest reserved alpha numerically. A partial publication reserves its version too. Do not infer availability from the checkout's version or a dist-tag alone. Reuse the matching release version and original archives for a CI retry instead of allocating another number. Keep the existing legacy-beta compatibility guard. Two concurrent release PRs can choose the same number: the first tag wins, and the second must be re-prepared to the next alpha.
 
@@ -96,6 +121,24 @@ The JSON fields remain `name`, `systemPrompt` and
 `AgentConfig`'s existing rules, which accept unknown fields; consumers must not
 rely on the removed reply type's rejection of unknown fields. There is no
 App Server protocol, event or persistence-format change.
+
+## Method progress type compatibility
+
+The progress callback a `dimcode/plugin` method handler receives returns
+`Promise<void>`; its declaration was `() => void`. The host already supplies an
+asynchronous callback, so `await progress(...)` and `progress(...).catch(...)`
+now type-check, and no host build is required. The change breaks code that calls
+an exported `MethodHandler` or `SessionMethodHandler` directly: a synchronous
+argument such as `() => {}`, as a unit-test mock uses, fails with TS2345. Pass
+`async () => {}` instead. Handlers registered through
+`managementMethods.register` or `sessionMethods.register` receive the same
+callback at runtime. Awaiting it orders the host's send attempts and does not
+acknowledge client delivery; the App Server's progress allowance can drop a
+notice while the call still resolves, whereas a frame over the rutis session's
+transfer limit fails the call and rejects the promise. The
+[authoring guide](../typescript-plugin-authoring.md#session-tools-and-client-methods)
+states the callback's delivery and rejection behaviour. There is no App Server
+protocol, event or persistence-format change.
 
 ## File access
 
@@ -180,7 +223,7 @@ release packages use the ordinary Cargo executable.
 
 `ci.yml` runs on pull requests, pushes to `main`, a daily scheduled full sweep (`0 19 * * *` UTC), and manual dispatch. A pull request runs the groups its changed paths need, as decided by `scripts/ci-changes.mjs`. A push to `main` runs only `changes` and `ci-ok` when its entire push range changes only paths that select no check group (documentation and non-code repository metadata); pushes touching any checked path or whose base cannot be compared keep the full `main` run while the daily scheduled sweep is established (ADR 026 D5). Scheduled sweeps and manual dispatch select every group across both Linux and macOS: if a scheduled sweep fails on a cross-group regression, the maintainers triage it and bisect the `main` commit range since the previous passing sweep back to the regressing merge. Every push to `main` runs its selected jobs to completion: a later push does not cancel them, so each merge has its own result and the `main CI` badge in the [README](../../README.md) reports the latest finished one.
 
-CI builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests in a dedicated Linux x64 `scripts` job, and exercises the ignored actual CLI profile and public Node-backed flows. `ci-ok` passes when every selected gating job passes, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`). The [build environment](../architecture/build.md) describes test artifact reuse, concurrency limits, and target deadlines. Cargo runs documentation tests with the same features, and ignored CLI and Node flows reuse the recorded binaries without package-scoped recompilation. Web source changes, plugin pages and static generated graphs run the lightweight `static-checks` job (`xtask-check`) on Linux x64 without compiling business runtime crates, while `catalog.md` changes retain the runtime-assembled `xtask` check; from `scripts/`, `scripts/stage-web.mjs` and `scripts/run-rust-test.mjs` select the `web` job (the latter deliberately selects every group), while Rust files read directly by packaging scripts (`crates/dim-app-server/src/protocol.rs`, `crates/dim-app-server/src/storage/sqlite.rs`, and `crates/dim-app-server/resources/`) retain their owning packaging checks. Node-backed checks run for runtime, binding and service-contract paths, and CLI-only changes retain their ordinary and actual-profile flows. Windows client transport and CLI terminal crates (`crates/dim-cli/`, `crates/dim-client/`, `crates/dim-agent-types/`, `vendor/grok-build/`) trigger `windows-cli`. Evaluation tests use `xtask/eval-tests` for `xtask/` changes, and the wall-clock handoff runs for execution-related changes. PRs run `verify (linux)` for the selected Rust/`xtask` groups. Rust PRs also run `macos-native` on Apple Silicon, and changes affecting native packaging or code layout select its macOS script checks on PRs, `main` pushes, scheduled sweeps and manual runs. All selected jobs feed `ci-ok`. Full `main` pushes run `verify (macos)`, and scheduled sweeps and manual dispatch run full verification on both Linux and macOS. The `web` job runs on self-hosted Windows x64. It stages the frontend package, verifies generated declarations and bundled dependency notices, and runs the Web tests.
+CI builds the workspace, checks formatting and Clippy, runs workspace tests and boundary checks, runs the packaging/development script tests in a dedicated Linux x64 `scripts` job, and exercises the ignored actual CLI profile and public Node-backed flows. `ci-ok` passes when every selected gating job passes, so it is the check to require. CI builds without debug info (`CARGO_PROFILE_DEV_DEBUG=0`). The [build environment](../architecture/build.md) describes test artifact reuse, concurrency limits, and target deadlines. Cargo runs documentation tests with the same features, and ignored CLI and Node flows reuse the recorded binaries without package-scoped recompilation. Web source changes run the lightweight `static-checks` job (`xtask-check`) on Linux x64 without compiling business runtime crates. Plugin pages select the runtime-assembled `xtask` check. From `scripts/`, `scripts/stage-web.mjs` and `scripts/run-rust-test.mjs` select the `web` job (the latter deliberately selects every group), while Rust files read directly by packaging scripts (`crates/dim-app-server/src/protocol.rs`, `crates/dim-app-server/src/storage/sqlite.rs`, and `crates/dim-app-server/resources/`) retain their owning packaging checks. Node-backed checks run for runtime, binding and service-contract paths, and CLI-only changes retain their ordinary and actual-profile flows. Windows client transport and CLI terminal crates (`crates/dim-cli/`, `crates/dim-client/`, `crates/dim-agent-types/`, `vendor/grok-build/`) trigger `windows-cli`. Windows storage, host-platform and named-pipe paths (`crates/dim-agent-capabilities/src/file_storage*`, `crates/dim-agent-capabilities/src/host_platform*`, `crates/dim-app-server/src/lib.rs`, `transport.rs`, `pipe_client.rs`, `cli.rs` and the test files that hold those flows) also run its Windows-native boundary step, which `main` pushes that select the job, scheduled sweeps and manual dispatch execute as well. Evaluation tests use `xtask/eval-tests` for `xtask/` changes, and the wall-clock handoff runs for execution-related changes. PRs run `verify (linux)` for the selected Rust/`xtask` groups. Rust PRs also run `macos-native` on Apple Silicon, and changes affecting native packaging or code layout select its macOS script checks on PRs, `main` pushes, scheduled sweeps and manual runs. All selected jobs feed `ci-ok`. Full `main` pushes run `verify (macos)`, and scheduled sweeps and manual dispatch run full verification on both Linux and macOS. The `web` job runs on self-hosted Windows x64. It stages the frontend package, verifies generated declarations and bundled dependency notices, and runs the Web tests.
 
 The `Verify Python plugins` step is off by default. When a Python plugin ships, set the repository Actions variable `DIM_CI_PYTHON_PLUGINS` to `true` to run it whenever the Node check group is selected. It prepares CPython for the `python_plugin_` flows and reuses the App Server test binary from the workspace build. See the [App Server verification commands](../../crates/dim-app-server/README.md#verification) to run the suites locally.
 

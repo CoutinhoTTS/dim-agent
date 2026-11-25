@@ -27,6 +27,8 @@ npm install -g dimcode-alpha@alpha
 dima
 ```
 
+For the independent nightly build on macOS or GNU/Linux, use the [curl installer](docs/release/README.md#nightly-curl-channel) and run `dim-nightly`. Rerun the installer to upgrade without changing your npm alpha installation.
+
 Add a provider with `/connect` (or `/provider`), sign in to DimAgent with `/login`, or select a configured model with `/models`. Type `ls` in the chat and press Enter. In this session Dim asks to run `ls -la` in `runtime/plugins`. Choosing **Allow once** lets it list the three plugin directories.
 
 <img src="docs/design/assets/cli-ls.gif" alt="A user sends ls in Dim chat, approves one directory listing, and gets goal, plugin-authoring and workflow." width="760">
@@ -84,6 +86,8 @@ dima --model-config "$PWD/.dev/model.json" --permission read-only
 The alpha keeps its state in `~/.dimcode-alpha` and can coexist with the earlier CLI. Non-alpha Rust builds use `~/.dimcode` by default. Sessions and account files are not automatically migrated. API-key providers work independently of the account plugin. [Alpha package and platform details](npm/README.alpha.md) · [App Server](crates/dim-app-server/README.md)
 
 ## Daily development
+
+To contribute a change, see [Contributing to Dim](CONTRIBUTING.md).
 
 Install Rust through rustup. Cargo selects the version pinned in `rust-toolchain.toml`. The native API-key build needs no Node or pnpm. Run the following from the repository root. [Build prerequisites](docs/architecture/build.md)
 

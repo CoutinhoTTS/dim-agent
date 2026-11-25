@@ -1,6 +1,9 @@
 mod content;
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use aimux_core::{
     AbortSignal, AiMuxError, ApiCallErrorOrigin, ErrorCause,
@@ -19,11 +22,30 @@ use dim_agent_types::{
     FAILURE_CAUSE_CHARS, FAILURE_CAUSE_FRAMES, FAILURE_REASON_CHARS, MessagePart, ModelFailureKind,
     ToolCall, Usage, one_line,
 };
-use futures_util::StreamExt;
+use futures_util::{StreamExt, future::poll_immediate};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::request::ToolNames;
+
+/// How long a request waits for each step of the reply before the connection
+/// counts as lost.
+///
+/// Five minutes matches the allowance other harnesses give a slow model step.
+/// It bounds three waits: from sending the request until the response headers
+/// arrive (the request body and any redirects count against it), from the
+/// headers until the stream starts (a provider that peeks reads one stream
+/// event before it returns; the OpenAI Responses SDK reads response metadata
+/// first), and from one stream part to the next. The header wait ends, and the
+/// second wait begins, at the instant the transport produces the headers, not
+/// at the driver's next poll. Each wait gets the full allowance, so a slow
+/// reply is never cut, however long it takes, while a half-open connection
+/// fails as a network failure instead of holding the turn until an external
+/// deadline; that failure is retried in place while the attempt committed
+/// nothing. It also bounds reading the body of a non-2xx response, which is a
+/// short diagnostic: that read gets the allowance once in total, because an
+/// idle bound would let a trickle of bytes extend it.
+pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(crate) fn convert(
     result: StreamResult,
@@ -51,22 +73,74 @@ pub(crate) fn convert(
         let mut completed_calls = HashSet::new();
         let mut thinking = HashMap::<String, String>::new();
         let mut answered = false;
+        let mut unfinished_call = None;
         let terminal = loop {
-            let next = tokio::select! {
-                biased;
-                _ = generation.cancelled() => {
-                    break Some(Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")));
+            // A chat-shaped stream queues a client tool call and the terminal
+            // that may explain it in one flush, so a terminal behind a failed
+            // call is already delivered; when none is, the parse failure is
+            // final rather than holding the request open for a part that may
+            // never arrive. Strict mode holds every client call until `Finish`
+            // and releases a held call directly before the terminal, so the
+            // failed call settles on the next read for every request.
+            let next = if unfinished_call.is_some() {
+                let next = poll_immediate(stream.next());
+                tokio::select! {
+                    biased;
+                    _ = generation.cancelled() => {
+                        break Some(Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")));
+                    }
+                    _ = cancel.cancelled() => {
+                        break Some(Err(HostError::Cancelled("Model request cancelled".into())));
+                    }
+                    next = next => next.flatten(),
                 }
-                _ = cancel.cancelled() => {
-                    break Some(Err(HostError::Cancelled("Model request cancelled".into())));
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = generation.cancelled() => {
+                        break Some(Err(HostError::classified(HostErrorKind::OwnerClosed, "Aimux owner is closed")));
+                    }
+                    _ = cancel.cancelled() => {
+                        break Some(Err(HostError::Cancelled("Model request cancelled".into())));
+                    }
+                    _ = tokio::time::sleep(STREAM_IDLE_TIMEOUT) => {
+                        break Some(Err(idle_failure(format!(
+                            "the stream delivered nothing for {} seconds",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        ))));
+                    }
+                    next = stream.next() => next,
                 }
-                next = stream.next() => next,
             };
-            let Some(next) = next else { break None };
+            let Some(next) = next else {
+                break unfinished_call.take().map(Err);
+            };
             let part = match next {
                 Ok(part) => part,
-                Err(failure) => break Some(Err(error(failure, &cancel))),
+                Err(failure) => {
+                    break Some(Err(match unfinished_call.take() {
+                        Some(unfinished) => unfinished,
+                        None => error(failure, &cancel),
+                    }));
+                }
             };
+            // A call whose arguments could not be parsed is not yet a terminal:
+            // a content-filter finish reason that cut them short outranks it.
+            if let Some(failure) = unfinished_call.take() {
+                match &part {
+                    StreamPart::Finish { finish_reason, .. } => {
+                        if finish_reason.unified == FinishReasonUnified::ContentFilter {
+                            break Some(Err(content_filter_failure()));
+                        }
+                        break Some(Err(failure));
+                    }
+                    StreamPart::Error { .. } => break Some(Err(failure)),
+                    _ => {
+                        unfinished_call = Some(failure);
+                        continue;
+                    }
+                }
+            }
             match part {
                 StreamPart::StreamStart { warnings } => {
                     let mut unsupported = None;
@@ -284,8 +358,14 @@ pub(crate) fn convert(
                     };
                     let input = match parse_json_input(&raw) {
                         Ok(Value::Object(input)) => input,
-                        Ok(_) => break Some(Err(HostError::failed("Tool arguments must be a JSON object"))),
-                        Err(failure) => break Some(Err(error(failure, &cancel))),
+                        Ok(_) => {
+                            unfinished_call = Some(HostError::failed("Tool arguments must be a JSON object"));
+                            continue;
+                        }
+                        Err(failure) => {
+                            unfinished_call = Some(error(failure, &cancel));
+                            continue;
+                        }
                     };
                     let name = tool_names.original(&raw.tool_name).to_owned();
                     let started = calls.remove(&raw.tool_call_id).is_some();
@@ -329,13 +409,19 @@ pub(crate) fn convert(
                         FinishReasonUnified::ToolCalls => ModelStopReason::ToolUse,
                         FinishReasonUnified::Length => ModelStopReason::MaxTokens,
                         FinishReasonUnified::ContentFilter => {
-                            break Some(Err(HostError::failed("Model output was blocked by a content filter")));
+                            break Some(Err(content_filter_failure()));
                         }
                         FinishReasonUnified::Error => {
-                            break Some(Err(HostError::failed("Model generation failed")));
+                            break Some(Err(reply_failure(
+                                ModelFailureKind::Unknown,
+                                "the provider reported a generation error",
+                            )));
                         }
                         FinishReasonUnified::Other => {
-                            break Some(Err(HostError::failed("Model returned an unsupported finish reason")));
+                            break Some(Err(reply_failure(
+                                ModelFailureKind::Unknown,
+                                "the stream ended on an unsupported finish reason",
+                            )));
                         }
                     };
                     if reason != ModelStopReason::MaxTokens
@@ -435,18 +521,18 @@ fn usage_chunk(usage: NativeUsage) -> Option<Usage> {
     })
 }
 
-/// The one failure the converter builds itself: a reply that completed with
-/// neither text nor a tool call. The provider's structured error, which
-/// carries every other failure, has nothing to say about a reply it called
-/// successful, so the bridge names this defect here.
-fn empty_reply() -> HostError {
-    let reason = "the response had no text and no tool call";
+/// The failures the converter builds itself, from what the reply ended with
+/// rather than from a provider error: a reply that completed with neither text
+/// nor a tool call, and a reply a finish reason failed. The provider's
+/// structured error, which carries every other failure, has nothing to say
+/// about either, so the bridge names the defect here.
+fn reply_failure(kind: ModelFailureKind, reason: &str) -> HostError {
     HostError::Failed {
-        message: ModelFailureKind::MalformedResponse.line(Some(reason)),
+        message: kind.line(Some(reason)),
         budget: None,
         kind: HostErrorKind::Other,
         model: Some(Box::new(ModelFailureFacts {
-            kind: ModelFailureKind::MalformedResponse,
+            kind,
             reason: Some(reason.to_owned()),
             status: None,
             provider_code: None,
@@ -460,6 +546,49 @@ fn empty_reply() -> HostError {
         })),
         presentation: None,
     }
+}
+
+fn empty_reply() -> HostError {
+    reply_failure(
+        ModelFailureKind::MalformedResponse,
+        "the response had no text and no tool call",
+    )
+}
+
+/// The failure of a request that waited [`STREAM_IDLE_TIMEOUT`] without the
+/// reply starting or continuing.
+///
+/// A connection that stays silent this long is treated as a lost transport, not
+/// as a malformed reply: the request was never answered, so the retry policy
+/// retries it like any other network failure while the attempt committed
+/// nothing, and nothing published is replayed.
+pub(crate) fn idle_failure(reason: String) -> HostError {
+    HostError::Failed {
+        message: ModelFailureKind::Network.line(Some(&reason)),
+        budget: None,
+        kind: HostErrorKind::Transport,
+        model: Some(Box::new(ModelFailureFacts {
+            kind: ModelFailureKind::Network,
+            reason: Some(reason),
+            status: None,
+            provider_code: None,
+            request_id: None,
+            cause: Vec::new(),
+            retry_after: None,
+            attempts: 1,
+            waited: Duration::ZERO,
+            retry_after_stop: None,
+            retry_forbidden: false,
+        })),
+        presentation: None,
+    }
+}
+
+fn content_filter_failure() -> HostError {
+    reply_failure(
+        ModelFailureKind::ContentFiltered,
+        "the stream ended on a content-filter finish reason",
+    )
 }
 
 pub(crate) fn error(failure: AiMuxError, cancel: &CancellationToken) -> HostError {
@@ -527,14 +656,24 @@ fn classify(failure: &AiMuxError, locally_refused: bool) -> (HostErrorKind, Mode
                 let value = value.trim();
                 (!value.is_empty()).then(|| value.to_ascii_lowercase())
             };
-            let code = field("code").and_then(normalize);
+            let origin = detail.origin;
+            let raw_code = view.and_then(|value| value.get("code"));
+            // A stream event may report the failing status as a JSON integer
+            // or as an exactly three-digit decimal string. Only this value is
+            // a status: a numeric `type` or provider code is an opaque label.
+            let code_status = (origin == ApiCallErrorOrigin::StreamEvent)
+                .then(|| raw_code.and_then(stream_event_status))
+                .flatten();
+            let code = match raw_code {
+                Some(Value::String(text)) => normalize(text),
+                _ => code_status.map(|code| code.to_string()),
+            };
             let error_type = field("type").and_then(normalize);
             let provider_code = detail
                 .provider_code
                 .as_deref()
                 .and_then(normalize)
                 .and_then(|code| one_line(&code, FAILURE_CAUSE_CHARS));
-            let origin = detail.origin;
             let codes = [
                 code.as_deref(),
                 error_type.as_deref(),
@@ -543,10 +682,12 @@ fn classify(failure: &AiMuxError, locally_refused: bool) -> (HostErrorKind, Mode
             let kind = if locally_refused {
                 ModelFailureKind::InvalidRequest
             } else {
-                classify_kind(origin, detail.status_code, &codes)
+                classify_kind(origin, detail.status_code, code_status, &codes)
             };
             let chain = cause_chain(detail);
-            let reason = if origin == ApiCallErrorOrigin::Transport {
+            let reason = if codes.contains(&Some("subscription_sharing_usage_limit_exceeded")) {
+                Some("ChatGPT plan usage limit reached. Manage usage at https://chatgpt.com/settings/usage".into())
+            } else if origin == ApiCallErrorOrigin::Transport {
                 chain
                     .innermost
                     .clone()
@@ -629,6 +770,21 @@ fn classify(failure: &AiMuxError, locally_refused: bool) -> (HostErrorKind, Mode
     }
 }
 
+/// The status a stream event reports as its own `code`: a JSON integer or an
+/// exactly three-digit decimal string, inside 400 to 599.
+fn stream_event_status(code: &Value) -> Option<u16> {
+    let status = match code {
+        Value::Number(_) => code.as_u64().and_then(|code| u16::try_from(code).ok()),
+        Value::String(text)
+            if text.len() == 3 && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse::<u16>().ok()
+        }
+        _ => None,
+    }?;
+    (400..=599).contains(&status).then_some(status)
+}
+
 /// The reason of a failure with no provider boundary. A JSON parse error
 /// carries the serde diagnosis as its cause; its message embeds the response
 /// text, so the cause is the only safe source and a missing cause means no
@@ -669,15 +825,17 @@ fn source_diagnosis(cause: &ErrorCause) -> Option<String> {
 ///
 /// A condition code decides at any status, a non-retried condition before a
 /// retried one; then a transport failure is `network`; then an error status on
-/// the response decides; then a class label, in practice for a stream event,
-/// whose status is the provider's mapping of the event's own strings.
+/// the response decides; then a class label decides, either the status a
+/// stream event wrote as its own code or a provider's named label; then the
+/// kind is unknown.
 fn classify_kind(
     origin: ApiCallErrorOrigin,
     status: Option<u16>,
+    code_status: Option<u16>,
     codes: &[Option<&str>],
 ) -> ModelFailureKind {
     let mut condition = None;
-    let mut label = None;
+    let mut label = code_status.and_then(status_kind);
     for role in codes.iter().flatten().filter_map(|code| code_role(code)) {
         match role {
             CodeRole::Condition(kind) if !kind.retried() => return kind,
@@ -712,7 +870,11 @@ enum CodeRole {
 
 fn code_role(code: &str) -> Option<CodeRole> {
     Some(match code {
-        "insufficient_quota" | "quota_exceeded" | "billing_error" | "credit_exhausted" => {
+        "insufficient_quota"
+        | "quota_exceeded"
+        | "billing_error"
+        | "credit_exhausted"
+        | "subscription_sharing_usage_limit_exceeded" => {
             CodeRole::Condition(ModelFailureKind::QuotaExhausted)
         }
         "invalid_api_key" => CodeRole::Condition(ModelFailureKind::AuthRejected),
@@ -726,7 +888,12 @@ fn code_role(code: &str) -> Option<CodeRole> {
         "rate_limit_exceeded" | "rate_limit_error" => {
             CodeRole::Condition(ModelFailureKind::RateLimited)
         }
-        "engine_overloaded" | "model_overloaded" | "server_busy" | "overloaded_error" => {
+        "engine_overloaded"
+        | "model_overloaded"
+        | "server_busy"
+        | "overloaded_error"
+        | "subscription_sharing_usage_unavailable"
+        | "subscription_sharing_user_unavailable" => {
             CodeRole::Condition(ModelFailureKind::ServerError)
         }
         "api_error" | "server_error" | "service_unavailable" | "request_timeout" | "timeout" => {

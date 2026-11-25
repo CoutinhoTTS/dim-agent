@@ -403,6 +403,27 @@ fn default_migration_follows_the_build_channel_and_keeps_distribution_data_separ
             .arg(&model);
         command
     };
+    if env!("CARGO_PKG_VERSION").contains("-nightly.") {
+        let source = user.0.join(".dimcode/v2");
+        legacy_home(&source, "dimcode.sqlite", "CN conversation");
+        let database = source.join("dimcode.sqlite");
+        let before = fs::read(&database).unwrap();
+        for explicit_source in [false, true] {
+            let mut run = command();
+            run.args(["migration", "--source-stopped"]);
+            if explicit_source {
+                run.arg("--source").arg(&source);
+            }
+            let output = run.output().unwrap();
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("requires --home TARGET"));
+        }
+        assert_eq!(fs::read(database).unwrap(), before);
+        assert_eq!(fs::read_dir(source.parent().unwrap()).unwrap().count(), 1);
+        assert!(!user.0.join(".dim").exists());
+        assert!(!unrelated.exists());
+        return;
+    }
     let missing = command()
         .args(["migration", "--source-stopped"])
         .output()

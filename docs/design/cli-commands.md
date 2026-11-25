@@ -196,14 +196,11 @@ outside the menu.
 A Skill row reads `/skill:<name>` with its description. Only an enabled, unshadowed,
 user-invocable Skill whose name the token can carry is listed: a name holding a character outside
 `A-Z`, `a-z`, `0-9`, `_`, `-` and `.`, or ending with a full stop, cannot be referenced, so it is
-not listed either. The list
-follows the
-Session's catalog: the client rereads it on attach, on a Session switch, after
+not listed either. Home reads the launch workspace's catalog on startup and on return
+from a Session. In a Session the client reads that Session's workspace on attach, on a switch, after
 `/reload-skills`, and after a change in `/skills`. A daemon that does not serve
-`skills.catalog` shows the commands alone, without an error. Choosing a Skill row,
-with `Enter` or `Tab`, fills `/skill:<name> ` and never sends; the token is part
-of the message text and the draft draws it as one highlighted unit, reading the
-Skill's name. Typing `/skill:`
+`skills.catalog` shows the commands alone, without an error. On a selected Skill,
+Tab and Enter both insert `/skill:<name> ` for further editing without sending. Typing `/skill:`
 narrows the menu to Skills: the query after the `skill:` namespace matches Skill
 names only. A draft that begins with `/skill:` is sent as a message and never run as
 a command, and a token may stand mid-sentence as long as it starts the message or
@@ -212,27 +209,17 @@ starts with the query and no command name or alias does, so a name shared with a
 command keeps both rows, the command first. `/` is the only trigger: `@` stays the
 file picker.
 
-The draft draws a reference the palette filled by the Skill's name, so a chosen
-`status` reads `/status` and not the parser's `/skill:status`:
+The draft and the transcript highlight the same `/skill:<name>` reference. Subsequent text is plain:
 
 ```text
-› /stat|                 › /status |
-  ├─ /skill:status       ├─ a filled /skill:status
-  └─ /skill:staged       └─ drawn by its name, sent as /skill:status
+› /stat|       Tab → › /skill:status |       type → › /skill:status check the build|
+  /skill:status
+  /skill:staged
 ```
 
-Only a filled reference is a named unit; text the operator typed is drawn as typed,
-so no character of the operator's own words ever reads as something else and a
-half-typed or malformed reference stays visible. The draft's text is still
-`/skill:<name> `: that is what it submits and what the input history keeps. Native
-terminal selection copies the displayed `/status`; pasting that label does not
-restore a Skill reference. Choose the Skill again or paste its canonical token.
-The cursor steps over the reference as one unit, a delete takes it whole, and the
-input wraps by the name it draws. A Skill
-whose name is also a command the input dispatches keeps the canonical token
-(`/skill:models`, not `/models`), because the plain name would read as that command
-while the draft is still a message. The menu's rows read `/skill:<name>` in both
-modes: a row states the token it fills; the transcript keeps the submitted token.
+The cursor and delete treat a completed reference as one unit. Terminal selection copies
+the same text that is submitted and kept in history. A successful Skill load adds no text
+to the TUI message; submission errors are reported normally.
 
 The menu fits the available terminal columns and rows in both modes. Command
 names take priority over descriptions and shortcut labels. A shortcut that
@@ -502,6 +489,7 @@ Steering always uses the owner's full held input.
 
 The strip and `/queue` show only held operator messages from the existing unconsumed
 input projection, oldest first; the strip count excludes applied messages.
+Steer messages never appear in the queue, even before they are applied.
 During a run, `Shift+Left` on an empty draft recalls the newest
 held message subject to the attachment rule above. The strip shows the shortcut
 that steers the oldest held message from an empty draft for the selected mode.
@@ -540,7 +528,7 @@ queue strip when nothing is held:
 
 ## Usage report
 
-In both TUI modes, `/usage` prints the main branch's context usage. When the
+In both TUI modes, `/usage` prints the default branch's context usage. When the
 active model uses Dim OAuth, it also queries and prints the account's plan,
 credits, rolling windows and feature meters through the existing
 [account usage contract](../../crates/dim-oauth/docs/runtime-contract.md).
@@ -706,8 +694,8 @@ only as the first token of the line and only when it parses; otherwise the whole
 so `/loop check the deploy` and `/loop 5m check the deploy` are two forms of the same command.
 
 The line-mode prompt prints usage and the loops; both TUI modes fill `/loop ` on selection and
-dispatch only on submission, as `/goal` does. A reply names the loop, its state, its round and, when
-one is armed, its next due time:
+dispatch only on submission, as `/goal` does. A reply names the loop, its state, its round, its
+prompt and, when one is armed, its next due time:
 
 ```text
 palette: loop + Enter -> /loop |          (completion only)
@@ -721,12 +709,10 @@ Loops on main (1):
 
 ## Provider accounts
 
-The native client signs in to every Provider whose `provider.management` entry
-carries an [`account` descriptor](appserver/provider-management.md#31-read-models).
-That descriptor is the only source: the client keeps no per-provider list, and
-it compares no Provider id. The described accounts are the provider list; the
-descriptor's `loginMethods` say which flow each one starts (`browser` or
-`device`); and the calls are the descriptor's namespace's —
+The native client discovers account providers through the
+[`account` descriptors](appserver/provider-management.md#31-read-models) returned
+by `provider.management`. The descriptor's `loginMethods` say which flow
+each account offers (`browser` or `device`). Calls use the descriptor's namespace:
 `<namespace>.login.begin` (device), `<namespace>.login.browser.begin`,
 `<namespace>.login.browser.complete`, `<namespace>.login.status`,
 `<namespace>.login.cancel` and `<namespace>.logout`. A namespace that the
@@ -736,15 +722,15 @@ flow that cannot finish.
 The `account` namespace is the Dim account. Its calls also carry `providerId`
 and the account directory, and `/login` keeps its account panel — identity,
 plan and usage, and the enterprise-email entry — because the descriptor carries
-neither identity nor usage. Every other namespace is a single account whose
+neither identity nor usage. Native Codex and Grok namespaces are single accounts whose
 calls carry only the attempt id.
 
-The terminal UI offers these operations on the `/connect` row of each described
-account. A signed-out account says `Sign in`, and opening it starts its only
-flow; a signed-in one shows its state and offers `Sign out`. A row whose
-namespace is `account` opens the Dim account's `/login` panel instead, with its
-identity, plan and usage. A Provider without a descriptor keeps the connection
-form, and opening it starts nothing. With a saved connection and no pending
+The terminal UI offers account actions on the `/connect` row. Opening a
+signed-out Grok Build row starts device sign-in. A signed-in row opens account
+status and offers `Sign out`. The Dim account opens its `/login` panel with
+identity, plan and usage. ChatGPT and legacy Codex have dedicated panels
+described below. Opening a Provider without a descriptor shows its connection form.
+With a saved connection and no pending
 edits, `Edit models` opens the Provider's [model management panel](#the-models-area)
 (`Models · <name>`), including when disabled. Ctrl+R in that management panel
 fetches the catalog when the Provider offers `refresh`.
@@ -752,19 +738,12 @@ fetches the catalog when the Provider offers `refresh`.
 ```text
 /connect
 ╭─ Providers ──────────────────────────────────╮
-│  OpenAI Codex                     Sign in    │
+│  OpenAI ChatGPT                   Sign in    │
 │  Grok Build                       Sign in    │
 │› Add custom provider                         │
 ╰─ Enter open · Esc clear/close ───────────────╯
-        │ Enter on a signed-out described row
+        │ Enter on the signed-out Grok Build row
         ▼
-╭─ OpenAI Codex OAuth ─────────────────────────╮
-│   Browser login                              │
-  https://…/authorize?…
-│   Callback URL: (paste here)                 │
-│   Submit callback                            │
-╰─ Select to copy · Enter opens link ──────────╯
-
 ╭─ Grok Build OAuth ───────────────────────────╮
 │   Device login                               │
 │   Enter code:    ABCD-EFGH                   │
@@ -797,6 +776,48 @@ retry command. The sign-in still succeeds.
 |   Error: Model list refresh failed: Relay timeout  |
 +---------------------- Up/Down move, Enter activate -+
 ```
+
+### ChatGPT plan
+
+Open `/connect`, select OpenAI ChatGPT, then choose Continue with ChatGPT.
+The panel explains what OpenAI processes before opening the browser. A
+successful loopback return refreshes models and opens `/models`. Escape
+cancels the pending attempt and closes the listener. A catalog error remains
+in the account panel, where Refresh model list retries the catalog request.
+The [ChatGPT plan provider](appserver/chatgpt-plan.md) owns the account contract.
+
+The legacy Codex account appears in discovery only for a previously
+configured product home. Its first action opens the ChatGPT switch flow.
+On successful authorization the old entry disappears immediately and the
+ChatGPT model list opens after refresh. With an already connected ChatGPT
+account the switch completes without external authorization. A refresh
+error keeps the ChatGPT panel open for retry.
+
+```text
++-- OpenAI Codex (Legacy) ---------------------------+
+| This sign-in method will be removed in a future    |
+| version.                                          |
+| > Switch to ChatGPT                               |
+|   Sign out                                        |
++------------------------------------------ Esc back +
+```
+
+```text
++-- OpenAI ChatGPT ----------------------------------+
+|  Using ChatGPT plan                                |
+|  user@example.com (1)                              |
+|> Open models                                       |
+|  Refresh model list                                |
+|  Manage usage                                      |
+|  Sign out                                          |
+|  Switch account: user@example.com (1) [Left/Right] |
+|  Add ChatGPT account                               |
++--------------------- Up/Down move, Enter activate -+
+```
+
+Up and Down move between actions. On Switch account, Left and Right cycle
+saved connections. Enter activates a signed-in connection or opens its
+browser sign-in. Manage usage opens ChatGPT settings in the browser.
 
 `dimcode login [PROVIDER]` starts the same flow in the line client and prints
 the URL or the code the daemon returns; without a PROVIDER it lists the
@@ -1077,6 +1098,15 @@ no write action, and its detail says why. What the owner could not use is listed
 as its issues. An entry may carry the operation's input document when the run kind takes one: Ctrl+T
 opens the external editor on it first, and sends what it leaves with the run.
 
+In both TUI modes, `/skills` lists names and states by source. Selecting a Skill does not
+display its description, file path or file contents. In this panel Tab toggles the selected
+Skill and leaves the list open. Enter uses an invocable selection: it closes the list and
+puts `/skill:<name> ` in the chat composer. Type the task there and press Enter to send.
+An unanswered question does not take focus from a slash command being completed or edited,
+or from a selected Skill's task draft, even if the question arrives after editing has started.
+Send or cancel the draft to return to the question.
+Enter on a disabled or otherwise non-invocable row neither sends nor changes its state.
+
 ```text
 ╭─ Skills ──────────────────────────────────────╮
 │ >                                             │
@@ -1088,15 +1118,16 @@ opens the external editor on it first, and sends what it leaves with the run.
 │   deploy      enabled                         │
 │   Issues                                      │
 │     /w/.agents/skills/old/SKILL.md: no name   │
-│   Writes commit messages from the staged diff.│
-│   /home/u/.agents/skills/commit/SKILL.md      │
-╰──── Enter toggle · Ctrl+R reload · Esc close ─╯
+╰─ Enter use · Tab toggle · Ctrl+R reload · Esc close ─╯
 ```
 
 ### Actions
 
-The client has a closed set of action kinds. Each kind has one key in every panel, and the hint
-lists the area's kinds plus the selected entry's kinds, in the table's order.
+The table lists the management actions sent to an area's adapter. Using a Skill is a local
+composer action: it needs an invocable catalog entry, not a management method. Except for the
+Skills keys above, the table gives each kind's key. The hint lists the area's kinds plus the
+selected entry's kinds, in the table's order; Skills shows
+`Enter use` before `Tab toggle` when use is available.
 
 An action that names one entry carries the entry's id and the source its row reports. Two entries
 of one id in different sources are two rows, each selected and acted on on its own, and the
@@ -1245,9 +1276,10 @@ Writes follow [Execution settings](#execution-settings):
                           Update::Management ◄───────┴ group, entries, states, actions, issues
 Panel  ◄───────────────────{ area, view }◄──────────┘
    │
-   ├─ Enter ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
-   │                                                                                (the view again)
-   └─ Ctrl+E ──► the external editor ──► Command { area, Save { id?, expectedRevision, document } }
+   ├─ Enter ──► UseSkill ──► editable task draft (no request sent)
+   └─ Tab ──► Command { area, Toggle { id, enabled } } ──► skills.set_enabled ──► skills.catalog
+
+/hooks panel ── Ctrl+E ──► external editor ──► Command { area, Save { id?, expectedRevision, document } }
                                           ──► hooks.save ──► hooks.catalog
 
 dimcode skills enable ID ──────────────────────────────► the same adapter, over its own connection
@@ -1322,19 +1354,26 @@ the panel's confirmation.
 
 ### Model picker reads
 
-Opening `/models` requests one page from
+Opening `/models` starts a bounded read from
 [`provider.models.query`](appserver/provider-management.md#model-display-queries).
-Typing searches on the server and resets the page cursor. Next/Previous replace
-the displayed page; closing the picker releases its results. Capability reads for
-the adopted model pass its provider and model ID. Catalog refresh is the explicit
-management action in the provider/account panel. Counts in picker diagnostics
-refer to the displayed page.
+The conversation and fixed subagent model lists scroll continuously. Near the
+end, moving down requests the next batch and appends any selectable models
+without moving the selection. A batch with no selectable models is traversed
+automatically while it has a continuation cursor. Cursor navigation is never
+shown as a row. Until the first selectable models arrive the picker shows
+loading; an empty result is shown only once traversal ends. Diagnostics describe
+the batches loaded so far. Typing searches on the server and starts a new list;
+closing the picker releases its results. Clearing saved preferences rereads the
+loaded batches before allowing another clear: a write changes the provider
+version shared by all its model rows. Capability reads for the adopted model pass
+its provider and model ID. Catalog refresh is the explicit management action in
+the provider/account panel.
 
 ```text
-/models -> first page -> Next page -> next page
-               ^                         |
-               +------ Previous page ----+
-Type query -> first matching page
+/models    -> first selectable rows (or an empty result)
+Scroll ↓   -> append more rows near the bottom
+Scroll ↑   -> earlier rows remain in the same list
+Type query -> new matching list
 Esc        -> clear query; when empty, close and release results
 ```
 
@@ -1973,7 +2012,9 @@ the store. A failed startup exits 1 unless it enters the recovery below.
 While a store format upgrade runs, the daemon writes the same note as a progress
 kind, `dimcode-startup-progress v1 pid=<pid>` with
 `store-upgrade from=<from> to=<to> progress=<n>`, at most once a second and
-after each upgrade step. From the moment the store opens until the listeners
+after each upgrade step, including the steps that follow the upgrade's own:
+the derived indexes, the reference check, the commit and each pragma the open
+sets. From the moment the store opens until the listeners
 open, the daemon owns the note as an assembly kind, `assembly progress=<n>`:
 `<n>` rises whenever the opening records progress (a row's first activation or
 an `OpeningAdvanced` report), the first progress after the store removes its own
@@ -2394,8 +2435,9 @@ Sessions are all active prints the sentence above instead.
 
 ### Migration interaction
 
-`dim` and the alpha package's `dima` invoke these same native commands. Bare
-`migration` selects its source and target by the build's release channel:
+`dim-nightly migration` requires an explicit `--home TARGET` for every operation.
+Neither `--source` nor `DIMCODE_HOME` selects a migration target for nightly.
+For other builds, bare `migration` selects its source and target by channel:
 
 | Build | Distribution | Legacy source | Native target home |
 | --- | --- | --- | --- |
@@ -2910,6 +2952,28 @@ is one of the seven [guaranteed pre-commit rejections](../../crates/dim-app-serv
 Every other error, including `submission_unknown` and opaque publication/storage failures,
 can follow commit and must not trigger another send.
 
+In its default text mode, `exec` writes only the turn's final reply to stdout.
+That turn is the one consuming the input this invocation submitted; text from
+any other turn on the branch, whether it completes before or after, goes to
+stderr. Text a model writes before or between tool calls goes to stderr,
+together with the `[tool]`, `[done]` and `[failed]` lines. Whether a request's
+text is the turn's final reply is known only when the turn ends, so each
+request's text is held until then: a request that ends in a tool call, fails
+(including at its output limit) or is cancelled writes its text to stderr; a
+request that ends normally stays the candidate reply, and a turn that
+completes successfully writes its last request's text to stdout while an
+earlier request in the same turn, or a turn that fails or is cancelled, writes
+it to stderr. Requests are routed by their own id, so an earlier request that
+ends late does not cut a reply that already started. `exec resume` first
+settles a turn an earlier invocation left running, and that turn's text goes
+to stderr. The reply stream closes for good when the submitted turn ends, when
+the run is interrupted, when a line run stops at a question or approval (exit
+3), when the submission fails or the Session closes (exit 1), and when the
+submitted input is deleted (exit 1); text that arrives afterwards is
+diagnostics. A diagnostic line does not by itself decide where held text goes.
+A turn whose final reply is empty writes nothing to stdout. `exec --json` and a
+one-shot `dimcode --prompt` run keep their existing routing.
+
 In JSON mode, stdout contains one compact JSON-RPC notification per line using
 the daemon's existing `method` and `params`. Only notifications for the selected
 Session are emitted. Protocol handshake, RPC replies and other Sessions never
@@ -3095,7 +3159,7 @@ permission: read-only
 
 > Fix the build
 Assistant: ...
-[permission] main branch preset: workspace-write  <- changed by another client
+[permission] preset: workspace-write  <- changed by another client
 ```
 
 Both TUI modes draw a live permission footer under the composer, without an `AGENT` prefix;
@@ -3254,8 +3318,8 @@ approves nor cancels work by that fact alone.
 ### `/permissions`
 
 `/permissions` is the visible menu entry in both TUI modes; `/approvals` and `/approval` open the
-same preset picker as compatibility aliases. The control applies to `main`; selecting a preset
-uses the current policy and version, preserving the tool lists. A failed save neither changes remembered choices nor falls back to another preset.
+same preset picker as compatibility aliases. The control applies to the Session's default
+branch; selecting a preset uses the current policy and version, preserving the tool lists. A failed save neither changes remembered choices nor falls back to another preset.
 
 The Process isolation row links to the Settings control; Esc returns to this panel with that row focused.
 The Command rules row opens the management panel

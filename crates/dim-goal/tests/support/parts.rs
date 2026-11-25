@@ -54,6 +54,11 @@ pub struct Probe {
     tools: Mutex<Option<Arc<ToolRegistry>>>,
     guide: Mutex<Option<Arc<GuideEntries>>>,
     store: Mutex<Option<Arc<dyn TimelineStore>>>,
+    /// One state record whose published status is changed before the commit,
+    /// so its writer's own check refuses the append.
+    fail_state: Arc<Mutex<Option<tokio::sync::oneshot::Sender<()>>>>,
+    /// How many state records the hook changed.
+    failed_states: Arc<AtomicUsize>,
 }
 
 impl Probe {
@@ -92,6 +97,18 @@ impl Probe {
     }
     pub fn store(&self) -> Arc<dyn TimelineStore> {
         self.store.lock().unwrap().clone().expect("TimelineStore")
+    }
+    /// Makes the next state record's published status disagree with the state
+    /// its writer states: the append fails and writes nothing. The receiver
+    /// answers once the hook changed that record.
+    pub fn fail_next_state(&self) -> tokio::sync::oneshot::Receiver<()> {
+        let (fired, wait) = tokio::sync::oneshot::channel();
+        *self.fail_state.lock().unwrap() = Some(fired);
+        wait
+    }
+    /// How many state records the hook changed.
+    pub fn failed_states(&self) -> usize {
+        self.failed_states.load(Ordering::SeqCst)
     }
 }
 
@@ -167,6 +184,36 @@ impl DynPlugin for ProbeBranch {
             let commands = ctx.require_at(&self.commands)?;
             let dispatcher = ctx.require_at(&self.dispatcher)?;
             let identity = ctx.require_at(&self.identity)?;
+            let probe = self.probe.clone();
+            timeline.before(
+                ctx,
+                "GoalProbeFailState",
+                &["input/message"],
+                move |mut draft| {
+                    let EventKind::InputMessage(data) = &mut draft.kind else {
+                        return Ok(draft);
+                    };
+                    if probe.fail_state.lock().unwrap().is_none() {
+                        return Ok(draft);
+                    }
+                    for block in &mut data.blocks {
+                        let InputBlock::Raw { text, .. } = block;
+                        if !text.contains(r#"kind="state" status="paused""#) {
+                            continue;
+                        }
+                        *text = text.replace(
+                            r#"kind="state" status="paused""#,
+                            r#"kind="state" status="active""#,
+                        );
+                        if let Some(fired) = probe.fail_state.lock().unwrap().take() {
+                            probe.failed_states.fetch_add(1, Ordering::SeqCst);
+                            let _ = fired.send(());
+                        }
+                        break;
+                    }
+                    Ok(draft)
+                },
+            )?;
             let mut timelines = self.probe.timelines.lock().unwrap();
             timelines.insert(identity.branch_id.clone(), timeline);
             self.probe

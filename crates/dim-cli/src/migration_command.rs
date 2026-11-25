@@ -60,6 +60,10 @@ pub(crate) async fn run(
     command: &Command,
     locale: crate::locale::Locale,
 ) -> Result<i32> {
+    let channel = crate::update::channel(env!("CARGO_PKG_VERSION"));
+    if channel == "nightly" && !options.home_explicit {
+        return Err("Nightly migration requires --home TARGET".into());
+    }
     let terminal = dim_migration::terminal::Terminal::new(options.json);
     let json_output = !terminal.is_interactive()
         || !matches!(command.operation, Operation::Run | Operation::Retry(_));
@@ -81,7 +85,7 @@ pub(crate) async fn run(
         return Err(USAGE.into());
     }
     let importing = matches!(command.operation, Operation::Run | Operation::Inspect);
-    let alpha = crate::update::channel(env!("CARGO_PKG_VERSION")) == "alpha";
+    let alpha = channel == "alpha";
     let user_home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
         .map(PathBuf::from)
         .ok_or("Cannot locate the distribution homes; pass --home TARGET");

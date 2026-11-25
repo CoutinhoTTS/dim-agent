@@ -176,9 +176,7 @@ hand-written adapter layer.
 
 Each name is declared once. A service that crosses languages declares its name on its Rust type with
 `#[rutis::service]`. A Rust-only service, or a name a foreign part provides, is registered in the
-host's loader catalog. `xtask graph` writes the authoritative table from the real assembly, the
-[generated catalog](../architecture/rust-agent/generated/catalog.md), and `xtask check` fails when it is
-stale (R4). What each name Dim defines is for is in the [plugin contract §4](plugin-contract.md#4-dims-services).
+host's loader catalog. What each name Dim defines is for is in the [plugin contract §4](plugin-contract.md#4-dims-services).
 
 *Today:* every service that crosses languages is marked `#[rutis::service]`, the Session and branch
 ones included; rutis 0.17 removed the build script's service list (`Exports::service_in`), which
@@ -283,9 +281,7 @@ These requirements concern how Dim uses rutis. They follow
   methods) and marks which parts are Capabilities, from the names they inject (`dispatcher`,
   `timeline`).
 - **Effect:** none at runtime.
-- **Owner:** `xtask`. Delivered ([#381](https://github.com/arcships/dim/issues/381)): `xtask graph`
-  writes the [generated catalog](../architecture/rust-agent/generated/catalog.md) from the App Server
-  product profile with one Session, and `xtask check` fails when it is stale.
+- **Owner:** `xtask` ([#381](https://github.com/arcships/dim/issues/381)).
 
 ### R5. Foreign plugins register their parts
 
@@ -506,9 +502,13 @@ Carried from [#6](https://github.com/arcships/dim/issues/6):
   reconcile, required rows becoming Active and opening replay. A row's first activation during the
   opening, advancement of its branch's dispatch sequence, or completion of an opening receipt resets
   that interval. Restarting the same row does not renew it; activity in another Session does not.
-  A plugin whose own `apply` runs long may report real progress with `opening_advanced(ctx)`
-  (`dim_agent_runtime::assembly`), which resets the same interval; a plugin whose work runs on a
-  blocking thread reports from there.
+  A plugin whose own `apply`, or a restore of the lines it owns, runs long may report real progress
+  with `opening_advanced(ctx)` (`dim_agent_runtime::assembly`), which resets the same interval; a
+  plugin whose work runs on a blocking thread reports from there. A report bounds the gap since the
+  previous one, not any single await: work that stalls without reporting still times out.
+  A multi-step process such as a restore resolves its reporting identity once with
+  `OpeningReporter::new` (`dim_agent_runtime`) and reports through the same reporter at every step,
+  so it takes one process diagnostics snapshot instead of one per step.
   There is no fixed total startup deadline. The
   same rule applies to Session and branch opening, process startup and restart. A branch waiting for
   its parent follows that parent's bounded opening rather than imposing another total deadline.

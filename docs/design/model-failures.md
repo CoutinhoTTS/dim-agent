@@ -21,14 +21,57 @@ never matches message text.
 | `quota_exhausted` | 402; the conditions `insufficient_quota`, `quota_exceeded`, `billing_error`, `credit_exhausted` | no | the account has no quota left | check the plan or billing |
 | `not_found` | 404 | no | the provider did not find the model or endpoint | check the model and the provider's base URL |
 | `context_too_long` | 413; the conditions `context_length_exceeded`, `context_too_long` | no | the conversation is longer than the model accepts | compact the conversation or start a new session |
-| `content_filtered` | the conditions `content_policy_violation`, `safety_block`, `moderation_block` | no | the provider's content filter blocked the response | rephrase the request |
+| `content_filtered` | the conditions `content_policy_violation`, `safety_block`, `moderation_block`; the content-filter finish reason | no | the provider's content filter blocked the response | rephrase the request |
 | `invalid_request` | local transport refusal; 400, 409, 422, 501, 505, other 4xx; the label `invalid_request_error`; the condition `max_tokens_exceeded`; `InvalidArgument`, `InvalidPrompt`, `UnsupportedFunctionality` | no | the request was rejected | see the details |
 | `output_limit` | the `max_tokens` stop | no | the model stopped at its output limit | increase the output token limit and retry |
-| `unknown` | anything else | no | the model request failed | see the details |
+| `unknown` | anything else, including a provider generation error and an unrecognized finish reason | no | the model request failed | see the details |
 
 A timeout of the HTTP connection or of the stream reaches the bridge as a
 transport `ApiCall` and is `network`. `AiMuxError::Timeout` has no producer in a
 chat call; if it ever reaches the bridge it is `unknown` and is not retried.
+
+A status the table names decides the same kind when a stream event writes it
+as a JSON integer or as an exactly three-digit decimal string in the event's
+own `code`: `502` or `504` is a `server_error`, `429` a `rate_limited`, `401`
+or `403` an `auth_rejected`, and so on through the table.
+
+The bridge also bounds its own waits: a stream that delivers nothing for five
+minutes is `network`, with the reason `the stream delivered nothing for 300
+seconds`. The bound is per wait, not per request, so a reply that keeps
+streaming is never cut; an expired bound outranks a part that is ready at the
+same moment, and cancelling the request outranks both. A wait whose event has a
+producer-reported instant is judged against that instant: the transport reports
+the moment it produced the response headers, so headers written inside the
+allowance are on time even when the driver next polls after it, and headers
+written after the allowance are late even when the report is read before the
+timer that ends it fires. A wait with no
+such instant, the provider returning the stream and one stream part, keeps the
+deadline-first order.
+
+Three waits carry the bound. The wait for the response headers starts when the
+request is sent, so sending the body and following redirects count against it,
+and expires with the reason `no response headers arrived within 300 seconds of
+sending the request`. The wait for the stream to start begins when the
+transport produces the response headers. It expires with the reason `the
+response headers arrived, but no stream event followed within 300 seconds` for
+a provider that reads one stream event before it returns the stream (OpenAI
+Chat, Anthropic, Gemini, xAI Responses). It expires with the reason `the
+response headers arrived, but the stream did not start within 300 seconds` for
+the OpenAI Responses provider: its pinned SDK reads response metadata before it
+returns the stream, so that wait ends at the stream's start, not at an event
+the driver can see. The compatible and Bedrock providers return at the headers,
+so their first event falls under the wait between parts. That wait expires with
+the reason `the stream delivered nothing for 300 seconds`. A non-2xx response is
+handled differently: its body is a short diagnostic, and its read has its own
+total five-minute allowance, so a stalled error body cannot hold the request
+open, and the request still fails with the HTTP status and the kind that status
+names instead of an idle network failure. The connection's optional total
+timeout is unchanged and is still separate from these bounds.
+
+Only decoded stream parts renew the wait between parts. The provider parser
+drops SSE comments and Anthropic `ping` events before they reach the bridge, so
+a connection kept alive only by keep-alives still fails after five minutes
+without parts.
 
 Codes are compared trimmed and ASCII-lowercased.
 
@@ -49,6 +92,15 @@ gateway forwards either under any status.
   response carries an error status, the label can only agree with it or
   contradict it, and when it contradicts, the status is the fact.
 
+A three-digit status written as a JSON integer or as an exactly three-digit
+decimal string in a stream event's own `code` is a class label too, and the
+status table above says which class it names: the event reports the failure it
+hit, while the status aimux maps the event to is its own reading and is never
+taken as the fact. A three-digit number or a three-digit string in any other
+field, such as a `type` or the adapter's provider code, is an opaque label: it
+participates through the named conditions and classes above and is never read
+as a status.
+
 ### The rule
 
 A Transport-origin failure with no response status or headers that the
@@ -61,7 +113,8 @@ rule decides every protocol's failure:
 2. otherwise a Transport-origin failure is `network`;
 3. otherwise an error status, 4xx or 5xx, on the response decides, by the
    table above;
-4. otherwise a class label decides, which in practice is a stream event;
+4. otherwise a class label decides, which in practice is a stream event: the
+   status it writes as its own code, or a provider's named label;
 5. otherwise the kind is `unknown`.
 
 A status outside 4xx and 5xx is not an error status and says nothing about
@@ -76,11 +129,14 @@ carries one and otherwise guesses from the event's code and type, where a
 provider that matches nothing gets 500. Dim cannot tell an explicit status
 from a guessed one, so a stream event skips step 3 and steps 1 and 4 decide
 it; reading that status would turn every unrecognized event into a retried
-`server_error`. 501 and 505 are `invalid_request` by step 3 because the status
-table says so, not by an exception to this rule, and a condition code beside
-them still decides. Two kinds change from the rule: a 4xx answer that carries
-only a server-class label is no longer retried, and a 5xx carrying
-`invalid_request_error` is a `server_error` and is retried.
+`server_error`. A three-digit integer or exactly three-digit string in the
+event's own `code` decides as a class label, and a value outside 400 to 599
+decides nothing; a three-digit `type` or provider code is not a status. 501
+and 505 are `invalid_request` by step 3 because the status table says so, not
+by an exception to this rule, and a condition code beside them still decides.
+Two kinds change from the rule: a 4xx answer that carries only a server-class
+label is no longer retried, and a 5xx carrying `invalid_request_error` is a
+`server_error` and is retried.
 
 Every `HostError::Failed` the bridge produces carries facts, including
 `AiMuxError::Timeout`, `InvalidResponseData`/`JsonParse`, `InvalidArgument`/
@@ -107,7 +163,9 @@ ModelFailure {
   attempts,         // at least 1
   waitedMs,         // total backoff slept
   retryForbidden?,  // true only when the failure policy forbids retrying
-  retryAfterMs?     // the provider asked to wait longer than the budget left, so Dim stopped
+  retryAfterMs?,    // the provider asked to wait longer than the budget left, so Dim stopped
+  retried?,         // true only when a retry replaced an earlier attempt of this request
+  thinkingPartId?   // the thinking block the final attempt left open, when it showed one
 }
 ```
 
@@ -119,6 +177,14 @@ ModelFailure {
 - `retryForbidden` is present only when true. ModelProvider sets it when its
   failure policy forbids retrying the failure that ended the request, and a
   continuation declines it, so the prohibition covers the continuation.
+- `retried` is present only when true: a retry replaced an earlier attempt of
+  this request. `thinkingPartId` is written only with it and names the thinking
+  block the final attempt left open when it showed one as progress. A client
+  showing an open thought row from progress keeps it when the identity matches
+  and takes it, with the replaced attempt, when it does not; the terminal fact
+  is the only place the boundary is observable when the empty progress between
+  the attempts was coalesced away. `attempts` counts a failure chain's attempts
+  as well, so it does not mean an in-place retry.
 - `reason` is the provider's error message for a response or stream-event
   failure, and the innermost frame of the cause chain for a transport failure.
   A reply that completed with no answer has no provider error behind it, so its
@@ -151,25 +217,57 @@ ModelFailure {
   section).
 - Tool arguments that never complete write
   `failure.kind = malformed_response`, the kind `InvalidToolInput` carries for
-  the same defect.
+  the same defect. A content filter the stream reports after the interrupted
+  call is the exception: the known filter terminal is authoritative, so the
+  reply writes `content_filtered` and the started call is closed as failed
+  instead of being announced as a tool call. A stream that stops without that
+  terminal keeps `malformed_response`. Every request enables strict streaming,
+  which holds each client call until the finish part and releases it directly
+  before the terminal, so the bridge reaches the terminal on the read right
+  after the failed call even when the adapter queued them in separate events,
+  as the Responses adapter does. The bridge reads only the parts the stream
+  has already delivered there, so a failure never waits for a part that may
+  never arrive.
 - A reply that stops with an end-turn finish and carries no non-whitespace text
   and no tool call writes `failure.kind = malformed_response` with the reason
   "the response had no text and no tool call". Thinking alone is not an answer,
   so a reply of thinking only counts as empty. The bridge decides it where the
   stream completes, because it is the only part that sees the whole response.
-  Whether the request is retried depends on what the attempt handed on: with
-  nothing but the message start handed on, it is retried once like any
-  `malformed_response`; once anything else has been handed on, a whitespace
-  text part included, the request is past the point where it may be retried
+  Whether the request is retried depends on what the attempt committed: while
+  it committed nothing to the Timeline, a classified cut is retried once like
+  any `malformed_response`, and the failed attempt's progress is dropped before
+  the retry starts, so the next attempt replaces it. Once it committed
+  anything, a whitespace text part or a usage fact included, the request is
+  past the point where it may be retried
   ([output.rs](../../crates/dim-agent-capabilities/src/output.rs) clears replay
-  safety on every chunk but the message start), so the turn ends with the
-  failure recorded and shown and the user resends by hand. A retry cannot
-  follow committed output: what the request committed must match the next
-  complete reply, thinking included
+  safety when the attempt commits an event), so the turn ends with the failure
+  recorded and shown and the user resends by hand. A cut flushes buffered text
+  before it decides: text that already reached the screen is committed at the
+  failure and is never replaced by a retry, and a final flush whose Timeline
+  append fails is a local write failure that ends the turn without a retry
+  instead of being reported as the provider's cut. Received thinking that was
+  never committed is not a fact and does not stop the retry; while it is still
+  private it is not visible output either, so a Steer still replaces the
+  request, and a retry starts from nothing with every client resetting what the
+  replaced attempt showed. Only a retry reopens the request: a terminal
+  failure leaves the attempt's shown output alone, so an input that arrives
+  while the failed stream drains cannot replace it and the turn ends with the
+  provider's failure. An unclassified stream ending carries no failure
+  facts and is not retried; classifying an ending as a cut belongs to the
+  driver. A retry cannot follow committed output: what the request committed
+  must match
+  the next complete reply, thinking included
   ([output.rs](../../crates/dim-agent-capabilities/src/output.rs)), and a second
   attempt brings its own thinking.
   The rule holds for every turn, driven Loop and Goal turns included: an empty
   reply is not a step there either.
+- A reply a finish reason fails carries no provider error either, so its reason
+  is a fixed sentence and quotes no response content. A content filter is
+  `content_filtered` with "the stream ended on a content-filter finish reason";
+  a provider generation error and an unrecognized reason are both `unknown`,
+  with "the provider reported a generation error" and "the stream ended on an
+  unsupported finish reason". The kind decides the continuation: `unknown` is a
+  kind a new request can settle and `content_filtered` is not.
 - A failure from a host with no provider boundary gets kind `unknown` and the
   message it already carried.
 
@@ -223,9 +321,9 @@ line's `tried N times` is the persistent record.
 `invoke` is shared by ModelProvider, the auxiliary model and the summary
 strategy, so there is one policy and no per-caller setting, but not always the
 same outcome: replay safety is the consumer's to clear, and the auxiliary model
-and the summary strategy read the stream without handing anything on, so a
-reply that streamed only thinking or whitespace text is retried there, while
-a main turn ends on it.
+and the summary strategy read the stream without committing anything, so a
+failure after they received output is retried there, while a main turn ends on
+it once the attempt committed.
 
 | item | value |
 | --- | --- |
@@ -235,7 +333,7 @@ a main turn ends on it.
 | backoff | the n-th retry sleeps 1 s × 2^(n−1), capped at 30 s, times a uniform jitter in [0.8, 1.0] |
 | `Retry-After` | used exactly as the delay, even above 30 s, while it fits in the budget left; if it does not fit, the request stops at once and records `retryAfterMs` |
 | wait budget | a request sleeps at most five minutes in all before it fails; a wait that does not fit in what is left stops the request at once |
-| unchanged | no retry once the attempt handed anything but the message start on, thinking and whitespace text included; an interrupt cancels the sleep; one credential recovery with no delay, still within the 8 attempts; `ModelFailurePolicy::forbids_retry`; a terminal credential rejection is settled |
+| unchanged | no retry once the attempt committed an event to the Timeline, a whitespace text part or a usage fact included; received but uncommitted progress, thinking included, does not stop a retry and is dropped before it; an interrupt cancels the sleep; one credential recovery with no delay, still within the 8 attempts; `ModelFailurePolicy::forbids_retry`; a terminal credential rejection is settled |
 
 The nominal backoff sleeps are 1, 2, 4, 8, 16, 30 and 30 s, about 91 s in all.
 The numbers follow the outage in #1197, which lasted tens of seconds: eight
@@ -288,10 +386,11 @@ written with it, because `ModelOutputOutcome` denies unknown fields. That is the
 same forward-compatibility limit `presentation` has, so a downgrade across this
 change is unsupported, as it already was for `presentation`.
 
-The same decision covers the continuation fields, the retry prohibition and
-handover inputs. The optional `failure_chain` on `ContextPrepareData` and
-`ModelCallData`, the optional `handover` on `InputMessageData`, and the optional
-`retryForbidden` on `ModelFailure` are additive, and a binary without them
+The same decision covers the continuation fields, the retry prohibition, the
+retry boundary and handover inputs. The optional `failure_chain` on
+`ContextPrepareData` and `ModelCallData`, the optional `handover` on
+`InputMessageData`, the optional `retryForbidden`, `retried` and
+`thinkingPartId` on `ModelFailure` are additive, and a binary without them
 cannot read a record that carries them, so a downgrade across this change is
 unsupported. Each addition registers the
 decision in the contract tests with its compatibility cases; the frozen

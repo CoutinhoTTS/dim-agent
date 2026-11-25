@@ -1,4 +1,4 @@
-use super::{PreparedWorktree, SessionStore, WorktreeDirectory};
+use super::{PreparedWorktree, SessionStore, WorktreeCreation, WorktreeDirectory};
 use crate::protocol::SessionOrigin;
 use dim_agent_runtime::{AgentError, ReplyLanguage, SessionConfig};
 use dim_agent_types::grant::{GrantKind, GrantMode};
@@ -150,9 +150,36 @@ impl Store {
     pub fn remove_worktree(
         &self,
         directory: WorktreeDirectory,
-        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>>,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
     ) -> impl Future<Output = Result<bool>> {
         self.0.remove_worktree(directory, remove)
+    }
+    /// Removes the worktree a failed creation built, taking the creation's own
+    /// registration over as the path's deletion registration. The rollback of
+    /// a managed creation is the only caller, so this stays off the face.
+    pub(crate) fn remove_created_worktree(
+        &self,
+        directory: WorktreeDirectory,
+        creation: WorktreeCreation,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
+    ) -> impl Future<Output = Result<bool>> {
+        self.0.remove_created_worktree(directory, creation, remove)
+    }
+    pub fn remove_unregistered_directory(
+        &self,
+        path: PathBuf,
+        remove: impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> + Send + 'static,
+    ) -> impl Future<Output = Result<bool>> {
+        self.0.remove_unregistered_directory(path, remove)
+    }
+    /// Registers a worktree directory a creation selected until the returned
+    /// guard drops; the registration takes the ownership lock a removal
+    /// registers under.
+    pub(crate) fn begin_worktree_creation(
+        &self,
+        path: &std::path::Path,
+    ) -> impl Future<Output = Result<WorktreeCreation>> {
+        self.0.begin_worktree_creation(path)
     }
 }
 
@@ -289,7 +316,8 @@ impl HostDispatch for Store {
             "hasRecords":"async", "delete":"async", "fork":"async",
             "sessionConfigText":"async", "createOwnedSession":"async",
             "worktreeDirectories":"async", "sessionsUnderWorkspace":"async",
-            "removeWorktreeDirectory":"async", "worktreeUsages":"async", "removeWorktree":"async"
+            "removeWorktreeDirectory":"async", "worktreeUsages":"async", "removeWorktree":"async",
+            "removeUnregisteredDirectory":"async"
         }))
     }
     fn invoke(&self, method: &str, args: Value) -> Reply {
@@ -311,6 +339,7 @@ impl HostDispatch for Store {
             if args.next().is_some() {
                 return Err(Error::value("unexpected removeWorktree argument"));
             }
+            let remove = removal(remove);
             let owner = self.clone();
             return Ok(Value::future(async move {
                 let removed = owner
@@ -319,34 +348,38 @@ impl HostDispatch for Store {
                             repository: directory.repository.into(),
                             root: directory.root.into(),
                         },
-                        move |path| {
-                            Box::pin(async move {
-                                let result = async {
-                                    let value = remove
-                                        .call_async(Value::List(vec![json!(path).into()]))
-                                        .await?;
-                                    if let Value::Reference(reference) = value
-                                        && reference.is_future()
-                                    {
-                                        reference.wait_async().await?;
-                                    }
-                                    Ok::<_, Error>(())
-                                }
-                                .await;
-                                result.map_err(|error| {
-                                    let message = match &error {
-                                        Error::Remote { message, .. } => message.clone(),
-                                        _ => error.to_string(),
-                                    };
-                                    match error.code() {
-                                        Some("invalid") => AgentError::InvalidInput(message),
-                                        Some("cancelled") => AgentError::Cancelled(message),
-                                        _ => AgentError::Storage(message),
-                                    }
-                                })
-                            })
-                        },
+                        remove,
                     )
+                    .await
+                    .map_err(failure)?;
+                Ok(json!({"removed":removed}).into())
+            }));
+        }
+        if method == "removeUnregisteredDirectory" {
+            let mut args = args.list()?.into_iter();
+            let root = args
+                .next()
+                .ok_or_else(|| Error::value("missing directory"))?
+                .json()?;
+            if !root.is_object() {
+                return Err(Error::value("store request must be an object"));
+            }
+            let root: Root =
+                serde_json::from_value(root).map_err(|error| Error::value(error.to_string()))?;
+            let remove = args
+                .next()
+                .ok_or_else(|| Error::value("missing removal callback"))?
+                .reference()?;
+            if args.next().is_some() {
+                return Err(Error::value(
+                    "unexpected removeUnregisteredDirectory argument",
+                ));
+            }
+            let remove = removal(remove);
+            let owner = self.clone();
+            return Ok(Value::future(async move {
+                let removed = owner
+                    .remove_unregistered_directory(root.root.into(), remove)
                     .await
                     .map_err(failure)?;
                 Ok(json!({"removed":removed}).into())
@@ -497,6 +530,41 @@ impl HostDispatch for Store {
         }))
     }
 }
+/// One removal callback as the owner takes it: the bridge reference is
+/// awaited with the checked path, and its error keeps the `invalid`,
+/// `cancelled` or `storage` kind the caller raised.
+fn removal(
+    remove: rutis_bridge::session::Reference,
+) -> impl FnOnce(PathBuf) -> BoxFuture<'static, Result<()>> {
+    move |path| {
+        Box::pin(async move {
+            let result = async {
+                let value = remove
+                    .call_async(Value::List(vec![json!(path).into()]))
+                    .await?;
+                if let Value::Reference(reference) = value
+                    && reference.is_future()
+                {
+                    reference.wait_async().await?;
+                }
+                Ok::<_, Error>(())
+            }
+            .await;
+            result.map_err(|error| {
+                let message = match &error {
+                    Error::Remote { message, .. } => message.clone(),
+                    _ => error.to_string(),
+                };
+                match error.code() {
+                    Some("invalid") => AgentError::InvalidInput(message),
+                    Some("cancelled") => AgentError::Cancelled(message),
+                    _ => AgentError::Storage(message),
+                }
+            })
+        })
+    }
+}
+
 fn failure(error: AgentError) -> Error {
     let code = match &error {
         AgentError::InvalidInput(_) => "invalid",

@@ -475,15 +475,8 @@ round trip, and no AgentLoop change. The design is:
   move the highlight off the characters. A surface that already maps a byte range onto what it
   paints uses that mapping directly; one that wraps the text itself carries each drawn
   character's source byte out of the wrap and shares that one wrap with the plain rows.
-- **A filled reference shows its name, and only its name.** The CLI input draws a reference the
-  palette filled as the Skill's name (`/status`), and holds `/skill:<name> ` as its text: the name
-  is what the operator chose and what they read back, while the token stays what is submitted
-  and kept in the input history. The name is a projection over that text and never a
-  rewrite of it, so a Skill loads identically whether it was drawn by name or typed in full, and
-  text the operator typed is always drawn as typed. A name that is also a command the input
-  dispatches keeps the canonical token in the draft, because the plain name would read as that
-  command while the draft is still a message. The CLI's selection and copying behavior is
-  defined in [CLI commands](../cli-commands.md#command-menu); other surfaces state their own presentation.
+- The native CLI's selection, copying and transcript behavior is defined in
+  [CLI commands](../cli-commands.md#command-menu); other surfaces state their own presentation.
 - **`$skill: <name>` keeps loading.** Inputs and habits from before this token keep working, so
   the parser accepts the old marker too: `$skill:`, optional spaces, then the run of
   non-whitespace characters that follows, matched exactly. No client writes it any more and the
@@ -524,9 +517,9 @@ round trip, and no AgentLoop change. The design is:
   so it sees the added block after the operator's text, exactly as it sees a `UserPromptSubmit`
   context (Hooks A.6.2). A reader that wants the operator's words alone leaves it out the same
   way, as SessionTitle's title text does ([SessionTitle §0.1](SessionTitle.md#01-fields-read-for-one-title-attempt)).
-- **Clients show one line.** A text block of an operator input's `user` content that is not the
+- **Clients do not show the instructions.** A text block of an operator input's `user` content that is not the
   first block and that `dim_agent_types::markup::runtime_element` names `dim-skill` is shown as
-  one line naming the loaded Skill, never as its text ([clients](../clients.md)); the same
+  one line naming the loaded Skill, except in the native TUI, which omits the block ([clients](../clients.md)); the same
   predicate tells a `dim-hooks` block beside it apart, which a client shows as its own row
   (Hooks §3.3). The ACP gateway applies the same rule when it
   replays an input to the editor on `session/load` and on a history read, and it delimits each
@@ -536,6 +529,7 @@ round trip, and no AgentLoop change. The design is:
   edit or fork takes the operator's text only, so resending does not load the Skill twice. Export
   keeps the raw record.
 - **The palettes offer the token, not a marker.** The CLI and web `/` menus list enabled,
-  unshadowed, user-invocable Skills whose names the token can carry, and choosing one fills
-  `/skill:<name> ` and sends nothing. Typing `/skill:` narrows the menu to Skills. Neither palette
+  unshadowed, user-invocable Skills whose names the token can carry. The web completes a selection
+  without sending; native keys follow [CLI commands](../cli-commands.md#command-menu).
+  Typing `/skill:` narrows the menu to Skills. Neither palette
   writes the old marker.

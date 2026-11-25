@@ -33,7 +33,7 @@ During migration, an existing entry may carry `internal(reason)`:
 
 ### 2.3 Checks
 
-`xtask graph` and `check` classify the current catalog:
+`xtask check` classifies the current catalog:
 
 - shared + dispatcher → `data`;
 - shared without dispatcher → failure;
@@ -71,7 +71,7 @@ Preserve the owner's cancellation, ordering and lifecycle semantics when moving 
 
 ## 3. 盘点（#1300）
 
-Rust 产品装配的现状以 [生成的 catalog](../architecture/rust-agent/generated/catalog.md) 为准。以下按迁移工作分组，每个名字只在盘点表中列一处。批次进度见 [#1292](https://github.com/arcships/dim/issues/1292)。
+以下按迁移工作分组，每个名字只在盘点表中列一处。批次进度见 [#1292](https://github.com/arcships/dim/issues/1292)。
 
 ### 3.1 基础数据面与上游登记
 
@@ -288,7 +288,7 @@ wakeups.cancel {sessionId, wakeupId} -> {} | {state}
 与 `wakeups` 同一做法：注册为 shared，在 `host_key("loops")` 提供 dispatcher，原生 `Loops` 在类型键继续提供。按 Scheduler §12.6：
 
 ```text
-loops.start {sessionId, branchId?, prompt, everySeconds?} -> {loopId, branchId, state, round, nextAt?, lastRoundAt?, expiresAt, stoppedReason?, settledAt?}
+loops.start {sessionId, branchId?, prompt, everySeconds?} -> {loopId, branchId, state, round, prompt, nextAt?, lastRoundAt?, expiresAt, stoppedReason?, settledAt?}
 loops.next {sessionId, loopId, delaySeconds?} -> 同一记录形状
 loops.list {sessionId, branchId?} -> {loops: [记录…]}
 loops.stop {sessionId, loopId} -> 记录形状，未结算时另带 {settled: false}
@@ -388,11 +388,9 @@ providerService.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 5. 验证
 
-- `xtask check`：按 §2.3 验证当前 catalog，拒绝缺少 dispatcher 的公共 shared 名称。
-- `xtask graph`：catalog 的 `face` 列与真实装配一致；`catalog.md` 的 diff 作为评审材料。
+- 运行 `cargo run --locked -p xtask -- check`，按 §2.3 校验实际装配中的服务面。生成的 catalog 仅供本地查阅。
 - 每个服务：现有 flow 测试 + 一个 loopback session 的跨边界用例；不新增 mock-only 测试。
 - 数量：不改 `cargo test` 的总量要求；按受影响 crate 跑，最终 `cargo test --workspace --locked`。
-- 改装配后跑 `cargo run --locked -p xtask -- check` 与 `graph`。
 
 ## 6. 风险与开放问题
 
@@ -400,4 +398,4 @@ providerService.resolve({explicit?: ModelId, cwd?}) -> ModelSelection
 
 ## 7. 交付顺序
 
-[#1292](https://github.com/arcships/dim/issues/1292) 按 §3.2 的首批操作和各 owner 推进 §2.6 的迁移，包含 §3.1 的公共名称与私有装配边界。各实现批次随代码更新生成的 catalog 及自己负责的操作契约。
+[#1292](https://github.com/arcships/dim/issues/1292) 按 §3.2 的首批操作和各 owner 推进 §2.6 的迁移，包含 §3.1 的公共名称与私有装配边界。每批随代码更新对应 owner 的操作契约，并按 §5 验证。

@@ -142,12 +142,3 @@ the command builder.
 `progress_items_are_capped_and_count_what_they_leave_out`. Feature `testing`
 adds `shell_input::testing::hold_start`, which holds a run's command build open
 for the race flows; production builds have no hook.
-
-<!-- generated:plugin ShellInput — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:GuideEntries`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionLifecycle`、`S:SessionMethods`、`S:TreeCommands` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->

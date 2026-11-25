@@ -31,9 +31,6 @@ The external client protocol's `JsonValue` remains JSON-only and does not admit
 
 ## Available services
 
-The [generated catalog](architecture/rust-agent/generated/catalog.md) lists every name with its group,
-provider and the methods it serves to other languages. This table says which to use for what.
-
 | Need | Service and scope | Availability |
 | --- | --- | --- |
 | Persist a process plugin's own data | `pluginFiles`, process | Implemented when the host supplies an authorized product root and provisions parent directories; use its native transactions and lifecycle scope. |
@@ -581,7 +578,7 @@ export const sessionExample = definePlugin({
       'session.example',
       [{ name: 'session.example.echo', mutating: false, interruption: 'report', progress: true }],
       async (call, _cancelled, progress) => {
-        progress({ phase: 'started' });
+        await progress({ phase: 'started' });
         return { kind: 'value', value: call.params };
       },
     );
@@ -646,7 +643,23 @@ under the `hello`, `daemon`, `agent` or `approval` roots; an `apply` that awaits
 fails its part. The registration lasts until the part unloads, and `session.methods`
 lists the methods registered at that call. `call` is asynchronous and receives an
 opaque runtime `callId`, the method and original params containing `sessionId` and
-optional `branchId`; it also receives cancellation and a per-call progress callback.
+optional `branchId`; it also receives cancellation and a per-call progress callback. The callback
+returns a promise, and awaiting it is what keeps your notices in order: each call is a frame the host
+runs on its own task, so two calls without a wait between them can arrive in either order. Await it
+as well when a notice has to be queued before the method returns, because the reply closes the
+progress channel and drops a send that has not run yet.
+
+Awaiting that promise orders the host's send attempts; it does not acknowledge
+delivery to the client. The App Server's progress allowance is best effort: it
+drops progress a method does not declare, progress sent after it hands over the
+reply, and progress its connection cannot take, including after a disconnect,
+while the call itself still resolves. The rutis transfer limit is not: a call
+whose encoded frame exceeds the session's `max_transfer` fails with
+`bad-value`, and a call on a closed bridge fails too, so a progress call you do
+not await can reject. Attach `.catch(...)` to a detached call. A unit test that
+calls a `MethodHandler` or `SessionMethodHandler` directly must pass
+`async () => {}` as the progress callback; the type requires a promise.
+
 Return `{kind: 'value', value}`, return a failure as data, `{code, message}`, or
 rethrow the service error you received. An omitted value becomes JSON null. Rpc maps a failure to
 the wire error: `code` becomes `appError`, with JSON-RPC code -32602 for `invalid_params` and

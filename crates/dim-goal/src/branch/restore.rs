@@ -13,11 +13,22 @@ impl Owner {
     }
 
     /// Waits until the Dispatcher has delivered every fact committed at the
-    /// call. A decision taken after this wait sees an input or a turn that
-    /// committed before it, so the caller does not act on a stale fold (C4,
-    /// C5).
-    pub(super) async fn await_dispatched(&self) -> Result<(), AgentError> {
+    /// call and returns that cutoff. A decision taken after this wait sees an
+    /// input or a turn that committed before it, so the caller does not act on
+    /// a stale fold (C4, C5). A caller claiming a decision reads the cutoff
+    /// again under its lock: a fact committing while this wait runs leaves the
+    /// returned cutoff behind, and the claim catches up to the newer one before
+    /// it reads the fold.
+    pub(super) async fn await_dispatched(&self) -> Result<u64, AgentError> {
         let through = self.timeline.committed();
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
+            &self.branch_id,
+            crate::testing::Stage::Cutoff,
+            through,
+        )
+        .await;
         let mut dispatched = self.dispatcher.watch();
         while self.dispatcher.sequence() < through {
             if let Some(error) = self.dispatcher.failure() {
@@ -25,7 +36,33 @@ impl Owner {
             }
             tokio::select! {result=dispatched.changed()=>result.map_err(|_|AgentError::Closed("Goal".into()))?,_=self.stop.cancelled()=>return Err(AgentError::Closed("Goal".into()))}
         }
-        Ok(())
+        Ok(through)
+    }
+
+    /// Releases task admission and takes up what the settlement deferred: a
+    /// creation, an interrupt or a fold that reached `settle` while the
+    /// decisions were suspended ran no task, and no later input may be needed
+    /// for it (Pursuit §4.1, §13 E2).
+    pub(super) fn resume_settlement(self: &Arc<Self>) {
+        if let Some(interrupt) = self.release_settlement() {
+            self.interrupted(interrupt);
+        }
+    }
+
+    /// Releases task admission and returns the interrupt the settlement
+    /// deferred to the caller: `resume_settlement` takes it up, a caller whose
+    /// state write failed leaves it with the fold for a later settlement. That
+    /// caller's settlement waited for every task it cancelled to finish before
+    /// it wrote, so the decisions it cancelled decide nothing after this
+    /// release (Pursuit §4.1, §13 E2, #2119).
+    pub(super) fn release_settlement(self: &Arc<Self>) -> Option<u64> {
+        let interrupt = {
+            let mut state = self.state.lock().unwrap();
+            state.terminating = false;
+            state.fold.pending_interrupt()
+        };
+        self.settle();
+        interrupt
     }
 
     pub(super) fn resume_decisions(self: &Arc<Self>) {
@@ -59,6 +96,14 @@ impl Owner {
         loop {
             let through = self.timeline.committed();
             self.publication(through).await?;
+            #[cfg(feature = "testing")]
+            crate::testing::stage_held(
+                &self.session_id,
+                &self.branch_id,
+                crate::testing::Stage::Query,
+                through,
+            )
+            .await;
             let mut sets = Vec::with_capacity(2);
             for (origin, terminal, inner, outer) in [
                 (

@@ -4,7 +4,7 @@ Status: Draft.
 Scope: 既有 Goal Session/branch 部件的目标、命令、续行、模型输入和终止。
 Issue: [#1320](https://github.com/arcships/dim/issues/1320)。
 
-[业务状态与重载](Goal-state-read.md)唯一规定完整状态数据、内存与持久化边界、加载映射、原子提交、成本和验收。[读取与输入删除](Goal-property-queries.md)规定旧历史不恢复及输入删除不回滚的边界。本文规定 Goal 的入口、执行规则和模型协议；[Pursuit](Pursuit.md)规定 evaluator 判定方式。当前代码和生成装配图不因设计更新而宣称已实现目标。
+[业务状态与重载](Goal-state-read.md)唯一规定完整状态数据、内存与持久化边界、加载映射、原子提交、成本和验收。[读取与输入删除](Goal-property-queries.md)规定旧历史不恢复及输入删除不回滚的边界。本文规定 Goal 的入口、执行规则和模型协议；[Pursuit](Pursuit.md)规定 evaluator 判定方式。
 
 ## 1. Structure
 
@@ -37,10 +37,11 @@ Goal 有两个不同的对象：
 | clear | objective=null，state=none；终止当前 Goal。 |
 | goal_update completed / blocked | model judge 下完成/阻塞；evaluator judge 下 completed 只是本次执行的评估请求，状态保持 active。 |
 | evaluator 的有效 done / blocked | 完成/阻塞当前目标。 |
-| 中断、失败、取消、限额、无进展、评估失败、可控卸载 | 结束正在执行的 Goal，写 paused 和原因。 |
+| 中断、失败、取消、限额、无进展、评估失败 | 结束正在执行的 Goal，写 paused 和原因。 |
+| 可控卸载 | 先追平折叠：追得上才写 paused，追不平不写，由加载映射把运行中的 Goal 映射为内存 paused。 |
 | continuation、普通输入、任务和轮次变化 | 本实例内存变化，不写 Goal 状态事件。 |
 
-Goal 命令的模型状态输入与 trigger 仍紧邻，状态输入在前；结构化业务事件同批置后。状态只在提交成功且按序消费后可见；后一个命令等待先前本插件写入已消费，不能对旧目标组成下一条状态。设置和恢复的 Queue 输入仍驱动第一轮；evaluator 完成申请不产生假的目标状态变更。
+Goal 命令的模型状态输入与 trigger 仍紧邻，状态输入在前；结构化业务事件同批置后。状态只在提交成功且按序消费后可见；后一个命令等待先前本插件写入已消费，不能对旧目标组成下一条状态。自动状态记录只在折叠已追平分支的已提交截点、且它答复的事实仍然成立时写入：结算期间抵达的驱动输入、更新的轮次或中断让暂停不再成立，暂停就不写，交给随后那轮或该中断自己的暂停答复。状态记录或变更写失败时不接手它在结算期间搁置的 interrupt：那条暂停留在 fold 里，等之后的结算接手；这次结算取消掉的每个决定也不会再决定一次，因为结算在写入之前会等它取消掉的每个 task 收尾。结算期间折叠进来的 evaluator 结论或评估失败不被丢掉：走条件写入的变更在写下自己的记录之前，先把这些决定要写的状态记录写出来；它的记录只在最后一次 drain 看到的已提交截点仍然成立时提交，截点变了就重新 drain，因此不会在一条它必须先写出的已提交事实还没折进来时写自己的记录。evaluator 评估请求的创建路径没有这个截点检查：`Change::Report` 的 completed 且 judge 为 evaluator 时，记录与 trigger 同批经 `Branch::inputs` 提交，也不再 drain，那次 drain 之后折进来的结论不在这个保证之内。这些记录保留它们答复的事实：done 和 blocked 是终态，后台任务仍开着也照常写出（Pursuit §5 的后台等待只针对 continue）；某条记录 append 失败时，它和它之后还没写出的决定留在队列里，由之后的结算写出，或按已被更新事实取代丢掉。设置和恢复的 Queue 输入仍驱动第一轮；evaluator 完成申请不产生假的目标状态变更。
 
 ## 3. Flows
 
@@ -82,13 +83,13 @@ turn-scope stop/interrupt、执行失败或取消使正在运行的 Goal 停止�
 
 ### 4.1 Interrupt committed before the continuation (at most one extra turn)
 
-决定只使用已消费事实，写入前重查同一轮次和执行。中断与已经提交的 continuation 交错时，不抹去已提交事实；后续暂停阻止新续行。已经交接的工作允许按原交接规则完成结算，不为了保证零额外调用而改变 InputQueue/Loop。
+决定只使用已消费事实，写入前重查同一轮次和执行；续行只在决定时的已提交头部仍是当前头部时写入，头部变了就重新决定。中断与已经提交的 continuation 交错时，不抹去已提交事实；后续暂停阻止新续行。已经交接的工作允许按原交接规则完成结算，不为了保证零额外调用而改变 InputQueue/Loop。
 
 ### 4.2 Reload
 
 加载行为唯一见 [Goal 状态设计](Goal-state-read.md#4-get-与冷恢复)：最后 active 映射为内存 paused，不写回、不读取旧轮次和次数、不补答旧决定、不恢复旧评估。set/resume 才开始新执行。
 
-Session/branch 部件的可控关闭会结束其正在运行的 Goal 并写 paused；进程直接崩溃或存储不可写时无法保证终态提交，由加载映射覆盖这一情况。客户端 detach、重连和查询不关闭原实例。
+Session/branch 部件的可控关闭会结束其正在运行的 Goal：折叠追得上就写 paused；追不平就不写，由加载映射把运行中的 Goal 映射为内存 paused。进程直接崩溃或存储不可写时同样无法保证终态提交，由加载映射覆盖这一情况。客户端 detach、重连和查询不关闭原实例。
 
 ### 4.3 Other key rows
 
@@ -134,7 +135,7 @@ guide 和 active 文本不能把历史 active 解释为当前实例的运行授�
 | §4.3、§4.4 | 无 before I/O；核心不解释 Goal。 |
 | §4.5 | 业务状态和必要输入同批提交，Dispatcher 按序消费，任务写前重查。 |
 | §4.6 | 模型内容只经采用输入，不注入内存状态。 |
-| §4.7、§4.8 | 已声明的现有服务，无核心机制新增。 |
+| §4.7、§4.8 | 已声明的现有服务；唯一的核心机制新增是条件输入提交（§9）。 |
 | §4.9 | 业务状态及实际驱动输入持久化，执行进度不落盘。 |
 | ADR 002 D1 | Session 注册工具/方法；目标、执行和任务归 branch。 |
 | ADR 002 D2 | 不增加接线模块或全局隐式资源。 |
@@ -144,7 +145,7 @@ guide 和 active 文本不能把历史 active 解释为当前实例的运行授�
 
 ## 9. Requirements raised to mechanism owners
 
-无。Goal branch 使用已有 append_batch、Dispatcher、生命周期及属性查询。完整业务事件是扩展数据，不新增核心事件类型、查询字段或 native 格式版本。
+一个条件输入提交：输入入口接收作出决定时的已提交头部，在提交锁内核对，头部变了就不写入并答复调用方（#1989）。Goal 的续行是它的第一个消费者（§4.1、A.4 C4/C5）；状态记录、evaluate-again 和结论报告仍走原入口。其余使用已有的 append_batch、Dispatcher、生命周期及属性查询；完整业务事件是扩展数据，不新增核心事件类型、查询字段或 native 格式版本。
 
 ## 10. Implementation
 
@@ -234,7 +235,7 @@ active 协议文本与 guide 的变更必须用产品请求验证：重载后普
 | Consume | 只处理 S 后新事实。goal/state 改业务状态；普通输入/轮次/任务只更新本实例内存。 |
 | Write | Goal branch 经 timeline.append_batch 提交状态与必要输入；原 continuation 和评估操作走已声明服务。 |
 | Adoption | InputQueue 决定 applied/deleted，Loop 写 consumed；Goal 不代写。 |
-| Closing | 禁止新决定，取消/释放自有资源，运行中写 paused，再移除服务。 |
+| Closing | 禁止新决定，取消/释放自有资源，运行中先追平折叠再写 paused；追不平就不写，再移除服务。 |
 | Crash | 不能保证终态提交；下一次加载只在内存暂停。 |
 | Reconnect | 原实例仍活着则继续，不执行加载映射。 |
 

@@ -16,12 +16,20 @@ aimux 桥接层是唯一持有提供方结构化错误、并看得到完整响�
 | `quota_exhausted` | 402；条件码 `insufficient_quota`、`quota_exceeded`、`billing_error`、`credit_exhausted` | 否 | 账户没有配额了 | 检查套餐或计费 |
 | `not_found` | 404 | 否 | 提供方找不到模型或端点 | 检查模型和提供方 base URL |
 | `context_too_long` | 413；条件码 `context_length_exceeded`、`context_too_long` | 否 | 对话超过模型可接受的长度 | 压缩对话或新开会话 |
-| `content_filtered` | 条件码 `content_policy_violation`、`safety_block`、`moderation_block` | 否 | 提供方的内容过滤拦截了响应 | 改写请求 |
+| `content_filtered` | 条件码 `content_policy_violation`、`safety_block`、`moderation_block`；内容过滤的结束原因 | 否 | 提供方的内容过滤拦截了响应 | 改写请求 |
 | `invalid_request` | 传输层本地拒绝；400、409、422、501、505、其他 4xx；类别标签 `invalid_request_error`；条件码 `max_tokens_exceeded`；`InvalidArgument`、`InvalidPrompt`、`UnsupportedFunctionality` | 否 | 请求被拒绝 | 查看详情 |
 | `output_limit` | `max_tokens` 停止 | 否 | 模型达到输出上限 | 提高输出 token 上限后重试 |
-| `unknown` | 其他 | 否 | 模型请求失败 | 查看详情 |
+| `unknown` | 其他，包括提供方的生成错误和无法识别的结束原因 | 否 | 模型请求失败 | 查看详情 |
 
 HTTP 连接或流的超时以传输 `ApiCall` 到达桥接层，是 `network`。`AiMuxError::Timeout` 在聊天调用中没有产生者；若它到达桥接层，是 `unknown`，且不重试。
+
+状态表里列出的状态若由流事件在自身的 `code` 里写成 JSON 整数或恰好三位的十进制数字字符串，决定的 kind 与它作为响应状态时相同：`502` 或 `504` 是 `server_error`，`429` 是 `rate_limited`，`401` 或 `403` 是 `auth_rejected`，其余照状态表。
+
+桥接层自己也给几段等待设上限：连续五分钟没有任何事件是 `network`，reason 为 `the stream delivered nothing for 300 seconds`。这个上限按每次等待计，不按整个请求计，所以持续有事件的回复不会被截断；上限到点时它优先于同时就绪的事件，取消请求又优先于两者。事件有生产者上报时刻的等待按那个时刻判定：传输层上报它产生响应头的时刻，所以在上限内写下的响应头，即使 driver 之后再 poll 也算按时；超过上限写下的响应头，即使在这个上限的计时器触发之前被读到，也算迟到。没有这种时刻的等待（provider 返回流、两个流分片之间）仍以上限优先。
+
+带上限的等待有三段。等响应头从发出请求开始计，发送请求体和跟随重定向都算在内，reason 为 `no response headers arrived within 300 seconds of sending the request`。等流启动从传输层产生响应头时开始计。先读一个流事件再返回流的 provider（OpenAI Chat、Anthropic、Gemini、xAI Responses），reason 为 `the response headers arrived, but no stream event followed within 300 seconds`。OpenAI Responses 的 provider 固定版本的 SDK 在返回流之前会读取响应元数据，它的 reason 为 `the response headers arrived, but the stream did not start within 300 seconds`：这段等待结束于流的启动，而不是 driver 看得到的事件。OpenAI 兼容和 Bedrock 的 provider 在响应头处就返回，它们的第一个事件落在两次事件之间的等待里，reason 为 `the stream delivered nothing for 300 seconds`。非 2xx 响应另算：它的响应体是短的诊断信息，读取单独有总计五分钟的上限，卡住的错误体不能拖住请求，请求仍然按 HTTP 状态和该状态对应的类别失败，而不是变成空闲的网络失败。连接原来可选的整请求超时不变，和这几段上限是两件事。
+
+只有解码出的流事件才续上两次事件之间的等待。提供方的解析器在事件到达桥接层之前就丢掉了 SSE 注释和 Anthropic 的 `ping` 事件，所以只靠 keep-alive 保活的连接仍然会在没有事件五分钟后失败。
 
 code 比较前先 trim 并转 ASCII 小写。
 
@@ -32,6 +40,8 @@ code 比较前先 trim 并转 ASCII 小写。
 - **条件码**（condition code）描述状态本身无法表达的特定条件：`insufficient_quota`、`context_length_exceeded`、`rate_limit_exceeded`、`engine_overloaded`、`invalid_api_key`、`content_policy_violation`、`max_tokens_exceeded`。这是状态不携带的信息，所以由它决定。
 - **类别标签**（class label）只重述一个 HTTP 类别：`api_error`、`server_error`、`invalid_request_error`、`authentication_error`。网关或中转会把这类标签加在它转发的错误上，无论状态是什么。响应带错误状态时，标签只能与之一致或相悖；相悖时，状态才是事实。
 
+流事件在自身的 `code` 里写成 JSON 整数或恰好三位的十进制数字字符串的三位数字状态同样是类别标签，由上面的状态表说明它属于哪一类：事件报告的是它实际遇到的失败，而 aimux 把事件映射成的状态只是它自己的判断，从不作为事实采用。其他字段里的三位数字或三位数字字符串，比如 `type` 或适配器给出的 provider code，只是不透明标签：它只按上面列出的条件码和类别标签参与判断，从不作为状态读取。
+
 ### 规则
 
 origin 为 Transport、没有响应状态或响应头且传输层标为不可重试的失败属于本地拒绝（`invalid_request`），例如序列化后的请求体超出字节上限。其他失败按同一规则处理：
@@ -39,12 +49,12 @@ origin 为 Transport、没有响应状态或响应头且传输层标为不可重
 1. 条件码决定，不重试的条件码优先于重试的，因此 `insufficient_quota` 与 `rate_limit_error` 同时出现时是 `quota_exhausted`；
 2. 否则 origin 为 Transport 的失败是 `network`；
 3. 否则由响应上的错误状态（4xx 或 5xx）决定，按上表；
-4. 否则由类别标签决定，实际上只发生在流事件上；
+4. 否则由类别标签决定，实际上只发生在流事件上：事件在自身 `code` 里写成的状态（整数或三位数字字符串），或提供方给出的命名标签；
 5. 否则 kind 为 `unknown`。
 
 4xx、5xx 以外的状态不是错误状态，不说明失败的 kind，第 3 步跳过它，交由类别标签决定。2xx 到达桥接层的情形：成功响应体过大或解析失败，或提供方在 2xx 响应体内报告了错误；3xx 的情形：无法跟随的重定向。
 
-流事件的状态是提供方对事件自身字符串的映射，不是响应状态：事件带显式 4xx 或 5xx 时用它，否则 aimux 由事件的 code 与 type 猜测，提供方什么都匹配不上时得到 500。Dim 无法区分显式状态与猜测值，因此流事件跳过第 3 步，由第 1、4 步决定；读那个状态会把每个无法识别的事件变成可重试的 `server_error`。501 和 505 是 `invalid_request` 出自第 3 步的状态表，不是本规则的例外；同时出现的条件码仍然决定。规则带来两处 kind 变化：只带服务器类别标签的 4xx 不再重试；带 `invalid_request_error` 的 5xx 成为 `server_error` 并被重试。
+流事件的状态是提供方对事件自身字符串的映射，不是响应状态：事件带显式 4xx 或 5xx 时用它，否则 aimux 由事件的 code 与 type 猜测，提供方什么都匹配不上时得到 500。Dim 无法区分显式状态与猜测值，因此流事件跳过第 3 步，由第 1、4 步决定；读那个状态会把每个无法识别的事件变成可重试的 `server_error`。事件在自身 `code` 里写成的三位数字整数或恰好三位的十进制数字字符串作为类别标签决定，400 到 599 以外的值不决定任何 kind；`type` 或 provider code 里的三位数字不是状态。501 和 505 是 `invalid_request` 出自第 3 步的状态表，不是本规则的例外；同时出现的条件码仍然决定。规则带来两处 kind 变化：只带服务器类别标签的 4xx 不再重试；带 `invalid_request_error` 的 5xx 成为 `server_error` 并被重试。
 
 桥接层产生的每个 `HostError::Failed` 都带事实，包括 `AiMuxError::Timeout`、`InvalidResponseData`/`JsonParse`、`InvalidArgument`/`InvalidPrompt` 和 `UnsupportedFunctionality`。
 
@@ -65,19 +75,23 @@ ModelFailure {
   attempts,         // 至少 1
   waitedMs,         // 退避等待总时长
   retryForbidden?,  // 仅当失败策略禁止重试时为 true
-  retryAfterMs?     // 提供方要求的等待超过剩余预算，因此停止
+  retryAfterMs?,    // 提供方要求的等待超过剩余预算，因此停止
+  retried?,         // 仅当这次重试替换了同一请求更早的一次尝试时为 true
+  thinkingPartId?   // 最终尝试公开过而未闭合的 thinking 块
 }
 ```
 
 - `failure` 可选。旧事件里不存在；不属于模型提供方调用的失败也没有：agent loop 在重载时对未结算调用的失败（`agent_loop.rs`）和上下文准备失败（`context_preparation.rs`）。字段的大小写和 `optional_non_null` 处理与 `presentation` 一致。
 - `retryForbidden` 仅在为 true 时存在。ModelProvider 在失败策略禁止重试结束该请求的失败时写入它；续接会拒绝它，因此该禁止覆盖续接。
+- `retried` 仅在为 true 时存在：重试替换了同一请求更早的一次尝试。`thinkingPartId` 只与它一起写入，指向最终尝试公开过、尚未闭合的 thinking 块。客户端按 progress 显示的思考行在标识相等时保留，不等时随被替换的尝试一起丢弃；两次尝试之间的空 progress 被合并掉时，终态事实是唯一能观察到这条界线的地方。`attempts` 也统计失败链的尝试次数，不能用来判断原地重试。
 - `reason`：响应或流事件失败取提供方的错误消息；传输失败取原因链最内层。以空回复完成的请求背后没有提供方错误，其 `reason` 是该规则写明的固定句子，不引用任何响应内容。JSON 解析的消息内嵌了它读不懂的响应体文本，因此其 `reason` 取错误结构中的解析诊断；错误没有 cause 时为空。工具失败从 `tool_name` 字段命名：`invalid arguments for tool '<tool_name>'` 或 `the model called an unknown tool '<tool_name>'`。`TypeValidation` 不带 reason，因为它的消息内嵌了被校验的值。工具输入、可用工具列表和被校验的值从不存储。
 - `cause`：来自 `ApiCallError.message` 和 `ErrorCause` 的链，由外到内，每帧一行。`providerCode` 和 `requestId` 是单行且有界，最多 200 字符；为空则不存在。
 - 从不存储：请求 URL、请求头、请求值、响应体或任何凭据。aimux 已丢弃 URL；桥接层不得复制 `url`、`request_body_values` 或 `response_body`，`reason` 和原因帧只是去除了控制字符的文本。
 - 旧客户端读取的 `error` 是默认英文行 `<meaning>: <reason>. <action>`，没有 reason 时省略 `: <reason>`。传输层在本地拒绝请求且有 reason 时，只使用该 reason，不将拒绝归因于提供方。不再有 `ApiCall:` 前缀。当该失败使其 turn 结算为 Failed 时，该回合在 `TurnOutcome::Failed.error` 中携带同一字符串，客户端据此可以区分两者并去掉重复。不使 turn 失败的失败（例如输出上限停止）不在 turn 的结果中携带任何内容。
 - `max_tokens` 停止保留其 presentation，同时写入 `failure.kind = output_limit`。它不使 turn 失败：Loop 以 `output_limit` 为 reason 把该 turn 结算为 Completed（见 Loop.md「声明了调用却从未执行的失败步骤」一节）。
-- 工具参数始终没有完成时写入 `failure.kind = malformed_response`，与 `InvalidToolInput` 对同一缺陷的 kind 相同。
-- 以 end-turn 停止、既没有非空白文本也没有工具调用的回复写入 `failure.kind = malformed_response`，原因为 "the response had no text and no tool call"。只有 thinking 不算回答，所以只带 thinking 的回复同样算空回复。该判断落在桥接层流结束处，因为只有它看得到完整响应。是否重试取决于这次尝试交出了什么：只交出过消息开始的，与任何 `malformed_response` 一样重试一次；一旦交出过别的任何东西，包括只有空白的正文片段，就过了可重试的界线（`output.rs` 除消息开始外每个片段都清除 replay safety），因此 turn 带着已记录并展示的失败结束，由用户重新发送。重试在任何情况下都不能跟在已提交的输出之后：请求已提交的内容必须与下一份完整回复一致，thinking 也算在内（`output.rs`），而第二次尝试会带来它自己的 thinking。该规则适用于每个 turn，包括 Loop 与 Goal 的驱动 turn：空回复在那里同样不是一个有效步骤。
+- 工具参数始终没有完成时写入 `failure.kind = malformed_response`，与 `InvalidToolInput` 对同一缺陷的 kind 相同。例外是流在被中断的调用之后报出的内容过滤：已知的过滤结局优先，因此该回复写入 `content_filtered`，已开始的调用按失败关闭，而不是被宣告成工具调用。流若此后不再送出该终止项，仍写入 `malformed_response`。每个请求都开启 strict 流，它把每个客户端调用留到 finish 部分、在终止项之前紧挨着交出，所以即使适配器把两者放在不同事件里（例如 Responses 适配器），桥接层在失败调用之后的下一次读取就能读到终止项。桥接层在那里只读流已经送达的部分，因此失败不会等待可能永远不来的部分。
+- 以 end-turn 停止、既没有非空白文本也没有工具调用的回复写入 `failure.kind = malformed_response`，原因为 "the response had no text and no tool call"。只有 thinking 不算回答，所以只带 thinking 的回复同样算空回复。该判断落在桥接层流结束处，因为只有它看得到完整响应。是否重试取决于这次尝试提交了什么：尚未向 Timeline 提交任何事件时，已分类的断流与任何 `malformed_response` 一样重试一次，失败尝试的 progress 在重试开始前被丢弃，由下一次尝试替代；一旦提交过任何事件，包括只有空白的正文片段或 usage 事实，就过了可重试的界线（`output.rs` 在该次尝试提交事件时清除 replay safety），因此 turn 带着已记录并展示的失败结束，由用户重新发送。断流时会先结算缓冲的正文：已经显示到屏幕上的正文在失败时被提交，不会由重试替代；最后一次 flush 的 Timeline 写入失败是本地写失败，turn 不再重试，也不伪装成提供方的断流。已收到但未提交的 thinking 不是事实，不会阻止重试；它尚未公开时也不是对外可见输出，Steer 仍可替换该请求，重试则从空白开始，由每个客户端重置被替换尝试显示过的内容。只有重试会重新打开请求：终态失败保留该次尝试已经显示的输出，失败流排空期间到达的输入不能替换它，turn 以提供方的失败结束。未分类的流结束不带失败事实，也不会重试；把流结束分类为断流是 driver 的职责。重试在任何情况下都不能跟在已提交的输出之后：请求已提交的内容必须与下一份完整回复一致，thinking 也算在内（`output.rs`），而第二次尝试会带来它自己的 thinking。该规则适用于每个 turn，包括 Loop 与 Goal 的驱动 turn：空回复在那里同样不是一个有效步骤。
+- 被结束原因判为失败的回复同样没有提供方错误，其 `reason` 是固定句子，不引用任何响应内容。内容过滤是 `content_filtered`，原因为 "the stream ended on a content-filter finish reason"；提供方的生成错误和无法识别的结束原因都是 `unknown`，原因分别为 "the provider reported a generation error" 和 "the stream ended on an unsupported finish reason"。kind 决定是否续接：`unknown` 是新请求能结算的 kind，`content_filtered` 不是。
 - 没有提供方边界的宿主机失败得到 kind `unknown` 和它原本携带的消息。
 
 ## 3. 谁来措辞
@@ -96,7 +110,7 @@ CLI 的 line 模式与 `exec` 只打印这一行。TUI 与 Web 把细节放在�
 
 ## 4. 重试
 
-`invoke` 由 ModelProvider、辅助模型和摘要策略共用，因此只有一份策略，也没有按调用方设置的配置，但结果并不总是相同：replay safety 由消费方自己清除，而辅助模型与摘要策略只是读取流、不交出任何片段，所以只流出 thinking 或空白正文的回复在它们那里会被重试，在主 turn 里不会。
+`invoke` 由 ModelProvider、辅助模型和摘要策略共用，因此只有一份策略，也没有按调用方设置的配置，但结果并不总是相同：replay safety 由消费方自己清除，而辅助模型与摘要策略只是读取流、不提交任何事件，所以收到输出之后失败在它们那里会被重试，在主 turn 里则要等到这次尝试提交过后才不重试。
 
 | 项 | 值 |
 | --- | --- |
@@ -106,7 +120,7 @@ CLI 的 line 模式与 `exec` 只打印这一行。TUI 与 Web 把细节放在�
 | 退避 | 第 n 次重试等待 1 秒 × 2^(n−1)，上限 30 秒，再乘以 [0.8, 1.0] 的均匀抖动 |
 | `Retry-After` | 在剩余预算内时原样用作延迟，即使超过 30 秒；放不下时立即停止并记录 `retryAfterMs` |
 | 等待预算 | 一个请求在失败前合计最多睡眠五分钟；放不进剩余预算的等待会让请求立即停止 |
-| 保持不变 | 一旦该次尝试交出了消息开始以外的任何东西（thinking 与空白正文都算）就不再重试；中断取消等待；凭据恢复一次且无延迟，仍计入 8 次上限；`ModelFailurePolicy::forbids_retry`；终止性凭据拒绝会被结清 |
+| 保持不变 | 一旦该次尝试向 Timeline 提交过事件（空白正文片段与 usage 事实都算）就不再重试；已收到未提交的 progress（thinking 也算）不阻止重试，并在重试前被丢弃；中断取消等待；凭据恢复一次且无延迟，仍计入 8 次上限；`ModelFailurePolicy::forbids_retry`；终止性凭据拒绝会被结清 |
 
 名义退避为 1、2、4、8、16、30、30 秒，合计约 91 秒。这些数字来自 #1197 的故障，它持续了数十秒：8 次尝试可撑过约 90 秒；1 秒基数避免亚秒级的尝试再次撞上同一故障；30 秒上限让最后几次尝试不会相隔数分钟；服务端自己的建议决定等待时长，但不能延长预算。一个请求在失败前合计最多可等待五分钟；被拒绝的凭据恢复从不等待，无论它携带了什么建议。
 
@@ -122,4 +136,4 @@ ModelProvider 在调用携带失败链的请求时执行共享的尝试次数和
 
 字段是增量的。没有 `failure` 的二进制无法解码带它的事件，因为 `ModelOutputOutcome` 拒绝未知字段。这与 `presentation` 的前向兼容限制相同，因此跨此变更的降级不受支持，正如它此前对 `presentation` 也不受支持。
 
-同一决定覆盖续接字段、重试禁止与 handover 输入。`ContextPrepareData` 与 `ModelCallData` 上可选的 `failure_chain`、`InputMessageData` 上可选的 `handover`，以及 `ModelFailure` 上可选的 `retryForbidden` 都是增量的；没有它们的二进制无法读取携带它们的事件，因此跨此变更的降级不受支持。每个新增都在契约测试中登记该决定及其兼容用例；冻结样本保持不变。
+同一决定覆盖续接字段、重试禁止、重试边界与 handover 输入。`ContextPrepareData` 与 `ModelCallData` 上可选的 `failure_chain`、`InputMessageData` 上可选的 `handover`，以及 `ModelFailure` 上可选的 `retryForbidden`、`retried` 与 `thinkingPartId` 都是增量的；没有它们的二进制无法读取携带它们的事件，因此跨此变更的降级不受支持。每个新增都在契约测试中登记该决定及其兼容用例；冻结样本保持不变。

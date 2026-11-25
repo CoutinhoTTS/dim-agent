@@ -123,6 +123,8 @@ function readModelFailure(value: unknown, at: string): ModelFailure | undefined 
   const requestId = optStr(source, "requestId", at)
   const reason = optStr(source, "reason", at)
   const retryAfterMs = source.retryAfterMs === undefined || source.retryAfterMs === null ? undefined : num(source, "retryAfterMs", at)
+  const retried = source.retried === undefined || source.retried === null ? undefined : bool(source, "retried", at)
+  const thinkingPartId = optStr(source, "thinkingPartId", at)
   const cause = source.cause === undefined || source.cause === null ? [] : arr(source.cause, `${at}.cause`).map((frame, index) => {
     if (typeof frame !== "string") fail(`${at}.cause[${index}]`, "a string")
     return frame
@@ -137,6 +139,8 @@ function readModelFailure(value: unknown, at: string): ModelFailure | undefined 
     attempts: num(source, "attempts", at),
     waitedMs: num(source, "waitedMs", at),
     ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    ...(retried === undefined ? {} : { retried }),
+    ...(thinkingPartId === undefined ? {} : { thinkingPartId }),
   }
 }
 
@@ -303,6 +307,20 @@ export function readDisplayHistory(value: unknown): HistoryPage {
 export function readModelUpdate(value: unknown): ModelUpdateResult {
   const source = obj(value, "session.model.update")
   return { model: modelId(source.model, "session.model.update.model"), outcome: str(source, "outcome", "session.model.update") }
+}
+
+/** `session.model.get`: one line's adopted configuration at that line's own committed cutoff (design §14). */
+export type AdoptedConfiguration = { branchId: string; through: number; configuration?: { model: ModelId } }
+
+export function readAdoptedConfiguration(value: unknown): AdoptedConfiguration {
+  const at = "session.model.get"
+  const source = obj(value, at)
+  const configuration = source.configuration === undefined || source.configuration === null ? undefined : obj(source.configuration, `${at}.configuration`)
+  return {
+    branchId: str(source, "branchId", at),
+    through: num(source, "through", at),
+    ...(configuration === undefined ? {} : { configuration: { model: modelId(configuration.model, `${at}.configuration.model`) } }),
+  }
 }
 
 /** A permission preset as the server names it; anything else is a protocol error. */
@@ -694,16 +712,19 @@ function content(type: string, name: string, data: Json, at: string): EventConte
         }),
       }
     case "step/model-output-end": {
-      const failed = str(data, "status", at) === "failed"
+      const status = str(data, "status", at)
+      const failed = status === "failed"
       const error = failed ? str(data, "error", at) : undefined
       const presentation = failed ? readPresentation(data.presentation, `${at}.presentation`) : undefined
       const failure = failed ? readModelFailure(data.failure, `${at}.failure`) : undefined
+      const cancelled = status === "cancelled" ? str(data, "reason", at) : undefined
       return {
         kind: "model-end",
         requestId: str(data, "request_id", at),
         ...(error === undefined ? {} : { error }),
         ...(presentation === undefined ? {} : { presentation }),
         ...(failure === undefined ? {} : { failure }),
+        ...(cancelled === undefined ? {} : { cancelled }),
       }
     }
     case "context/configured":
@@ -848,6 +869,7 @@ export function readNotification(method: string, value: unknown): Notification |
       }
     case "session.model.progress": {
       const requestId = optStr(params, "requestId", method)
+      const thinkingPartId = optStr(params, "thinkingPartId", method)
       const retry = readRetryProgress(params.retry, `${method}.retry`)
       const thinkingStartedAt = optNum(params, "thinkingStartedAt", method)
       return {
@@ -856,6 +878,7 @@ export function readNotification(method: string, value: unknown): Notification |
           sessionId: str(params, "sessionId", method),
           branchId: str(params, "branchId", method),
           ...(requestId === undefined ? {} : { requestId }),
+          ...(thinkingPartId === undefined ? {} : { thinkingPartId }),
           text: str(params, "text", method),
           textOffset: num(params, "textOffset", method),
           thinking: str(params, "thinking", method),
@@ -981,8 +1004,19 @@ export function readBranchEntry(value: unknown): BranchEntry {
   }
 }
 
-export function readBranches(value: unknown): BranchEntry[] {
-  return arr(obj(value, "session.branches").branches, "session.branches.branches").map(readBranchEntry)
+export type BranchDirectory = { branches: BranchEntry[]; defaultBranchId: string }
+
+export function readBranches(value: unknown): BranchDirectory {
+  const at = "session.branches"
+  const source = obj(value, at)
+  // A server that predates `session.branch_set_default` reports no line the
+  // conversation is on, and such a Session is on its root (design §4).
+  const defaultBranchId = source.defaultBranchId === undefined || source.defaultBranchId === null ? ROOT_BRANCH_ID : str(source, "defaultBranchId", at)
+  return { branches: arr(source.branches, `${at}.branches`).map(readBranchEntry), defaultBranchId }
+}
+
+export function readDefaultBranch(value: unknown): string {
+  return str(obj(value, "session.branch_set_default"), "defaultBranchId", "session.branch_set_default")
 }
 
 export function readBranchDetail(value: unknown): BranchEntry {

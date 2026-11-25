@@ -74,17 +74,17 @@ dependencies = [
 
 [[package]]
 name = "aimux-core"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afa641cecf2a70d9cd1e96eaf0aae4c7af4da15dbd7fb0b58f0c9f52379d0aa5"
+checksum = "0460e414dd98abf5a4f6883e313d907d8c8bb4cd36826ce0565a392b1cd62cdc"
 dependencies = [
  "async-stream",
  "async-trait",
  "base64 0.22.1",
- "chrono",
  "futures",
  "httpdate",
  "indexmap 2.14.1",
+ "jiff",
  "jsonschema",
  "rand 0.8.8",
  "regex",
@@ -101,9 +101,9 @@ dependencies = [
 
 [[package]]
 name = "aimux-provider-utils"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "902e4842e25b4e6b07dcd7ba5fe9a7e5a8caee52edc7512e3e6032e88b6d1441"
+checksum = "3dfc9f79e7792a011b7fdf8e273089c685a48f3eeee7f8a29152668bc9323817"
 dependencies = [
  "aimux-core",
  "aimux-stream",
@@ -111,12 +111,12 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
- "chrono",
  "futures",
  "hex",
  "hmac",
  "http",
  "indexmap 2.14.1",
+ "jiff",
  "reqwest 0.12.28",
  "rustls",
  "schemars 1.2.2",
@@ -134,9 +134,9 @@ dependencies = [
 
 [[package]]
 name = "aimux-providers"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e83a12b55088392e9963dcd7410ae129e54be0369fef0e89e371f30efed771e"
+checksum = "0f7fcb84629b94c6c035297a6e163f85d1bad46cdf6bed2a7f481f8418437fbc"
 dependencies = [
  "aimux-core",
  "aimux-provider-utils",
@@ -145,9 +145,9 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "bytes",
- "chrono",
  "futures",
  "indexmap 2.14.1",
+ "jiff",
  "percent-encoding",
  "regex",
  "reqwest 0.12.28",
@@ -162,9 +162,9 @@ dependencies = [
 
 [[package]]
 name = "aimux-stream"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70177c3581792eec565226f4275b808f569c663884d8cc02d777ef077386e593"
+checksum = "7949cba0110ac681c285658a1e1648550b9cc1db75fc249e7f4586a492f4a4d4"
 dependencies = [
  "bytes",
  "futures",
@@ -229,6 +229,12 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
+
+[[package]]
+name = "arrayvec"
+version = "0.7.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "assert-json-diff"
@@ -1001,7 +1007,7 @@ dependencies = [
 
 [[package]]
 name = "dim-acp"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "agent-client-protocol",
  "base64 0.22.1",
@@ -1020,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-aimux"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aimux-core",
  "aimux-provider-utils",
@@ -1049,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-attachments"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "base64 0.22.1",
  "dim-agent-capabilities",
@@ -1065,7 +1071,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-capabilities"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "base64 0.23.1",
  "dim-agent-capabilities",
@@ -1100,7 +1106,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-integration-tests"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
@@ -1119,7 +1125,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-questions"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
@@ -1134,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-runtime"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
@@ -1154,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "dim-agent-scheduler"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "croner",
  "dim-agent-capabilities",
@@ -1188,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "dim-app-server"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "async-trait",
  "axum",
@@ -1218,6 +1224,7 @@ dependencies = [
  "regex",
  "reqwest 0.12.28",
  "reqwest 0.13.5",
+ "ring",
  "rmcp",
  "rusqlite",
  "rustls",
@@ -1233,6 +1240,7 @@ dependencies = [
  "tar",
  "tempfile",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.29.0",
@@ -1249,7 +1257,7 @@ dependencies = [
 
 [[package]]
 name = "dim-cli"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "anstyle",
  "base64 0.22.1",
@@ -1291,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "dim-client"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-types",
  "libc",
@@ -1304,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "dim-codemode"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-questions",
@@ -1323,7 +1331,7 @@ dependencies = [
 
 [[package]]
 name = "dim-event-hub"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",
@@ -1350,7 +1358,7 @@ dependencies = [
 
 [[package]]
 name = "dim-goal"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-aimux",
  "dim-agent-capabilities",
@@ -1373,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "dim-image-understanding"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "base64 0.22.1",
  "dim-agent-capabilities",
@@ -1392,7 +1400,7 @@ dependencies = [
 
 [[package]]
 name = "dim-migration"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "base64 0.23.1",
  "crossterm",
@@ -1421,7 +1429,7 @@ dependencies = [
 
 [[package]]
 name = "dim-modality"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "base64 0.22.1",
  "dim-agent-capabilities",
@@ -1447,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "dim-modality-aimux"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "aimux-core",
  "aimux-provider-utils",
@@ -1480,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "dim-oauth"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -1488,6 +1496,7 @@ dependencies = [
  "dim-agent-runtime",
  "dim-agent-types",
  "dim-app-server",
+ "dim-client",
  "dim-session-title",
  "getrandom 0.3.4",
  "regex",
@@ -1507,7 +1516,7 @@ dependencies = [
 
 [[package]]
 name = "dim-ocr"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "libc",
  "objc2",
@@ -1524,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "dim-report"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "base64 0.22.1",
  "dim-agent-capabilities",
@@ -1549,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "dim-session-title"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "axum",
  "dim-agent-aimux",
@@ -1574,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "dimcode"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "agent-client-protocol-schema",
  "base64 0.22.1",
@@ -1608,6 +1617,7 @@ dependencies = [
  "tokio-util",
  "url",
  "uuid",
+ "vt100",
 ]
 
 [[package]]
@@ -1861,9 +1871,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -4962,7 +4972,7 @@ dependencies = [
 
 [[package]]
 name = "test-extension-a"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-runtime",
  "rutis",
@@ -4970,7 +4980,7 @@ dependencies = [
 
 [[package]]
 name = "test-extension-b"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-runtime",
  "rutis",
@@ -5497,9 +5507,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -5571,6 +5581,39 @@ name = "vsimd"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
+
+[[package]]
+name = "vt100"
+version = "0.15.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "84cd863bf0db7e392ba3bd04994be3473491b31e66340672af5d11943c6274de"
+dependencies = [
+ "itoa",
+ "log",
+ "unicode-width 0.1.14",
+ "vte",
+]
+
+[[package]]
+name = "vte"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5022b5fbf9407086c180e9557be968742d839e68346af7792b8592489732197"
+dependencies = [
+ "arrayvec",
+ "utf8parse",
+ "vte_generate_state_changes",
+]
+
+[[package]]
+name = "vte_generate_state_changes"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e369bee1b05d510a7b4ed645f5faa90619e05437111783ea5848f28d97d3c2e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
 
 [[package]]
 name = "walkdir"
@@ -6034,7 +6077,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "axum",
  "dim-agent-aimux",
@@ -6067,7 +6110,7 @@ dependencies = [
 
 [[package]]
 name = "xtask-check"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "proc-macro2",
  "rutis-types",

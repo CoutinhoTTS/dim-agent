@@ -124,6 +124,17 @@ async fn wait_evaluated(env: &Env, branch: &str, evaluation: u64) -> Block {
     .expect("an evaluated continuation")
 }
 
+/// The evaluated continuations of `evaluation` on `main`, as markers with
+/// their sequences.
+async fn evaluated_writes(env: &Env, evaluation: u64) -> Vec<String> {
+    writes_with(env, "main", &format!(r#"evaluation="{evaluation}""#))
+        .await
+        .into_iter()
+        .filter(|block| block.marker.contains(r#"kind="continuation""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect()
+}
+
 /// The pending inputs of `branch`, as string slices for a turn.
 async fn pending_refs(env: &Env, branch: &str) -> Vec<String> {
     env.pending_inputs(branch).await
@@ -632,6 +643,424 @@ async fn pursuit_13_e2_a_superseded_evaluation_ends_its_evaluator() {
     env.close().await;
 }
 
+/// The pause an evaluated continuation decides is stated at the fold the record
+/// writer composes from: a Queue that commits in the settlement window is still
+/// pending there, so the pause waits for that Queue's own turn end (#2119,
+/// Pursuit §4.1, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pursuit_5_a_queue_committed_before_the_evaluated_pause_holds_it() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // The limit is reached, so the conclusion decides a pause. Its record
+    // writer is held where it settles the decisions and composes the record.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- one test fails: <output>",
+    );
+    assert_eq!(
+        held.arrived().await,
+        conclusion,
+        "the pause's record writer answers the conclusion at {conclusion}"
+    );
+
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    assert!(
+        queued.sequence > conclusion,
+        "the Queue at {} commits after the conclusion at {conclusion}",
+        queued.sequence
+    );
+    env.dispatched("main", queued.sequence).await;
+    held.release();
+
+    let end = env.turn_ids("main", &[&queued.id]);
+    env.dispatched("main", end.sequence).await;
+    let stale = tokio::time::timeout(Duration::from_millis(750), async {
+        loop {
+            let stale: Vec<String> = env
+                .settled("main")
+                .await
+                .iter()
+                .filter(|block| {
+                    block.marker.contains(r#"kind="state""#)
+                        && block.marker.contains(r#"status="paused""#)
+                        && block.marker.contains(&format!(r#"after="{conclusion}""#))
+                })
+                .map(|block| format!("{} at {}", block.marker, block.sequence))
+                .collect();
+            if !stale.is_empty() {
+                return stale;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        stale.is_err(),
+        "the conclusion at {conclusion} writes no pause once the Queue at {} is pending in the fold, yet it wrote {:?}",
+        queued.sequence,
+        stale.unwrap_or_default()
+    );
+
+    let pause = env.wait_for("main", r#"reason="limit""#).await;
+    assert_eq!(
+        pause.text,
+        texts::evaluated_pause(
+            "main",
+            "ship it",
+            "limit",
+            "the automatic continuation limit was reached",
+            end.sequence
+        ),
+        "the Queue's own turn end decides the pause"
+    );
+    env.close().await;
+}
+
+/// An evaluator's end that folds after the pause that settled it was abandoned
+/// does not pause the goal: the evaluation was ended for that pause, not by its
+/// own failure, and the Queue's turn decides (#2119, Pursuit §4.1, C4, C5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pursuit_5_an_abandoned_pause_does_not_fail_an_in_flight_evaluation() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // A Queue drives a turn on the goal's branch, and its end decides the
+    // limit pause. The pause's record writer is held where it settled the
+    // decisions: the settlement ended the in-flight evaluator.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    let end = env.turn_ids("main", &[&queued.id]);
+    assert_eq!(
+        held.arrived().await,
+        end.sequence,
+        "the pause's record writer answers the turn end at {}",
+        end.sequence
+    );
+
+    // Another driving input commits in the settlement window: the pause is
+    // abandoned, and the evaluator's end folds after it.
+    let second = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    env.dispatched("main", second.sequence).await;
+    held.release();
+    // The settlement's own end is delivered while the record still holds its
+    // decisions, so that handler is dropped. The race this case states is the
+    // same end folding after the record, which the case writes here.
+    let outside = env.emit(
+        "main",
+        EventKind::BranchEnded(BranchEndedData {
+            branch: create.branch.clone(),
+            end_event: 0,
+            source: BranchSource::Host {
+                operation_id: "user".into(),
+            },
+            ancestor: None,
+        }),
+    );
+    env.dispatched("main", outside.sequence).await;
+
+    // The Queue's own turn end decides the pause the abandoned record left
+    // open; the evaluator's end states nothing over it.
+    let next = env.turn_ids("main", &[&second.id]);
+    let pause = env
+        .wait_for("main", r#"kind="state" status="paused""#)
+        .await;
+    assert_eq!(
+        pause.text,
+        texts::evaluated_pause(
+            "main",
+            "ship it",
+            "limit",
+            "the automatic continuation limit was reached",
+            next.sequence
+        ),
+        "the evaluator's end states no pause over the Queue at {}",
+        second.sequence
+    );
+    env.close().await;
+}
+
+/// A pause the Queue abandons leaves the evaluator it settled open: the
+/// settlement cancels and drains the decisions, and the evaluator ends only
+/// once a folded fact makes it unwanted (#2119, Pursuit §4.1, §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_pause_a_queue_abandons_leaves_its_evaluator_to_conclude() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // A Queue drives a turn whose end decides the limit pause, and the pause's
+    // record writer is held after it settled the decisions.
+    let mut record = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    let end = env.turn_ids("main", &[&queued.id]);
+    assert_eq!(
+        record.arrived().await,
+        end.sequence,
+        "the pause's record writer answers the turn end at {}",
+        end.sequence
+    );
+
+    // A second Queue commits in the settlement window: the pause is abandoned,
+    // and the evaluation its writer settled is still wanted.
+    let second = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    env.dispatched("main", second.sequence).await;
+    let ended: Vec<String> = env
+        .ended("main")
+        .await
+        .iter()
+        .filter(|end| end.branch == create.branch)
+        .map(|end| format!("{:?}", end.source))
+        .collect();
+    assert!(
+        ended.is_empty(),
+        "the Queue at {} abandons the pause at {}, but its settlement ended the evaluator: {ended:?}",
+        second.sequence,
+        end.sequence
+    );
+    // The turn end returns only after the record writer released admission, so
+    // the conclusion below folds into a decision the settlement still takes.
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        end.sequence,
+        Some(end.sequence),
+    );
+    record.release();
+    done.arrived().await;
+    done.release();
+
+    // The abandoned pause leaves the evaluation to conclude.
+    let conclusion = write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified");
+    let completed = env.wait_for("main", r#"status="completed""#).await;
+    assert_eq!(
+        completed.text,
+        texts::evaluated("main", "ship it", "completed", "verified", conclusion),
+        "the evaluator the pause settled concludes for the goal the Queue kept running"
+    );
+    env.close().await;
+}
+
+/// The end of an evaluator the settlement ended for a pause folds after that
+/// pause: it is cleanup, not the evaluation's own failure, and it does not
+/// restate the pause (#2119, Pursuit §13 E2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_settled_evaluator_does_not_restate_the_pause_that_settled_it() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, _create) = completion_requested_with(&env, Some(1)).await;
+
+    let queued = env.emit(
+        "main",
+        message(vec![raw("keep going", None, false)], InputMode::Queue),
+    );
+    let end = env.turn_ids("main", &[&queued.id]);
+    let pause = env
+        .wait_for("main", r#"kind="state" status="paused""#)
+        .await;
+    assert_eq!(
+        pause.text,
+        texts::evaluated_pause(
+            "main",
+            "ship it",
+            "limit",
+            "the automatic continuation limit was reached",
+            end.sequence
+        ),
+        "the end of the evaluator at {evaluation} does not restate the limit pause"
+    );
+    let restated: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| block.marker.contains(r#"reason="evaluation_failed""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        restated.is_empty(),
+        "the ended evaluator restated the pause as its own failure: {restated:?}"
+    );
+    env.close().await;
+}
+
+/// An operator interrupt that folds before an evaluated pause reads its
+/// cutoff is stated by the interrupt's own pause: the writer re-decides the
+/// conclusion at the fold it writes from, where the interrupt already follows
+/// the evaluated turn end (#2119, Pursuit §4.1, §5, C4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_evaluated_pause_does_not_answer_a_later_interrupt() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // The limit is reached, so the conclusion decides a pause. Its record
+    // writer is held after it settled the decisions, before it composes.
+    let mut held = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Record,
+        evaluation,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- one test fails: <output>",
+    );
+    assert_eq!(
+        held.arrived().await,
+        conclusion,
+        "the pause's record writer answers the conclusion at {conclusion}"
+    );
+
+    // An operator interrupt commits in that window and folds before the writer
+    // reads its cutoff again.
+    let interrupt = env.interrupt("main");
+    env.dispatched("main", interrupt.sequence).await;
+    held.release();
+
+    // The interrupt states the pause the cutoff now gives; the conclusion's
+    // record does not answer it.
+    let pause = env
+        .wait_for("main", &format!(r#"after="{}""#, interrupt.sequence))
+        .await;
+    assert!(
+        pause.marker.contains(r#"status="paused""#)
+            && pause.marker.contains(r#"reason="interrupted""#),
+        "the interrupt at {} states the pause: {pause:#?}",
+        interrupt.sequence
+    );
+    let stale: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="state""#)
+                && block.marker.contains(r#"status="paused""#)
+                && block.marker.contains(&format!(r#"after="{}""#, conclusion))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the conclusion at {conclusion} writes no pause once the interrupt at {} follows the evaluated turn end, yet it wrote {stale:?}",
+        interrupt.sequence
+    );
+    env.close().await;
+}
+
+/// An ordinary Append that commits between the conclusion's decision and its
+/// record leaves the pause unwritten, and the conclusion the caller still owns
+/// states its continuation (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_appended_note_before_the_evaluated_pause_returns_the_conclusion_to_its_continuation() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // The limit is reached, so the conclusion decides a pause. Its record waits
+    // for the writer before it takes the write guard.
+    let mut writer = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Writer,
+        evaluation,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- one test fails: <output>",
+    );
+    let written = tokio::time::timeout(Duration::from_secs(15), writer.arrived())
+        .await
+        .expect("the conclusion writes its record");
+    assert_eq!(
+        written, conclusion,
+        "the conclusion at {conclusion} writes its record"
+    );
+
+    // An ordinary Append commits before the record takes the guard: the fold
+    // resets the continuation count, so no limit pause is due.
+    let note = env.emit("main", user("a note", InputMode::Append));
+    env.dispatched("main", note.sequence).await;
+    let mut pause = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Append,
+        conclusion,
+        Some(conclusion),
+    );
+    writer.release();
+
+    let recorded = tokio::time::timeout(Duration::from_millis(750), pause.arrived())
+        .await
+        .is_ok();
+    assert!(
+        !recorded,
+        "the Append at {} takes the limit pause back, but the record at {conclusion} reached its append",
+        note.sequence
+    );
+    let continuation = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="continuation" count="1" limit="1" after="{evaluation}" evaluation="{evaluation}""#
+            ),
+        )
+        .await;
+    assert_eq!(
+        continuation.text,
+        texts::evaluated_continuation("main", 1, Some(1), 0, evaluation, evaluation),
+        "the conclusion at {conclusion} continues the goal the Append left running"
+    );
+    env.close().await;
+}
+
 #[tokio::test]
 async fn pursuit_13_e3_an_outside_end_before_the_conclusion_fails_the_evaluation() {
     let env = Env::start().await;
@@ -821,6 +1250,569 @@ async fn pursuit_2_a_continue_conclusion_writes_one_continuation_or_pauses_at_th
             "the automatic continuation limit was reached",
             conclusion
         )
+    );
+    env.close().await;
+}
+
+/// A Queue that commits while the `continue` conclusion waits for its cutoff
+/// leaves the evaluated continuation behind: the recheck reads the fold at the
+/// latest committed cutoff, so the Queue's own turn decides (Pursuit §4.1, §5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_2_a_continue_conclusion_reads_the_latest_committed_cutoff() {
+    let env = Env::start().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let through = env.timeline("main").committed() + 1;
+    let mut cutoff_gate = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Cutoff,
+        through,
+        None,
+    );
+    let conclusion = texts::conclusion(
+        "main",
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    let conclusion = env.write_message(
+        "main",
+        vec![raw(&conclusion, None, false)],
+        InputMode::Append,
+    );
+    assert!(
+        conclusion.sequence >= through,
+        "the conclusion input at {} follows the registered cutoff {through}",
+        conclusion.sequence
+    );
+    let cutoff = cutoff_gate.arrived().await;
+    assert!(
+        cutoff >= conclusion.sequence,
+        "the conclusion's write waits at the latest committed cutoff {cutoff}, after its input at {}",
+        conclusion.sequence
+    );
+
+    let queue_gate = dim_goal::testing::hold_input(
+        env.session_id(),
+        "main",
+        env.timeline("main").committed() + 1,
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    assert!(
+        queued.sequence > cutoff,
+        "the queued input at {} commits after the conclusion's cutoff {cutoff}",
+        queued.sequence
+    );
+    cutoff_gate.release();
+
+    let stale = tokio::time::timeout(Duration::from_millis(750), async {
+        loop {
+            let writes = writes_with(&env, "main", &format!(r#"evaluation="{evaluation}""#)).await;
+            if let Some(block) = writes
+                .iter()
+                .find(|block| block.marker.contains(r#"kind="continuation""#))
+            {
+                return block.marker.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        stale.is_err(),
+        "the continue conclusion writes no continuation while a committed Queue is not folded: {stale:?}"
+    );
+
+    queue_gate.release();
+    env.dispatched("main", queued.sequence).await;
+    let writes = env.settled("main").await;
+    assert!(
+        !writes.iter().any(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"evaluation="{evaluation}""#))
+        }),
+        "the continue conclusion writes no continuation after the Queue folds: {writes:#?}"
+    );
+    assert!(
+        env.pending_inputs("main").await.contains(&queued.id),
+        "the Queue drives the next turn instead of the evaluated continuation"
+    );
+    env.close().await;
+}
+
+/// A Queue that commits inside the evaluated continuation's submission lookup,
+/// then is consumed by the next turn while `turn_end` still names the judged
+/// end: the recheck sees the started turn and the append refuses the head that
+/// moved behind it (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_consumed_queue_that_started_a_turn_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let (entered, release) = env.gated().hold_query("input/message");
+    let conclusion = texts::conclusion(
+        "main",
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    env.write_message(
+        "main",
+        vec![raw(&conclusion, None, false)],
+        InputMode::Append,
+    );
+    tokio::time::timeout(Duration::from_secs(15), entered)
+        .await
+        .expect("the evaluated continuation's submission lookup starts")
+        .expect("the held lookup is the continuation's");
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    env.consume("main", &queued.id);
+    release.send(()).expect("the lookup answers");
+    let writes = env.settled("main").await;
+    let stale: Vec<String> = writes
+        .iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"evaluation="{evaluation}""#))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened a new turn inside the lookup window, yet it wrote {stale:?}",
+        queued.sequence
+    );
+    env.close().await;
+}
+
+/// A Queue whose turn starts and is consumed before the `continue`
+/// conclusion takes its first capture, while the conclusion waits to read its
+/// settings: the decision is bound to the judged turn, so the newer turn
+/// decides and the conclusion writes no evaluated continuation (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_turn_already_open_before_the_conclusion_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let mut continued = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Continue,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    let held = tokio::time::timeout(Duration::from_secs(15), continued.arrived())
+        .await
+        .expect("the conclusion task reaches its settings read");
+    assert_eq!(
+        held, conclusion,
+        "the held step follows the conclusion at {conclusion}"
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    let consumed = env.consume("main", &queued.id);
+    env.dispatched("main", consumed.sequence).await;
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        conclusion,
+        Some(conclusion),
+    );
+    continued.release();
+    done.arrived().await;
+    let stale = evaluated_writes(&env, evaluation).await;
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened a turn before its first capture, but it wrote {stale:?}",
+        queued.sequence
+    );
+    done.release();
+    env.close().await;
+}
+
+/// A Queue whose turn starts, is consumed and ends before the `continue`
+/// conclusion takes its first capture, while the conclusion waits to read its
+/// settings: the conclusion names a turn end that is no longer the branch's
+/// latest, so it decides nothing and the newer turn end decides (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_a_turn_that_ended_before_the_conclusion_holds_the_evaluated_continuation() {
+    let env = Env::start_gated().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let mut continued = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Continue,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    let held = tokio::time::timeout(Duration::from_secs(15), continued.arrived())
+        .await
+        .expect("the conclusion task reaches its settings read");
+    assert_eq!(
+        held, conclusion,
+        "the held step follows the conclusion at {conclusion}"
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    env.turn_start("main", "next");
+    env.consume("main", &queued.id);
+    let mut turn_end = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let ended = env.end_turn("main", "next", "completed");
+    env.dispatched("main", ended.sequence).await;
+    assert!(
+        ended.sequence > evaluation,
+        "the newer turn end at {} follows the judged end at {evaluation}",
+        ended.sequence
+    );
+    let held_end = tokio::time::timeout(Duration::from_secs(15), turn_end.arrived())
+        .await
+        .expect("the newer turn end reaches its decision");
+    assert_eq!(
+        held_end, ended.sequence,
+        "the held decision follows the turn end at {}",
+        ended.sequence
+    );
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        conclusion,
+        Some(conclusion),
+    );
+    continued.release();
+    done.arrived().await;
+    let stale = evaluated_writes(&env, evaluation).await;
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the Queue at {} opened and ended a turn before its first capture, but it wrote {stale:?}",
+        queued.sequence
+    );
+    done.release();
+    turn_end.release();
+    let regular = tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let writes = env.writes("main").await;
+            if let Some(block) = writes.iter().find(|block| {
+                block.marker.contains(r#"kind="continuation""#)
+                    && block
+                        .marker
+                        .contains(&format!(r#"after="{}""#, ended.sequence))
+            }) {
+                return block.sequence;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the newer turn end decides its own continuation");
+    env.dispatched("main", regular).await;
+    env.close().await;
+}
+
+/// A turn interrupt that commits after the evaluated continuation took its
+/// decision, before its append: the append is refused against the moved head,
+/// and the retry must not continue a goal the interrupt paused (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_5_an_interrupt_in_the_evaluated_write_window_holds_the_continuation() {
+    let env = Env::start().await;
+    let (evaluation, create) = completion_requested(&env).await;
+    let mut write = dim_goal::testing::hold_write(env.session_id(), "main");
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- still missing",
+    );
+    assert_eq!(
+        write.arrived().await,
+        evaluation,
+        "the held write belongs to the decision for the evaluated turn end"
+    );
+    let interrupt = env.interrupt("main");
+    env.dispatched("main", interrupt.sequence).await;
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        conclusion,
+        Some(conclusion),
+    );
+    write.release();
+    done.arrived().await;
+    let stale = evaluated_writes(&env, evaluation).await;
+    assert!(
+        stale.is_empty(),
+        "the continue conclusion writes no evaluated continuation after the interrupt at {}, but it wrote {stale:?}",
+        interrupt.sequence
+    );
+    done.release();
+    env.close().await;
+}
+
+/// A Queue that the turn end saw pending is withdrawn before the turn-end
+/// decision: the end belongs to the evaluator-first decision again, not to an
+/// ordinary continuation (#1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pursuit_1_a_withdrawn_queue_returns_the_turn_end_to_the_evaluator() {
+    let env = Env::start_gated().await;
+    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
+        .await
+        .expect("set writes");
+    let set = env.wait_for("main", r#"op="set""#).await;
+    env.turn("main", &[&set]);
+    let continuation = env.wait_for("main", r#"kind="continuation""#).await;
+    env.turn_start("main", "work");
+    env.consume("main", &continuation.id);
+    env.tool(
+        "main",
+        json!({"status": "completed", "summary": "all tests pass"}),
+    )
+    .await;
+
+    let mut decision = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        env.timeline("main").committed() + 1,
+        None,
+    );
+    let ended = env.end_turn("main", "work", "completed");
+    env.dispatched("main", ended.sequence).await;
+    assert_eq!(
+        decision.arrived().await,
+        ended.sequence,
+        "the held decision follows the turn end at {}",
+        ended.sequence
+    );
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+    let mut cutoff = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Cutoff,
+        queued.sequence,
+        Some(queued.sequence),
+    );
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        ended.sequence,
+        Some(ended.sequence),
+    );
+    decision.release();
+    assert_eq!(
+        cutoff.arrived().await,
+        queued.sequence,
+        "the turn-end decision reaches the Queue's cutoff with the Queue still pending"
+    );
+    env.delete_id("main", &queued.id);
+    let deleted = env.timeline("main").committed();
+    env.dispatched("main", deleted).await;
+    cutoff.release();
+    done.arrived().await;
+    let creates = env.creates("main").await;
+    assert_eq!(
+        creates.len(),
+        1,
+        "the withdrawn Queue at {} returns the turn end to the evaluator-first decision: {creates:#?}",
+        queued.sequence
+    );
+    let stale = env
+        .writes("main")
+        .await
+        .into_iter()
+        .filter(|block| {
+            block.marker.contains(r#"kind="continuation""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"after="{}""#, ended.sequence))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect::<Vec<_>>();
+    assert!(
+        stale.is_empty(),
+        "the withdrawn Queue at {} leaves the turn end to the evaluator, but an ordinary continuation was written: {stale:?}",
+        queued.sequence
+    );
+    done.release();
+    env.close().await;
+}
+
+/// A Queue that held the evaluator-first decision back is withdrawn while the
+/// turn end waits for its progress query: the limit pause the writer decided is
+/// no longer the answer, and the turn end creates the evaluator (Pursuit §4.1,
+/// #2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_queue_withdrawn_before_the_pause_record_keeps_the_evaluator() {
+    let env = Env::start_gated().await;
+    env.set_limit(1);
+    env.goal("set", json!({"objective": "ship it", "judge": "evaluator"}))
+        .await
+        .expect("set writes");
+    let set = env.wait_for("main", r#"op="set""#).await;
+    let first = env.turn("main", &[&set]);
+    let continuation = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="continuation" count="1" limit="1" after="{}""#,
+                first.sequence
+            ),
+        )
+        .await;
+    env.turn_start("main", "work");
+    env.consume("main", &continuation.id);
+    env.tool(
+        "main",
+        json!({"status": "completed", "summary": "all tests pass"}),
+    )
+    .await;
+    // The Queue holds the evaluator-first decision back, so the turn end is
+    // about to state the limit pause instead.
+    let queued = env.write_message(
+        "main",
+        vec![raw("keep going", None, false)],
+        InputMode::Queue,
+    );
+    env.dispatched("main", queued.sequence).await;
+
+    let (progress, release_progress) = env.gated().hold_query("step/tool-call");
+    let ended = env.end_turn("main", "work", "completed");
+    progress.await.expect("the turn-end progress query starts");
+
+    // The two ends this window can take: the record writer states the pause at
+    // its append, or the turn end is decided again for the evaluator.
+    let mut pause = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Append,
+        ended.sequence,
+        Some(ended.sequence),
+    );
+    let mut retaken = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Decision,
+        ended.sequence,
+        Some(ended.sequence),
+    );
+    env.delete_id("main", &queued.id);
+    let deleted = env.timeline("main").committed();
+    env.dispatched("main", deleted).await;
+    release_progress
+        .send(())
+        .expect("the progress query answers");
+
+    let recorded = tokio::select! {
+        _ = pause.arrived() => true,
+        _ = retaken.arrived() => false,
+    };
+    assert!(
+        !recorded,
+        "the withdrawn Queue at {} leaves the turn end at {} to the evaluator, but its limit pause reached the append",
+        queued.sequence, ended.sequence
+    );
+    let mut done = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Done,
+        ended.sequence,
+        Some(ended.sequence),
+    );
+    retaken.release();
+    assert_eq!(
+        done.arrived().await,
+        ended.sequence,
+        "the retaken decision creates the evaluator for the turn end at {}",
+        ended.sequence
+    );
+    done.release();
+
+    let creates = env.creates("main").await;
+    assert_eq!(
+        creates.len(),
+        1,
+        "the withdrawn Queue at {} keeps one evaluator for the turn end at {}: {creates:#?}",
+        queued.sequence,
+        ended.sequence
+    );
+    assert_eq!(
+        creates[0].source,
+        BranchSource::Host {
+            operation_id: format!("goal:evaluate:{}", ended.sequence)
+        },
+        "the evaluator was created for the turn end at {}",
+        ended.sequence
+    );
+    let paused = env
+        .writes("main")
+        .await
+        .into_iter()
+        .filter(|block| {
+            block
+                .marker
+                .contains(r#"kind="state" status="paused" reason="limit""#)
+                && block
+                    .marker
+                    .contains(&format!(r#"after="{}""#, ended.sequence))
+        })
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect::<Vec<_>>();
+    assert!(
+        paused.is_empty(),
+        "the withdrawn Queue at {} leaves the turn end at {} to the evaluator, but the limit pause was recorded: {paused:?}",
+        queued.sequence,
+        ended.sequence
     );
     env.close().await;
 }
@@ -1212,4 +2204,321 @@ async fn pursuit_5_a_failed_or_cancelled_evaluator_turn_reports_failed() {
         );
         env.close().await;
     }
+}
+
+/// A conclusion or an evaluator failure that folds while a change holds task
+/// admission is decided before that change states its own record (#2158).
+#[tokio::test]
+async fn a_decision_folded_in_the_settlement_window_is_taken() {
+    for case in ["done", "blocked", "evaluation_failed"] {
+        let env = Env::start().await;
+        let (evaluation, create) = completion_requested(&env).await;
+        let head = env.timeline("main").committed();
+        env.dispatched("main", head).await;
+
+        // The operator pause settles the decisions and stops before it
+        // composes its record and trigger.
+        let mut change = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Change,
+            head,
+            Some(head),
+        );
+        let pause = env.goal("pause", json!({}));
+        let (pause, fact) = tokio::join!(pause, async {
+            assert_eq!(
+                change.arrived().await,
+                head,
+                "{case}: the pause's writer is held at the cutoff it read"
+            );
+            let fact = match case {
+                "done" => {
+                    write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified")
+                }
+                "blocked" => write_conclusion(
+                    &env,
+                    &create.branch,
+                    evaluation,
+                    "blocked",
+                    "BLOCKED: a deploy key",
+                ),
+                _ => {
+                    env.emit(
+                        "main",
+                        EventKind::BranchEnded(BranchEndedData {
+                            branch: create.branch.clone(),
+                            end_event: 0,
+                            source: BranchSource::Host {
+                                operation_id: "user".into(),
+                            },
+                            ancestor: None,
+                        }),
+                    )
+                    .sequence
+                }
+            };
+            env.dispatched("main", fact).await;
+            change.release();
+            fact
+        });
+        pause.expect("the pause writes");
+        let (needle, expected) = match case {
+            "done" => (
+                r#"status="completed""#,
+                texts::evaluated("main", "ship it", "completed", "verified", fact),
+            ),
+            "blocked" => (
+                r#"status="blocked""#,
+                texts::evaluated("main", "ship it", "blocked", "a deploy key", fact),
+            ),
+            _ => (
+                r#"reason="evaluation_failed""#,
+                texts::evaluated_pause(
+                    "main",
+                    "ship it",
+                    "evaluation_failed",
+                    "the evaluator could not check the result",
+                    fact,
+                ),
+            ),
+        };
+        let record = env
+            .writes("main")
+            .await
+            .into_iter()
+            .find(|block| block.text.contains(needle));
+        assert_eq!(
+            record.map(|block| block.text),
+            Some(expected),
+            "{case}: the fact folded at {fact} inside the settlement window is decided"
+        );
+        env.close().await;
+    }
+}
+
+/// A decision that folds while a Set/Resume loads the current work is refused
+/// admission after the settlement's own drain: the change states it before the
+/// record that supersedes its fact (#2158).
+#[tokio::test]
+async fn a_decision_folded_while_a_change_loads_its_work_is_taken() {
+    for case in ["done", "evaluation_failed"] {
+        let env = Env::start().await;
+        let (evaluation, create) = completion_requested(&env).await;
+        let head = env.timeline("main").committed();
+        env.dispatched("main", head).await;
+
+        // The resume settles the decisions and then loads the branch's current
+        // work, which waits for publication and queries the Timeline. The
+        // window is held there, past the settlement's first drain.
+        let mut query = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Query,
+            head,
+            Some(head),
+        );
+        let resume = env.goal("resume", json!({}));
+        let (resume, fact) = tokio::join!(resume, async {
+            assert_eq!(
+                query.arrived().await,
+                head,
+                "{case}: the resume's current-work load is held at the cutoff it read"
+            );
+            let fact = match case {
+                "done" => {
+                    write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified")
+                }
+                _ => {
+                    env.emit(
+                        "main",
+                        EventKind::BranchEnded(BranchEndedData {
+                            branch: create.branch.clone(),
+                            end_event: 0,
+                            source: BranchSource::Host {
+                                operation_id: "user".into(),
+                            },
+                            ancestor: None,
+                        }),
+                    )
+                    .sequence
+                }
+            };
+            env.dispatched("main", fact).await;
+            query.release();
+            fact
+        });
+        resume.expect("the resume writes");
+        let writes = env.writes("main").await;
+        let expected = match case {
+            "done" => texts::evaluated("main", "ship it", "completed", "verified", fact),
+            _ => texts::evaluated_pause(
+                "main",
+                "ship it",
+                "evaluation_failed",
+                "the evaluator could not check the result",
+                fact,
+            ),
+        };
+        let markers: Vec<&str> = writes.iter().map(|block| block.marker.as_str()).collect();
+        let record = writes.iter().find(|block| block.text == expected).unwrap_or_else(|| {
+            panic!(
+                "{case}: the fact folded at {fact} while the resume loaded its work is decided; writes: {markers:?}"
+            )
+        });
+        let change = writes
+            .iter()
+            .find(|block| block.marker.contains(r#"op="resume""#))
+            .expect("the resume trigger");
+        assert!(
+            record.sequence < change.sequence,
+            "{case}: the decision at {fact} is stated at {} before the change writes at {}",
+            record.sequence,
+            change.sequence
+        );
+        env.close().await;
+    }
+}
+
+/// A `done` or `blocked` conclusion that folds while a change holds task
+/// admission states its decision even with a background task still open: the
+/// background wait holds a `continue`, not a terminal conclusion (#2158).
+#[tokio::test]
+async fn a_terminal_conclusion_folded_in_the_settlement_window_is_stated() {
+    for case in ["done", "blocked"] {
+        let env = Env::start().await;
+        let (evaluation, create) = completion_requested(&env).await;
+
+        // A background task the branch started is still open when the
+        // conclusion arrives.
+        env.exec_started("main", "work", "task-1");
+        let head = env.timeline("main").committed();
+        env.dispatched("main", head).await;
+
+        // The operator pause settles the decisions and stops before it
+        // composes its record and trigger.
+        let mut change = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Change,
+            head,
+            Some(head),
+        );
+        let pause = env.goal("pause", json!({}));
+        let (pause, fact) = tokio::join!(pause, async {
+            assert_eq!(
+                change.arrived().await,
+                head,
+                "{case}: the pause's writer is held at the cutoff it read"
+            );
+            let fact = match case {
+                "done" => {
+                    write_conclusion(&env, &create.branch, evaluation, "done", "DONE: verified")
+                }
+                _ => write_conclusion(
+                    &env,
+                    &create.branch,
+                    evaluation,
+                    "blocked",
+                    "BLOCKED: a deploy key",
+                ),
+            };
+            env.dispatched("main", fact).await;
+            change.release();
+            fact
+        });
+        pause.expect("the pause writes");
+        let expected = match case {
+            "done" => texts::evaluated("main", "ship it", "completed", "verified", fact),
+            _ => texts::evaluated("main", "ship it", "blocked", "a deploy key", fact),
+        };
+        let writes = env.writes("main").await;
+        let markers: Vec<&str> = writes.iter().map(|block| block.marker.as_str()).collect();
+        assert!(
+            writes.iter().any(|block| block.text == expected),
+            "{case}: the conclusion folded at {fact} while a task is open is stated; writes: {markers:?}"
+        );
+        env.close().await;
+    }
+}
+
+/// A deferred record whose append fails keeps its place: a later change states
+/// the decision instead of losing it with the failed write (#2158).
+#[tokio::test]
+async fn a_failed_deferred_record_leaves_its_decision_to_the_next_change() {
+    let env = Env::start().await;
+    let (_, create) = completion_requested(&env).await;
+    let head = env.timeline("main").committed();
+    env.dispatched("main", head).await;
+
+    // The operator pause settles the decisions and stops before it composes
+    // its record and trigger.
+    let mut change = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Change,
+        head,
+        Some(head),
+    );
+    let pause = env.goal("pause", json!({}));
+    let (pause, failed) = tokio::join!(pause, async {
+        assert_eq!(
+            change.arrived().await,
+            head,
+            "the pause's writer is held at the cutoff it read"
+        );
+        // The evaluator's line ends in that window: its failure is deferred to
+        // the settlement the pause holds.
+        let failed = env
+            .emit(
+                "main",
+                EventKind::BranchEnded(BranchEndedData {
+                    branch: create.branch.clone(),
+                    end_event: 0,
+                    source: BranchSource::Host {
+                        operation_id: "user".into(),
+                    },
+                    ancestor: None,
+                }),
+            )
+            .sequence;
+        env.dispatched("main", failed).await;
+
+        // The deferred record's append is refused: its published status no
+        // longer matches the state its writer states.
+        let failure = env.probe.fail_next_state();
+        change.release();
+        failure
+            .await
+            .expect("the writer refuses the deferred failure report");
+        failed
+    });
+    assert_eq!(
+        env.probe.failed_states(),
+        1,
+        "the writer's own check refuses the deferred record at {failed}"
+    );
+    assert!(
+        pause.is_err(),
+        "the change whose deferred record was refused reports the failure: {pause:?}"
+    );
+
+    // The next change states what the failed one kept.
+    env.goal("resume", json!({}))
+        .await
+        .expect("the resume writes");
+    let writes = env.writes("main").await;
+    let markers: Vec<&str> = writes.iter().map(|block| block.marker.as_str()).collect();
+    let expected = texts::evaluated_pause(
+        "main",
+        "ship it",
+        "evaluation_failed",
+        "the evaluator could not check the result",
+        failed,
+    );
+    assert!(
+        writes.iter().any(|block| block.text == expected),
+        "the deferred record refused at {failed} is stated by the next change; writes: {markers:?}"
+    );
+    env.close().await;
 }

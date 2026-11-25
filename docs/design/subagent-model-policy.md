@@ -240,8 +240,7 @@ path, its native Settings registration/management owner, and the CLI model picke
 Prompt, Agents' public contracts, Rpc dispatch, event types and rutis remain
 unchanged. The Provider route-copy contract is stated in §7 and the EN/ZH Provider
 documents; it adds no model-selection port. Register acquired effects
-immediately and settle existing owned work before unload. Regenerate architecture output when dependency/assembly
-registration changes, using `xtask graph`; do not hand-edit generated artifacts.
+immediately and settle existing owned work before unload. Run `xtask check` when dependency or assembly registration changes.
 
 Extend existing Collaboration/native CLI public flows to cover:
 

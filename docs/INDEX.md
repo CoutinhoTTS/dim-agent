@@ -12,7 +12,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Model startup](design/model-startup.md): temporary model, effort and multi-protocol connections with branch/member/compaction inheritance
 - [Model failures](design/model-failures.md)（[中文](zh/design/model-failures.md)）: the failure kind, the fact on the terminal event, who words the line, and retry (#1197)
 - [模型请求重试与任务续接方案](design/research/model-retry-recovery.md)（中文，#1210）：请求重试的可见性、独立恢复能力的边界及所有者合同需求
-- [服务面：跨语言形状的策略、盘点与第一批改造](design/service-faces.md)（中文，Draft），装配现状见[生成的服务目录](architecture/rust-agent/generated/catalog.md)。
+- [服务面：跨语言形状的策略、盘点与第一批改造](design/service-faces.md)（中文，Draft）
 - [插件远程化：可行性与落地路径](design/research/remote-plugins.md)（中文，研究稿）：rutis 链路能跨什么、HostPlatform/exec/基础工具/存储各自能不能远程化、推荐拓扑与分阶段
 - [HostPlatform 任务所有者重构](design/research/1295-host-platform-task-owner.md)（English research draft）：#1295 的单一 task record、状态机、输出/错误契约、事件流删除与迁移步骤
 - [Resource and store services](design/resource-faces.md) (Draft): `hostPlatform`, `fsHost` and `store` service methods as the public contracts for processes, files and Session state (#1295, #1296, #1297, #1298); no separate face object
@@ -115,6 +115,7 @@ This index is navigation. Delivery status lives in issues, not here.
 - [Child tool batches across clients](design/appserver/child-tool-batches.md) (#1326): v4 child events, v3 visibility, TUI/CLI/web grouping and the Code Mode session gate
 - [Management methods](design/appserver/management-methods.md)
 - [Provider management for Desktop and CLI](design/appserver/provider-management.md) (#329)（[中文](zh/design/appserver/provider-management.md)）
+- [ChatGPT plan provider](design/appserver/chatgpt-plan.md)
 - [Settings service](design/appserver/settings-service.md)（[中文](zh/design/appserver/settings-service.md)）
 - [Prompt overrides](design/appserver/prompt-overrides.md) (#1314): the `prompts` Settings source, three owner ports and the client entry
 - [MCP OAuth](design/appserver/mcp-oauth.md)（[中文](zh/design/appserver/mcp-oauth.md)）

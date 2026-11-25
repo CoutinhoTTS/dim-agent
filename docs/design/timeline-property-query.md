@@ -321,7 +321,7 @@ TimelineStore::query(TimelineReadScope, QuerySpec, QueryPage) -> Result<QueryRes
 | 数据持有 | 长历史恢复不额外持有完整历史事件；准备结束后两个部件不持有完整请求，取消与失败也释放本次数据。 |
 | 接口兼容 | Rust 和 TypeScript 使用同一契约；普通门面、结束分支、客户端历史窗口保留各自范围与权限。 |
 
-复用 `timeline_flow`、`storage_flow`、`context_flow`、`branch_flow`、`transport_flow` 和跨包扩展流程。代码落地后运行涉及的流程测试与 `xtask types/check`；没有装配变化时不重画装配图。
+复用 `timeline_flow`、`storage_flow`、`context_flow`、`branch_flow`、`transport_flow` 和跨包扩展流程。代码落地后运行涉及的流程测试与 `xtask types/check`。
 
 ### 8.1 SQL 成本验收
 

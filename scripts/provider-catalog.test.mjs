@@ -385,6 +385,16 @@ test("a sync refuses a vendor provider whose upstream starts naming canonical id
   const committed = JSON.parse(await readFile(path, "utf8"));
   const stepfun = committed.providers.find((provider) => provider.providerId === "stepfun");
   assert.equal(stepfun.metadata.role, "vendor");
+  // The committed catalog states stepfun's namespace and the rows that require
+  // it; this test needs a vendor that states neither, so both files drop them.
+  delete stepfun.metadata.vendorNamespace;
+  for (const model of stepfun.models) delete model.metadata.raw.canonical_model_id;
+  const declared = await policies(cwd);
+  delete declared.stepfun.vendorNamespace;
+  await Promise.all([
+    writeFile(path, JSON.stringify(committed)),
+    writeFile(join(cwd, policy), JSON.stringify({ providers: declared }, null, 2)),
+  ]);
   assert.equal(stepfun.metadata.vendorNamespace, undefined, "stepfun must state no namespace for this test");
   assert.equal(stepfun.models.some((model) => model.metadata.raw.canonical_model_id !== undefined), false,
     "stepfun must carry no canonical id for this test");
@@ -698,7 +708,7 @@ test("a raw leaf nothing projects still makes the provider changed", async (t) =
   }));
   const summary = execFileSync(process.execPath, [script, "--sync", "deepseek"], { cwd, env, encoding: "utf8" });
   assert.match(summary, /Synced 1 providers \(0 unchanged, 1 changed\)/);
-  assert.match(summary, /~ deepseek-v4-pro +metadata\.raw\.family "deepseek-thinking" -> "a-family-nothing-reads"/);
+  assert.match(summary, /~ deepseek-v4-pro +metadata\.raw\.family "deepseek-pro" -> "a-family-nothing-reads"/);
 });
 
 test("a canonical id the upstream replaces is written and both values are printed", async (t) => {

@@ -423,6 +423,102 @@ async fn wait_returns_the_typed_result() {
     host.close().await.unwrap();
 }
 
+/// `treeCommands.inputIfHead` over the wire appends only while the last
+/// assigned sequence is still its `head`, and answers the committed event the
+/// native binding answers (principles §7.2; #1989).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tree_commands_input_if_head_appends_only_while_its_head_stands() {
+    use dim_agent_capabilities::timeline_tree::TreeCommands;
+    async fn try_call(
+        face: &Arc<dyn HostDispatch>,
+        method: &str,
+        args: Vec<BridgeValue>,
+    ) -> std::result::Result<Value, String> {
+        let reply = face
+            .invoke(method, BridgeValue::List(args))
+            .map_err(|error| error.to_string())?;
+        let value = settle(reply).await.map_err(|error| error.to_string())?;
+        decode_value(value).map_err(|error| error.to_string())
+    }
+    fn input(id: &str, text: &str) -> InputMessageData {
+        InputMessageData {
+            submission_id: Some(id.into()),
+            ..InputMessageData::text(text, Some(InputMode::Queue))
+        }
+    }
+    let Fixture {
+        host,
+        session,
+        session_ctx,
+        session_instance,
+        ..
+    } = fixture(Arc::new(MockTools)).await;
+    let face = session_ctx
+        .get_at::<dyn HostDispatch>(&host_key("treeCommands").instance(session_instance))
+        .expect("treeCommands is a Session data face");
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let head = session.sequence("main").unwrap();
+
+    let written = try_call(
+        &face,
+        "inputIfHead",
+        vec![
+            json!("main").into(),
+            json!(input("test:head", "one")).into(),
+            json!(head).into(),
+        ],
+    )
+    .await;
+    assert!(
+        written.is_ok(),
+        "treeCommands serves inputIfHead from another language: {written:?}"
+    );
+    let written = written.unwrap();
+    assert!(
+        written["sequence"].is_u64(),
+        "a standing head commits the input: {written}"
+    );
+    let sequence = written["sequence"].as_u64().unwrap();
+    assert!(
+        sequence > head,
+        "the input commits behind the head the caller named: head {head}, event {written}"
+    );
+    let native = tree
+        .input("main".into(), input("test:head", "one"))
+        .await
+        .unwrap();
+    assert_eq!(
+        written,
+        serde_json::to_value(&*native).unwrap(),
+        "the face answers the event the binding answers"
+    );
+
+    let moved = try_call(
+        &face,
+        "inputIfHead",
+        vec![
+            json!("main").into(),
+            json!(input("test:moved", "two")).into(),
+            json!(head).into(),
+        ],
+    )
+    .await
+    .expect("the face answers");
+    assert_eq!(
+        moved,
+        Value::Null,
+        "a fact behind the expected head writes nothing"
+    );
+    assert!(
+        session
+            .lookup("main", "test:moved")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    host.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn tool_host_executes_as_the_typed_port_does() {
     let tools = Arc::new(MockTools);

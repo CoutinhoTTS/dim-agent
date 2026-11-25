@@ -30,13 +30,13 @@ Prompt 是 Timeline 级 rutis Plugin，依赖通过 `Deps` 声明。来源 I/O �
 
 运行期刷新在提交锁内按最终请求标识登记操作，加载任务由 Prompt 持有至收尾；登记失败直接返回调用方，不发布请求或终止 Dispatcher。结果标识经 before 改写时，Prompt 在结果发布前同步迁移自身操作关联，调用方仍等待同一实际加载收尾；已占用的标识不能覆盖其他待处理操作。采用前作用域已经结束的批次返回 `Superseded`。
 
-初始配置在分支启动时采用：Prompt 处理 `branch/start`（恢复时 `branch/resume`）时加载来源，分发完成后分支才接受输入。新 Session 的根分支整体采用初始配置；子分支与恢复的分支只比较规则与状态来源，不重新采用 system 与模型。初始失败回滚已建立资源。常规 turn 结束不取消分支级刷新；关闭拒绝新更新并等待实际加载收尾。
+初始配置在分支启动时采用：Prompt 处理 `branch/start`（恢复时 `branch/resume`）时加载来源，分发完成后分支才接受输入。新 Session 的根分支整体采用初始配置；链上还没有已采用配置、且初始配置带有模型的分支开场时同样整体采用（切点早于父线采用的线、升级前已存的线在下次开场时补写）；其余分支只比较规则与状态来源，不重新采用 system 与模型。初始失败回滚已建立资源。常规 turn 结束不取消分支级刷新；关闭拒绝新更新并等待实际加载收尾。
 
 宿主通过 `defaults::install_with_prompt` 提供 `LoadPrompt` 和可选初始 `ConfigureUpdate`，运行期通过 `Session::configure` 刷新。宿主返回 `None` 表示撤销，返回错误表示保留旧版本。`Superseded` 在被替代加载真实收尾后返回；`Adopted` 在整组采用事件完成分发后返回。子分支可以在自身历史中撤销或替换继承的来源，不修改父分支。
 
 `prompt/configure-request` 与 `prompt/configure-result` 只由 Prompt 自己消费，用来让配置操作与分支事件同序；加载结果只在内存里。Prompt 卸载或进程重启时，未完成的配置操作以错误返回给调用方，总线上留下的请求没有对应结果，也不需要补写：重载后的 Prompt 不重建未决操作，其他状态机不读取这两个事件，它们不影响任何后续决定。
 
-`ConfigureUpdate.model` 只更新模型身份、参数与 metadata，保留已采用的工具与来源版本。产品的初始 `InitialPromptConfiguration` 只有 [PromptRegistry](plugins/PromptSources.md#promptregistry) 一个提供者，它从 `SessionConfig.model` 读取完整 `ModelSelection`，在分支打开时与当时注册的全部来源（按名称排序）合成同一更新，由 Prompt 在根分支 `branch/start` 时采用；组合根不重复提供该键。开发 profile 可以没有初始采用配置，继续使用 `PrepareModelHost`。
+`ConfigureUpdate.model` 只更新模型身份、参数与 metadata，保留已采用的工具与来源版本。产品的初始 `InitialPromptConfiguration` 只有 [PromptRegistry](plugins/PromptSources.md#promptregistry) 一个提供者，它从 `SessionConfig.model` 读取完整 `ModelSelection`，在分支打开时与当时注册的全部来源（按名称排序）合成同一更新，由 Prompt 在根分支 `branch/start`、以及链上尚无已采用配置的分支开场时采用；组合根不重复提供该键。开发 profile 可以没有初始采用配置，继续使用 `PrepareModelHost`。
 
 配置的工具部分只由 [ToolBinding](plugins/ToolExecution.md#toolbinding) 经 `Prompt::adopt_tools` 写入，Prompt 不注入 ToolRegistry（否则 `ToolHost` 的重载会连带 Prompt）。首次采用模型时配置没有工具部分：Loop 经 `ToolBinding::bind_current` 声明当前挂载的宿主工具与注册工具；有动态来源时 ToolBinding 采用完整工具部分。模型更新与工具采用在 Prompt 的串行队列中分别只替换各自部分，互不覆盖；只更新其中一部分时，发布器在配置记录的来源文字上按当时生效的条目重新渲染 `system`，来源文字保持已采用的版本，来源尚未记录的旧配置则沿用已采用的 `system`。
 
@@ -48,7 +48,7 @@ Prompt 是 Timeline 级 rutis Plugin，依赖通过 `Deps` 声明。来源 I/O �
 
 未发布配置的既有宿主保留 `PrepareModelHost` 路径；一旦采用完整配置，Loop 直接读取固定前缀中的配置，不再调用该路径选择模型。两条路径都带有输入指南的同一份组合：采用的 System 由发布器在每次发布配置的采用处组合进 `context/configured`——渲染 System 的采用组合新的来源文字，只更新模型或工具的采用在已记录的来源文字上重新渲染指南，来源尚未记录的旧配置保留已采用的 System（[Prompt 设计 §6.3](../../design/plugins/Prompt.md#63-contextpreparation-the-entries-and-the-published-system)）；宿主准备的请求在构建时按当时生效的条目组合。`Session::input` 接收结构化 `user` 与 raw `blocks`；RPC 只接收操作者内容，不接收块。没有指定模式且没有 `user` 的输入按 Append 等待合法输入边界；只有块的输入不唤醒空闲分支。
 
-system 只保存静态内容。Context 与 State 来源的提示词变化由 Prompt 写成带 key 的 Append 输入（`<dim-rule>`、`<dim-state>`，每项一条，与 `prompt/changed` 同一批次，按 `order` 排列；作用域结束时写 expired），在 Loop 消费的位置进入上下文，不改写已交付历史。分支创建或恢复时，Prompt 在 `branch/start`、`branch/resume` 分发时加载全部来源并写入变化；新 Session 的根分支同时采用 system 与模型，子分支与恢复的分支不改 system。比较的基准是继承前缀里已交付的状态：祖先线上已采用、但投递输入还没有在继承前缀里被消费的变更不计入本线状态，本线按来源的实际值重新采用它，块在本线自己的消费处进入上下文；这类变更的 `System` 内容已经随前缀的配置生效，照常在找到处应用。`prompt/changed` 通过 `inputs` 命名与它同批次的投递输入，读取方在采纳前查询这些输入是否已在链上被消费。来源由各能力在自己的 `apply` 中注册到 PromptRegistry，注册在该能力卸载时撤回。
+system 只保存静态内容。Context 与 State 来源的提示词变化由 Prompt 写成带 key 的 Append 输入（`<dim-rule>`、`<dim-state>`，每项一条，与 `prompt/changed` 同一批次，按 `order` 排列；作用域结束时写 expired），在 Loop 消费的位置进入上下文，不改写已交付历史。分支创建或恢复时，Prompt 在 `branch/start`、`branch/resume` 分发时加载全部来源并写入变化；新 Session 的根分支同时采用 system 与模型，链上尚无已采用配置的分支开场时同样采用，其余子分支与恢复的分支不改 system。比较的基准是继承前缀里已交付的状态：祖先线上已采用、但投递输入还没有在继承前缀里被消费的变更不计入本线状态，本线按来源的实际值重新采用它，块在本线自己的消费处进入上下文；这类变更的 `System` 内容已经随前缀的配置生效，照常在找到处应用。`prompt/changed` 通过 `inputs` 命名与它同批次的投递输入，读取方在采纳前查询这些输入是否已在链上被消费。来源由各能力在自己的 `apply` 中注册到 PromptRegistry，注册在该能力卸载时撤回。
 
 运行时部件也可直接追加不带 key 的 `<dim-state>` 快照，走普通 `input/message` 的 Append 输入路径。它们不注册 Prompt 来源，不进入 keyed 状态基线，压缩后不保证重放；`source` 属性不代替输入 key。标记与保留规则的关系见[面向模型的提示词 §3](../../design/model-prompts.md#3-channels)。
 
@@ -66,4 +66,4 @@ system 只保存静态内容。Context 与 State 来源的提示词变化由 Pro
 
 公开流程检查关联更新不混版、任一加载或提交失败不半发布、重叠刷新乱序完成不覆盖新版本、取消和初始化回滚等待真实清理、请求与恢复固定来源、分支截点与隔离、工具正文不重复交付、撤销及作用域结束在压缩后仍有效。
 
-在仓库根目录运行 `cargo test --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、格式检查、`cargo run -p xtask -- check` 和 `cargo run -p xtask -- graph`。固定 v1 样本位于 `crates/dim-agent-types/tests/fixtures`，由 `dim-agent-types` 的 wire 合同测试校验。
+在仓库根目录运行 `cargo test --workspace --locked`、`cargo clippy --workspace --all-targets --locked -- -D warnings`、格式检查和 `cargo run -p xtask -- check`。固定 v1 样本位于 `crates/dim-agent-types/tests/fixtures`，由 `dim-agent-types` 的 wire 合同测试校验。

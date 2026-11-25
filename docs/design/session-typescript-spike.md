@@ -77,7 +77,7 @@ No evidence from this spike requires changing rutis, adding core lifecycle gates
 
 ## Verification and ablation
 
-The executable probe, example-target Clippy with warnings denied, `xtask check`, formatting and whitespace checks pass. Production source, dependencies, generated architecture output, wire formats and frozen event fixtures are unchanged. Full workspace tests are left to PR CI because no product implementation changed.
+The executable probe, example-target Clippy with warnings denied, `xtask check`, formatting and whitespace checks pass. Production source, dependencies, wire formats and frozen event fixtures are unchanged. Full workspace tests are left to PR CI because no product implementation changed.
 
 The retained harness pieces each serve an exercised boundary: Node/rows wrappers install existing runtime plugins as loader rows; the anchor waits for the existing rows gate; the native fixture supplies per-Session identity and transports its actual broadcast; fences replace timing sleeps; cancellation uses the existing token guard. The native helper service and event encoding remain probe-only. No additional abstractions are needed by the measured flows.
 

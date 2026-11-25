@@ -1,6 +1,8 @@
 use crate::config::{ModelConfigFile, ProviderKind};
 use dim_agent_capabilities::context_model::{output_allowance, window_facts};
-use dim_agent_capabilities::host::{ContextModel, HostError, HostFuture, ResolveContextModel};
+use dim_agent_capabilities::host::{
+    ContextModel, HostError, HostFuture, ModelNetwork, ResolveContextModel,
+};
 use dim_agent_runtime::ModelId;
 use dim_agent_types::{ModelCapabilities, ModelCapabilitySnapshot, ModelConfig, ModelRequest};
 use std::collections::HashMap;
@@ -13,6 +15,7 @@ pub(crate) struct Model {
     pub api_key_env: Option<String>,
     pub defaults: ModelConfig,
     pub kind: ProviderKind,
+    pub network: ModelNetwork,
     pub preset: Option<String>,
     pub context_window: u64,
     pub max_output_tokens: u64,
@@ -47,6 +50,7 @@ impl AimuxModels {
                     "Provider IDs must be nonempty and unique",
                 ));
             }
+            validate_network(&provider.network, &provider.id)?;
             let url = url::Url::parse(&provider.base_url)
                 .map_err(|_| HostError::failed(format!("Invalid baseUrl for {}", provider.id)))?;
             if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
@@ -143,6 +147,7 @@ impl AimuxModels {
                         api_key_env: provider.api_key_env.clone(),
                         defaults,
                         kind: provider.kind,
+                        network: provider.network.clone(),
                         preset: preset.clone(),
                         context_window,
                         max_output_tokens,
@@ -219,6 +224,36 @@ impl AimuxModels {
     }
 }
 
+/// The development file states the same connection facts a product record
+/// does, with the same rules: an HTTP or HTTPS root proxy URL, and a positive
+/// safe-integer timeout. A value the transport would refuse fails here, next to
+/// the provider that states it.
+fn validate_network(network: &ModelNetwork, provider: &str) -> Result<(), HostError> {
+    if let Some(proxy) = &network.proxy {
+        let root = url::Url::parse(proxy).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && matches!(url.path(), "" | "/")
+        });
+        if !root {
+            return Err(HostError::failed(format!(
+                "Invalid proxy for {provider}: an HTTP or HTTPS root URL is required"
+            )));
+        }
+    }
+    if network
+        .timeout_ms
+        .is_some_and(|value| value == 0 || value > dim_agent_types::JS_MAX_SAFE_INTEGER)
+    {
+        return Err(HostError::failed(format!(
+            "Invalid network timeout for {provider}: a positive safe integer is required"
+        )));
+    }
+    Ok(())
+}
+
 /// The model-file profile's window facts: the entry the request names, by
 /// provider and model id (ContextCompaction §5.1).
 impl ResolveContextModel for AimuxModels {
@@ -278,6 +313,47 @@ mod tests {
         assert_eq!(
             models.api_key_envs(),
             BTreeSet::from(["LOCAL_KEY".to_owned(), "OTHER_KEY".to_owned()])
+        );
+    }
+
+    /// The development file's `compatible.preset` is the vendor package the
+    /// compatible protocol builds, so it reaches the image rule too: an xAI
+    /// model takes only PNG and JPEG, and a GIF becomes its reference.
+    #[test]
+    fn the_model_config_xai_preset_reaches_the_image_rule() {
+        let config: ModelConfigFile = serde_json::from_value(json!({
+            "defaultModel": {"providerId": "local", "modelId": "one"},
+            "providers": [{
+                "id": "local",
+                "kind": "openai-compatible",
+                "baseUrl": "https://api.x.ai/v1",
+                "compatible": {"preset": "xai"},
+                "models": [{"id": "one", "contextWindow": 128000, "maxOutputTokens": 4096,
+                            "config": {"maxTokens": 4096}}]
+            }]
+        }))
+        .unwrap();
+        let models = AimuxModels::from_config(config).unwrap();
+        let model = models.get("local", "one").unwrap();
+        assert_eq!(model.preset.as_deref(), Some("xai"));
+        let request: ModelRequest = serde_json::from_value(json!({
+            "providerId": "local", "modelId": "one",
+            "messages": [{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "mediaType": "image/gif",
+                 "data": "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"}}
+            ]}]
+        }))
+        .unwrap();
+        let prepared =
+            crate::request::convert(&request, &model.kind, model.preset.as_deref()).unwrap();
+        let wire = serde_json::to_string(&prepared.options).unwrap();
+        assert!(
+            !wire.contains("image/gif"),
+            "the configured xAI destination takes no GIF as pixels: {wire}"
+        );
+        assert!(
+            wire.contains("img:"),
+            "the GIF becomes its reference: {wire}"
         );
     }
 }

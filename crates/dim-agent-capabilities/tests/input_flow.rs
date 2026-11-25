@@ -14,9 +14,10 @@ use std::{
 use dim_agent_capabilities::{defaults, timeline_tree::TreeCommands};
 use dim_agent_runtime::testing::{MinimalHost, branch_events};
 use dim_agent_runtime::{
-    AgentBuilder, AgentConfig, AgentError, BoxFuture, MemoryTimelineStore, PublishCallback,
-    QueryPage, QueryResult, QuerySpec, Result, Session, SessionConfig, StoredBranch, StoredEvent,
-    TimelineKey, TimelineReadScope, TimelineStore, TimelineTrace,
+    AgentBuilder, AgentConfig, AgentError, BoxFuture, Feature, LoopSnapshot, LoopState,
+    MemoryTimelineStore, PublishCallback, QueryPage, QueryResult, QuerySpec, Result, Session,
+    SessionConfig, StoredBranch, StoredEvent, TimelineKey, TimelineReadScope, TimelineStore,
+    TimelineTrace,
 };
 use dim_agent_types::{AgentEvent, ContentBlock, EventKind, InputMessageData, InputMode};
 use support::Events;
@@ -67,6 +68,70 @@ async fn start(store: Arc<dyn TimelineStore>) -> Fixture {
 
 fn memory() -> Arc<dyn TimelineStore> {
     Arc::new(MemoryTimelineStore::default())
+}
+
+/// A Session on the tree alone, with no Loop or InputQueue taking inputs off
+/// the head the append checks.
+async fn quiet() -> Fixture {
+    use dim_agent_capabilities::{
+        prompt_guide::PromptGuidePlugin,
+        timeline_tree::{TimelineTreePlugin, TreeTimelinePlugin},
+    };
+    use rutis::host::{CtxHost, DynPlugin, Effect, Key, TypeKey};
+    struct QuietLoopState(tokio::sync::watch::Sender<LoopSnapshot>);
+    impl LoopState for QuietLoopState {
+        fn state(&self) -> LoopSnapshot {
+            LoopSnapshot::default()
+        }
+        fn watch(&self) -> tokio::sync::watch::Receiver<LoopSnapshot> {
+            self.0.subscribe()
+        }
+    }
+    struct QuietLoop(Key<dyn LoopState>);
+    impl DynPlugin for QuietLoop {
+        fn name(&self) -> &str {
+            "QuietLoop"
+        }
+        fn injects(&self) -> Vec<TypeKey> {
+            Vec::new()
+        }
+        fn apply<'a>(
+            &'a self,
+            ctx: &'a rutis::Ctx,
+        ) -> rutis::host::BoxFuture<'a, rutis::Result<Effect>> {
+            Box::pin(async move {
+                ctx.provide_at(
+                    self.0.clone(),
+                    Arc::new(QuietLoopState(
+                        tokio::sync::watch::channel(LoopSnapshot::default()).0,
+                    )) as Arc<dyn LoopState>,
+                )?;
+                Ok(Effect::Done)
+            })
+        }
+    }
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::register_names(&mut builder);
+    builder.require_feature(
+        Feature::new("TimelineTree")
+            .session("TimelineTree", |names| {
+                Ok(Box::new(TimelineTreePlugin::new(names)?))
+            })
+            .branch("TreeTimeline", |names| {
+                Ok(Box::new(TreeTimelinePlugin::new(names)?))
+            }),
+    );
+    builder.require_feature(Feature::new("Prompt").session("PromptGuide", |names| {
+        Ok(Box::new(PromptGuidePlugin::new(names)?))
+    }));
+    builder.require_feature(
+        Feature::new("QuietLoop")
+            .branch("QuietLoop", |names| Ok(Box::new(QuietLoop(names.key()?)))),
+    );
+    builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(memory()));
+    let host = MinimalHost::start(&builder).await.unwrap();
+    let session = host.create_session(SessionConfig::default()).await.unwrap();
+    Fixture { host, session }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -234,6 +299,27 @@ async fn an_empty_batch_is_refused() {
         "an empty batch is invalid: {error:?}"
     );
     assert_eq!(session.sequence("main").unwrap(), before);
+    host.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_conditional_input_replay_at_its_head_returns_the_committed_event() {
+    let Fixture { host, session } = quiet().await;
+    let tree = session.session_service::<TreeCommands>().unwrap();
+    let head = session.sequence("main").unwrap();
+    let written = tree
+        .input_if_head("main".into(), input("test:replay", "one"), head)
+        .await
+        .unwrap()
+        .expect("a standing head commits the input");
+    assert_eq!(written.sequence, head + 1);
+    let replay = tree
+        .input_if_head("main".into(), input("test:replay", "one"), written.sequence)
+        .await
+        .unwrap()
+        .expect("the committed input is returned");
+    assert_eq!(replay.id, written.id, "the replay writes nothing");
+    assert_eq!(session.sequence("main").unwrap(), written.sequence);
     host.close().await.unwrap();
 }
 

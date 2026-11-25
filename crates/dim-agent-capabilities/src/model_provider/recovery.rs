@@ -31,6 +31,10 @@ pub trait RetryObserver {
     /// failure `retry.kind` with `retry.reason`; `None` clears the retry when
     /// the attempt starts or the wait is cancelled.
     fn waiting(&mut self, _retry: Option<RetryWaiting<'_>>) {}
+    /// The policy starts another attempt: what the failed one showed may be
+    /// cleared and the request becomes replaceable again. No other outcome
+    /// calls it.
+    fn retrying(&mut self) {}
 }
 
 /// One retry about to sleep, as the progress display shows it.
@@ -61,8 +65,8 @@ pub type Consume<S, T> = for<'a> fn(
 /// once, and a terminal rejection is settled with its credential owner. A
 /// request that continues a `chain` starts from the attempts and the wait it
 /// spent, so the chain keeps one budget. `consume` reads one attempt's stream
-/// into `state` and clears `replay_safe` once output that cannot be replayed
-/// was handed on.
+/// into `state` and clears `replay_safe` once the attempt committed an event
+/// to the Timeline.
 pub async fn invoke<S: Send + RetryObserver, T>(
     host: &ModelHost,
     request: &Arc<ModelRequest>,
@@ -137,7 +141,14 @@ pub async fn invoke<S: Send + RetryObserver, T>(
                     }
                     break result;
                 }
-                FailureAction::Retry(delay) | FailureAction::RecoverCredentials(delay) => delay,
+                FailureAction::Retry(delay) => {
+                    // A retry replaces what the failed attempt showed; only
+                    // here may its output be cleared and the request become
+                    // replaceable, before the backoff wait starts.
+                    state.retrying();
+                    delay
+                }
+                FailureAction::RecoverCredentials(delay) => delay,
             };
             if !delay.is_zero() {
                 let (kind, reason) = failure.unwrap_or((ModelFailureKind::Unknown, None));
@@ -175,6 +186,7 @@ pub async fn invoke<S: Send + RetryObserver, T>(
                 connection = recovered.connection;
                 recovery = Some(recovered.recovery);
                 recovery_state.phase = CredentialRecoveryPhase::Recovered;
+                state.retrying();
             }
         }
     };

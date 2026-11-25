@@ -103,6 +103,7 @@ pub enum Effect {
     None,
     /// The prompt wants to leave without answering anything.
     Close,
+    UseSkill(String),
     Fork,
     Exit,
     /// `Update now`: leave the interface and update.
@@ -153,6 +154,12 @@ pub enum Effect {
     },
     /// End this line, once the user confirmed it.
     EndLine {
+        session_id: String,
+        projection_id: u64,
+        branch_id: String,
+    },
+    /// Continue on this line: make it the Session's default branch and show it.
+    SetDefaultLine {
         session_id: String,
         projection_id: u64,
         branch_id: String,
@@ -244,6 +251,11 @@ pub enum Effect {
     Logout(crate::model::session::AccountTarget),
     /// Read this account's state; the host reports it back.
     LoginStatus(String),
+    ChatGptProfiles,
+    SelectChatGptProfile {
+        profile_id: String,
+        attempt: u64,
+    },
     /// Report this account provider's usage again.
     LoginUsage(String),
     /// Open this page in the browser.
@@ -254,7 +266,7 @@ pub enum Effect {
     },
     ClearModelPreferences {
         query: String,
-        after: Option<dim_agent_types::ModelId>,
+        batches: usize,
         provider_id: String,
         model_id: String,
         expected_version: u32,

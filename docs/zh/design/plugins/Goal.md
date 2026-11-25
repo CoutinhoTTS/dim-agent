@@ -70,7 +70,7 @@ flowchart TB
 
 Goal 不拥有自己类型的持久状态。分支 `B` 的目标是 `B` 本地事件中最新的存活 `goal:state` 块所陈述的状态；在记录出现之前写成的历史上，则是按下面规则折叠的两个旧 key。只有 Goal 的分支部分写这条记录。它是一条普通的 `input/message`，带一个 key 为 `goal:state` 的 raw 块，模式 Append，因此模型、客户端与 Goal 的折叠读到同一个事实：模型经 `render_input`，客户端经分支历史或通用带 key 投影，折叠经其 Dispatcher 订阅。没有为它特判任何规则或 ADR：这个块像其他被采用的输入一样进入模型上下文，压缩也像其他 key 一样经带 key 的基线重放它。
 
-**变更**是触发器，不是状态陈述。`session.goal.set/edit/pause/resume/clear` 与 `goal_update` 经 `TreeCommands::inputs`（`Branch::inputs`）提交一个原子批次、两条输入：回答该变更的状态记录，然后是触发器，其唯一的 raw 块 `kind="goal"`，说明被要求了什么（A.5），模式不变。记录排在前面，因此无论调度如何，InputQueue 都先应用记录、再应用触发器：触发器的轮次开始时，记录已经应用。分支部分在自己的写锁下撰写记录，且要等折叠已推进 Goal 自己的上一次写入，因此记录基于它之前的状态陈述该变更。记录按 submission id 在 `trigger="goal:<uuid>"` 中写名触发器，而不是 `after`（A.5）；折叠把这样的记录暂留一个事件，当下一个事件正是写名的触发器时，在触发器的序号处先应用变更、再应用记录（A14）。给定 `after` 的快照只写一次。没有记录的触发器——更早版本写成的历史，或批次之外写入的触发器——在加载时被回答一次（§4.2）。被 InputQueue 删除的变更触发器从未生效：折叠去掉它重新计算；只要已有写名该触发器的记录或任何更晚的记录曾被写入或正在被写入，Goal 就写一条补偿记录，其 `after` 是 `input/deleted` 的序号，陈述分支去掉该触发器后的状态。是否存在这样的记录在写锁下决定，因此在删除被折叠期间提交的记录会被补偿记录取代，绝不会成为最新的存活记录。
+**变更**是触发器，不是状态陈述。`session.goal.set/edit/pause/resume/clear` 与 `goal_update` 经 `TreeCommands::inputs`（`Branch::inputs`）提交一个原子批次、两条输入：回答该变更的状态记录，然后是触发器，其唯一的 raw 块 `kind="goal"`，说明被要求了什么（A.5），模式不变。记录排在前面，因此无论调度如何，InputQueue 都先应用记录、再应用触发器：触发器的轮次开始时，记录已经应用。分支部分在自己的写锁下撰写记录，且要等折叠已推进 Goal 自己的上一次写入，因此记录基于它之前的状态陈述该变更。自动状态记录只在折叠已追平分支的已提交截点、且它答复的事实仍然成立时写入：结算期间抵达的驱动输入、更新的轮次或中断让暂停不再成立，暂停就不写，交给随后那轮或该中断自己的暂停答复。状态记录或变更写失败时不接手它在结算期间搁置的 interrupt：那条暂停留在 fold 里，等之后的结算接手；这次结算取消掉的每个决定也不会再决定一次，因为结算在写入之前会等它取消掉的每个 task 收尾。结算期间折叠进来的 evaluator 结论或评估失败不被丢掉：走条件写入的变更在写下自己的记录之前，先把这些决定要写的状态记录写出来；它的记录只在最后一次 drain 看到的已提交截点仍然成立时提交，截点变了就重新 drain，因此不会在一条它必须先写出的已提交事实还没折进来时写自己的记录。evaluator 评估请求的创建路径没有这个截点检查：`Change::Report` 的 completed 且 judge 为 evaluator 时，记录与 trigger 同批经 `Branch::inputs` 提交，也不再 drain，那次 drain 之后折进来的结论不在这个保证之内。这些记录保留它们答复的事实：done 和 blocked 是终态，后台任务仍开着也照常写出（Pursuit §5 的后台等待只针对 continue）；某条记录 append 失败时，它和它之后还没写出的决定留在队列里，由之后的结算写出，或按已被更新事实取代丢掉。记录按 submission id 在 `trigger="goal:<uuid>"` 中写名触发器，而不是 `after`（A.5）；折叠把这样的记录暂留一个事件，当下一个事件正是写名的触发器时，在触发器的序号处先应用变更、再应用记录（A14）。给定 `after` 的快照只写一次。没有记录的触发器——更早版本写成的历史，或批次之外写入的触发器——在加载时被回答一次（§4.2）。被 InputQueue 删除的变更触发器从未生效：折叠去掉它重新计算；只要已有写名该触发器的记录或任何更晚的记录曾被写入或正在被写入，Goal 就写一条补偿记录，其 `after` 是 `input/deleted` 的序号，陈述分支去掉该触发器后的状态。是否存在这样的记录在写锁下决定，因此在删除被折叠期间提交的记录会被补偿记录取代，绝不会成为最新的存活记录。
 
 折叠在变更 `input/message` 的序号处应用它，并在同一条序号处应用批次中的记录（A14），因此没有任何决策会看到没有记录的触发器。它忽略三类记录：`after` 写名已被删除的变更的、比已折叠的最新变更更旧的、以及比已应用的最新记录更旧的；Goal 也从不撰写 `after` 低于自己已写记录的记录，因此无论写入任务的提交顺序如何，最新的存活记录总是陈述最新的状态。**模型**在受该变更影响的第一个请求处得知它：记录在同一原子批次中排在触发器之前提交，且 InputQueue 按序号顺序应用输入，因此携带触发器的第一个请求已经带着排在它之前的记录。Queue 命令仍驱动自己的轮次（A14）。之后被 InputQueue 删除（`input/deleted`）的变更被移除，折叠去掉它重新计算（[session access](../contracts/session-access.md)）。
 
@@ -209,7 +209,7 @@ sequenceDiagram
   Note over TL: 模型最后看到暂停，该轮结束时 C1 为假
 ```
 
-按序号决定：决策和任务的复核只使用了直到 `N` 的已消费事件，因此续跑成立，之后的暂停记录结束目标。这多出的一轮是可接受的（决定 E18）；Goal 不撤回其续跑。
+按序号决定：决策和任务的复核只使用了直到 `N` 的已消费事件，续行只在 `N` 仍是已提交头部时写入，否则重新决定，因此续跑成立，之后的暂停记录结束目标。这多出的一轮是可接受的（决定 E18）；Goal 不撤回其续跑。
 
 ### 4.2 重载
 
@@ -278,11 +278,11 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 | §4.1 改别的模块拥有的状态时写指令事件 | 每次变更都是 Goal 自己消费的输入；Goal 从不删除或应用输入，它依据 InputQueue 的 `input/deleted`，不读 `input/withdraw`。 |
 | §4.2 交接后不能撤回 | Goal 从不撤回自己的续跑；中断后才被应用的续跑多跑一轮，之后的暂停块结束目标。 |
 | §4.3 只用 before 回调在写入前干预 | 不适用：Goal 不注册 before 回调，其工具和方法也不加入口检查（它们只写不判断）。 |
-| §4.4 核心机制不带业务含义 | Goal 不要求 Timeline、Dispatcher、InputQueue 或 Loop 改动；其标记是一个普通 key 下的普通 raw 块，触发器不带 key。 |
-| §4.5 批次 | 折叠结果随每条事件推进；对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 的决定在 Goal 消费它们时只依据已消费状态做出，写入前的复核也只用已消费状态。 |
+| §4.4 核心机制不带业务含义 | 除条件输入提交（§9）外，Goal 不要求 Timeline、Dispatcher、InputQueue 或 Loop 改动；其标记是一个普通 key 下的普通 raw 块，触发器不带 key。 |
+| §4.5 批次 | 折叠结果随每条事件推进；对 `branch/start`、`turn/end`、`stop/interrupt` 与 `input/deleted` 的决定在 Goal 消费它们时只依据已消费状态做出，写入前的复核也只用已消费状态。写入时还核对决定时的已提交头部。 |
 | §4.6 模型上下文只含交接后被读取的事件 | 目标块与续跑只在被采用后进入模型；被删除的输入从不进入，并从折叠中移除。 |
 | §4.7 插件之间只通过公开事件和服务交互 | Goal 只读公开的 `branch/start`、`input/*`、`turn/*` 与 `stop/interrupt` 契约，并经 `Branch::input` 写入。 |
-| §4.8 向机制所有者提通用需求 | 无：Goal 使用的运行时服务已按名导出（C5，#4）。 |
+| §4.8 向机制所有者提通用需求 | 无：Goal 使用的运行时服务已按名导出（C5，#4）；条件输入提交见 §9。 |
 | §4.9 只有后续决定要用的事实进入 Timeline | 每条变更输入既是模型上下文，也是折叠的输入；Goal 自己的写入驱动轮次、结束续跑或陈述状态；折叠结果就是最新的存活记录，也就是压缩重放的内容（A16）；折叠结果、在途任务和诊断不进入 Timeline。 |
 | §1 Capability 与 App Server 边界 | 两个部分都是各自包中的 Capability；Rpc 只分派 `sessionMethods`。 |
 | ADR 002 D1 作用域跟随状态所有者 | 工具与方法是 Session 服务；目标、其折叠结果与决策是分支状态。 |
@@ -293,7 +293,7 @@ Goal 只在它服务的分支上以来源 `goal` 写入 `input/message`；由此
 
 ## 9. 向机制所有者提出的需求
 
-输入入口每次调用只提交一条输入，变更触发器与其记录因此无法共享一次提交。需求——一个原子多输入提交：批次整体校验、只准入一次，按给定顺序返回已提交事件，对已提交的 id 幂等重放——由输入入口的多输入提交满足：`TreeCommands::inputs`、`Session::inputs` 与 `Branch::inputs`，契约见 [interrupt §2](../../../architecture/rust-agent/interrupt.md#2-事件契约)。Goal 的变更批次是它的第一个消费者（#1195，[#1215](https://github.com/arcships/dim/pull/1215)）。之前的需求"运行时服务按名字暴露给非 Rust 部分"（#4）已由 C5 交付（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）。
+输入入口每次调用只提交一条输入，变更触发器与其记录因此无法共享一次提交。需求——一个原子多输入提交：批次整体校验、只准入一次，按给定顺序返回已提交事件，对已提交的 id 幂等重放——由输入入口的多输入提交满足：`TreeCommands::inputs`、`Session::inputs` 与 `Branch::inputs`，契约见 [interrupt §2](../../../architecture/rust-agent/interrupt.md#2-事件契约)。Goal 的变更批次是它的第一个消费者（#1195，[#1215](https://github.com/arcships/dim/pull/1215)）。之前的需求"运行时服务按名字暴露给非 Rust 部分"（#4）已由 C5 交付（[分支 TypeScript 绑定](../../../design/branch-typescript.md)）。另一个需求——条件输入提交：输入入口接收作出决定时的已提交头部，在提交锁内核对，头部变了就不写入并答复调用方；Goal 的续行是它的第一个消费者（#1989）。
 
 ## 10. 实现
 
@@ -452,7 +452,7 @@ in its last 3 continued turns"，`evaluation_failed` "the evaluator could not ch
 
 ### A.5.2 评估
 
-状态记录中目标文本与状态句子的句子、以及续跑块的句子，是同一次策略改动，按 [model-facing prompts §8](../model-prompts.md#8-一次改动怎样判定) 的场景集以 current 对 candidate 判定：`main` 上设置的目标会续跑；一条线不续跑它继承来的目标；已完成或已阻塞的目标停止。两句话都在出厂配置上开放，因此候选走真实装配运行，结果在交付处报告。`GoalTexts` 承载它们，字段为 `objective` 与 `continuation`，分支处写为 `{branch}` 由代码替换；`install_with` 在工厂处换成候选。两句话分别判定，各一个 `--text` id；一次评估可以同时带上这两对 `--text`/`--candidate`，因此它们按本节所说的同一次改动来判定。
+状态记录中目标文本与状态句子的句子、以及续跑块的句子，是同一次策略改动，按 [model-facing prompts §8](../model-prompts.md#8-一次改动怎样判定) 的场景集以 current 对 candidate 判定：`main` 上设置的目标会续跑；一条线不续跑它继承来的目标；已完成或已阻塞的目标停止。两句话都在出厂配置上开放，因此候选走真实装配运行，结果在交付处报告。`GoalTexts` 承载它们，字段为 `objective` 与 `continuation`，分支处写为 `{branch}` 由代码替换；`install_with` 在工厂处换成候选。两句话分别判定，各一个 `--text` id；一次评估可以同时带上这两组 `--text`/`--baseline`/`--candidate`，因此它们按本节所说的同一次改动来判定。
 
 ### A.6 Timeline 机制
 
@@ -465,7 +465,7 @@ Goal 消费 `branch/start`、`session/forked`、`branch/create`、`branch/create
 | 写入 | 来源为 `goal` 的 `input/message`，`submissionId: "goal:<uuid>"`，带标记和模式，经分支的公开输入入口 `Branch::input` 写入，由它在边界校验并追加 `input/message`（[interrupt](../../../architecture/rust-agent/interrupt.md)）。Session 部分的调用以同样方式写入，从不查询折叠结果 |
 | 消费路径 | InputQueue 追加 `input/applied`；Loop 追加 `input/consumed`。Goal 从不写 Steer |
 | 复核 | turn/end 任务读取 Settings，并在续跑驱动了结束回合时读取其进度，然后基于相同决定轮次的已消费状态复核（[time-bus](../../../architecture/rust-agent/time-bus.md) §4）；之后的事实在序号上先于写入，由 InputQueue、Loop 和折叠结果处理 |
-| 卸载 | 卸载清理函数结束订阅和在途写入任务；在追加前被取消的任务不写任何内容 |
+| 卸载 | 卸载清理函数结束订阅和在途写入任务；在追加前被取消的任务不写任何内容。关闭暂停先追平折叠再写，追不平就不写 |
 | 重启、Session 恢复 | 与加载相同；已提交但未消费的续跑随 Session 一起恢复 |
 
 ## 附录 B. 完整冲突表

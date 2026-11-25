@@ -2043,6 +2043,210 @@ async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
     root.shutdown().await.unwrap();
 }
 
+/// A stream event that reports its status as a JSON integer cuts a reply that
+/// showed only private thought, so the attempt committed nothing and the
+/// request is retried in place: the 504 that the replacing attempt reports is
+/// retried the same way, and the third attempt's answer finishes the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_status_code_mid_thinking_is_retried_in_place() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("stream-code-thinking".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "after the retries")),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(requests, 3, "the 502 and the 504 are each retried in place");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// A stream event that reports a rejected credential is `auth_rejected`, which
+/// the retry policy never retries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_auth_code_is_rejected_once() {
+    for code in ["401", "403"] {
+        let chat = NativeServer::start("openai-chat").await;
+        let agent = model_agent(chat.models(), None).await;
+        let session = agent.create_session(chat.session_config()).await.unwrap();
+        session
+            .submit(format!("stream-code-{code}"), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let failure = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelOutputEnd(data) => match &data.outcome {
+                    ModelOutputOutcome::Failed {
+                        failure: Some(failure),
+                        ..
+                    } => Some(failure.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("a failed model output");
+        assert_eq!(failure.kind, ModelFailureKind::AuthRejected, "{code}");
+        assert_eq!(failure.attempts, 1, "{code}");
+        let requests = chat.endpoint.requests.lock().unwrap().len();
+        assert_eq!(requests, 1, "{code} is not retried");
+        agent.close().await.unwrap();
+        chat.close().await;
+    }
+}
+
+/// A three-digit number that arrives as the event's `type` is an opaque
+/// label, not a status: the failure stays unknown and the request is not
+/// retried. The second attempt would answer if it were retried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_numeric_type_is_not_a_status_and_is_not_retried() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("stream-type-502".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failure = events.iter().find_map(|event| match &event.kind {
+        EventKind::ModelOutputEnd(data) => match &data.outcome {
+            ModelOutputOutcome::Failed {
+                failure: Some(failure),
+                ..
+            } => Some(failure.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert!(
+        failure.is_some(),
+        "the turn completed over {requests} requests: {events:?}"
+    );
+    let failure = failure.unwrap();
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    assert_eq!(failure.attempts, 1);
+    assert_eq!(
+        requests, 1,
+        "an opaque numeric type is not a status and is not retried"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// A stream event that reports its status as a three-digit string cuts a
+/// reply that showed only private thought, so the attempt committed nothing
+/// and the request is retried in place; the second attempt finishes the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_status_string_mid_thinking_is_retried_in_place() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit(
+            "stream-code-string-thinking".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events.iter().any(
+            |event| matches!(&event.kind, EventKind::Text(data) if data.delta == "after the retry")
+        ),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(requests, 2, "the string 502 is retried in place");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// A retryable status still cannot replay an attempt that published visible
+/// answer text: a numeric 5xx after the text fails the turn after one
+/// request. The second attempt would answer if it were retried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_status_code_after_visible_output_is_not_retried() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("stream-code-visible-502".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "visible before the cut")),
+        "{events:?}"
+    );
+    let failure = events.iter().find_map(|event| match &event.kind {
+        EventKind::ModelOutputEnd(data) => match &data.outcome {
+            ModelOutputOutcome::Failed {
+                failure: Some(failure),
+                ..
+            } => Some(failure.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert!(
+        failure.is_some(),
+        "the turn completed over {requests} requests: {events:?}"
+    );
+    let failure = failure.unwrap();
+    assert_eq!(failure.kind, ModelFailureKind::ServerError);
+    assert_eq!(failure.attempts, 1);
+    assert_eq!(requests, 1, "published answer text is not replayed");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
 /// A gateway's generic `api_error` label beside a 422 does not make the
 /// failure retryable: the status decides, and the request is tried once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2234,6 +2438,306 @@ async fn a_thinking_only_reply_fails_after_one_attempt() {
     assert_eq!(
         requests, 1,
         "today: 1 request, no retry; a narrowed replay rule makes it 2"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// Every failed `step/model-output-end` in `events`, with the line it carries.
+fn failed_model_outputs(events: &[Arc<AgentEvent>]) -> Vec<(String, ModelFailure)> {
+    events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::ModelOutputEnd(data) => match &data.outcome {
+                ModelOutputOutcome::Failed {
+                    error,
+                    failure: Some(failure),
+                    ..
+                } => Some((error.clone(), (**failure).clone())),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// A content-filter finish reason is `content_filtered` in the persisted
+/// terminal, and the call the reply announced before the filter is closed
+/// without a continuation: the turn ends failed after one request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_content_filter_finish_reason_ends_the_turn_without_a_continuation() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("finish-filter".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (line, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::ContentFiltered);
+    assert!(
+        line.starts_with("The provider's content filter blocked the response"),
+        "{line}"
+    );
+    assert!(line.ends_with(" Rephrase the request."), "{line}");
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        1,
+        "the content filter ends the turn instead of continuing it"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// An unrecognized finish reason is `unknown` in the persisted terminal, and a
+/// reply that announced a call before it gets exactly one continuation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrecognized_finish_reason_continues_the_turn_once() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("finish-unrecognized".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (line, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    assert!(line.starts_with("The model request failed"), "{line}");
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        2,
+        "the announced call and one continuation"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// An unrecognized finish reason on a reply that announced nothing is
+/// `unknown` and gets no continuation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unrecognized_finish_reason_without_announced_calls_does_not_continue() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("finish-unrecognized-quiet".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    assert_eq!(failures[0].1.kind, ModelFailureKind::Unknown);
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        1,
+        "a reply that announced no call is not continued"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// A provider generation error finish reason is `unknown` in the persisted
+/// terminal, and a reply that announced a call before it gets exactly one
+/// continuation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_generation_error_finish_reason_continues_the_turn_once() {
+    let server = NativeServer::start("gemini").await;
+    let agent = model_agent(server.models(), None).await;
+    let session = agent.create_session(server.session_config()).await.unwrap();
+    session
+        .submit("finish-error".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (line, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::Unknown);
+    assert!(line.starts_with("The model request failed"), "{line}");
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    assert_eq!(
+        server.endpoint.requests.lock().unwrap().len(),
+        2,
+        "the announced call and one continuation"
+    );
+    agent.close().await.unwrap();
+    server.close().await;
+}
+
+/// A content filter that cuts a tool call's arguments short is still the
+/// reply's terminal: the started call closes as failed, the persisted output
+/// records `content_filtered`, and no continuation follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cut_tool_arguments_content_filter_keeps_its_kind() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit(
+            "cut-tool-arguments-content-filter".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (line, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::ContentFiltered);
+    assert!(
+        line.starts_with("The provider's content filter blocked the response"),
+        "{line}"
+    );
+    assert!(
+        events.iter().any(
+            |event| matches!(&event.kind, EventKind::ToolUseStart(data) if data.call_id == "call-1")
+        ),
+        "the reply announced the call before the filter: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::ToolUse(_))),
+        "the interrupted call is not announced as a completed call: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            EventKind::ToolResult(data)
+                if data.call_event_id.is_none()
+                    && data.results.iter().any(|result| result.call_id == "call-1"
+                        && result.result.content == ToolContent::Text(
+                            "Tool was not executed: the model output ended before its arguments were complete".to_owned(),
+                        ))
+        )),
+        "the started call closes as failed: {events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        1,
+        "the content filter ends the turn instead of continuing it"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Failed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// The same cut tool call with no content-filter terminal stays a malformed
+/// response and keeps the continuation its announced call earns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cut_tool_arguments_without_a_filter_stay_malformed() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit(
+            "cut-tool-arguments-without-filter".into(),
+            InputMode::Queue,
+            "main",
+        )
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let failures = failed_model_outputs(&events);
+    assert_eq!(failures.len(), 1, "{events:?}");
+    let (_, failure) = &failures[0];
+    assert_eq!(failure.kind, ModelFailureKind::MalformedResponse);
+    assert_eq!(
+        failure.reason.as_deref(),
+        Some("invalid arguments for tool 'echo'"),
+        "{failure:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::ToolUse(_))),
+        "the cut call is not announced as a completed call: {events:?}"
+    );
+    assert_eq!(
+        chat.endpoint.requests.lock().unwrap().len(),
+        2,
+        "the cut request and its continuation"
     );
     agent.close().await.unwrap();
     chat.close().await;
@@ -2436,6 +2940,96 @@ async fn respond_native(
                 }
             } else if continuation {
                 frame(json!({"content":"finished"}), json!("stop")) + "data: [DONE]\n\n"
+            } else if request_text.contains("cut-tool-arguments-content-filter") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(
+                        json!({"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"cut"}}]}),
+                        json!("content_filter"),
+                    )
+                    + "data: [DONE]\n\n"
+            } else if request_text.contains("cut-tool-arguments-without-filter") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(
+                        json!({"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"cut"}}]}),
+                        json!("tool_calls"),
+                    )
+                    + "data: [DONE]\n\n"
+            } else if request_text.contains("finish-filter") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(
+                        json!({"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"result text\"}"}}]}),
+                        json!("content_filter"),
+                    )
+                    + "data: [DONE]\n\n"
+            } else if request_text.contains("finish-unrecognized-quiet") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(json!({}), json!("unexpected_finish"))
+                    + "data: [DONE]\n\n"
+            } else if request_text.contains("finish-unrecognized") {
+                frame(json!({"content":"before"}), Value::Null)
+                    + &frame(
+                        json!({"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"echo","arguments":"{\"text\":\"result text\"}"}}]}),
+                        json!("unexpected_finish"),
+                    )
+                    + "data: [DONE]\n\n"
+            } else if request_text.contains("stream-code-thinking") {
+                // The cut arrives after the reply showed private thought, so
+                // the attempt committed nothing and the next one replaces it.
+                let cut = |code: u16, message: &str| {
+                    frame(
+                        json!({"reasoning_content":"thinking before the cut"}),
+                        Value::Null,
+                    ) + &sse(vec![json!({"error":{"code":code,"message":message}})])
+                };
+                match endpoint.requests.lock().unwrap().len() {
+                    1 => cut(502, "Network connection lost."),
+                    2 => cut(504, "Gateway timeout."),
+                    _ => {
+                        frame(json!({"content":"after the retries"}), json!("stop"))
+                            + "data: [DONE]\n\n"
+                    }
+                }
+            } else if request_text.contains("stream-code-visible-502") {
+                if endpoint.requests.lock().unwrap().len() == 1 {
+                    frame(json!({"content":"visible before the cut"}), Value::Null)
+                        + &sse(vec![
+                            json!({"error":{"code":502,"message":"Network connection lost."}}),
+                        ])
+                } else {
+                    frame(json!({"content":"after the retry"}), json!("stop")) + "data: [DONE]\n\n"
+                }
+            } else if request_text.contains("stream-type-502") {
+                if endpoint.requests.lock().unwrap().len() == 1 {
+                    sse(vec![
+                        json!({"error":{"type":"502","message":"the provider reported an opaque label"}}),
+                    ])
+                } else {
+                    frame(json!({"content":"after the retry"}), json!("stop")) + "data: [DONE]\n\n"
+                }
+            } else if request_text.contains("stream-code-string-thinking") {
+                if endpoint.requests.lock().unwrap().len() == 1 {
+                    frame(
+                        json!({"reasoning_content":"thinking before the cut"}),
+                        Value::Null,
+                    ) + &sse(vec![
+                        json!({"error":{"code":"502","message":"Network connection lost."}}),
+                    ])
+                } else {
+                    frame(json!({"content":"after the retry"}), json!("stop")) + "data: [DONE]\n\n"
+                }
+            } else if let Some(code) = request_text.split("stream-code-").nth(1).and_then(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<u16>()
+                    .ok()
+            }) {
+                frame(
+                    json!({"reasoning_content":"thinking before the cut"}),
+                    Value::Null,
+                ) + &sse(vec![
+                    json!({"error":{"code":code,"message":"the provider rejected the request"}}),
+                ])
             } else {
                 frame(json!({"content":"before"}), Value::Null)
                     + &frame(
@@ -2483,8 +3077,14 @@ async fn respond_native(
             sse(events)
         }
         "gemini" => {
+            let finish_error = request.to_string().contains("finish-error");
             let parts = if continuation {
                 json!([{"text":"finished"}])
+            } else if finish_error {
+                json!([
+                    {"text":"before","thoughtSignature":"boundary-signature"},
+                    {"functionCall":{"name":"echo","args":{"text":"result text"}},"thoughtSignature":"tool-signature"}
+                ])
             } else if request.to_string().contains("native-text-tool")
                 || request.to_string().contains("native-thought-tool")
             {
@@ -2503,7 +3103,7 @@ async fn respond_native(
                 {"functionCall":{"name":"echo","args":{"text":"result text"}},"thoughtSignature":"tool-signature"}
                 ])
             };
-            let mut chunk = json!({"candidates":[{"content":{"role":"model","parts":parts},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}});
+            let mut chunk = json!({"candidates":[{"content":{"role":"model","parts":parts},"finishReason":if finish_error && !continuation {"MALFORMED_FUNCTION_CALL"} else {"STOP"},"index":0}],"usageMetadata":{"promptTokenCount":5,"candidatesTokenCount":3,"totalTokenCount":8}});
             if missing_terminal {
                 chunk["candidates"][0]
                     .as_object_mut()
@@ -2626,7 +3226,6 @@ async fn respond_native(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
-    let reference = String::from("img:12c5f2d047c10416");
     tokio::time::timeout(Duration::from_secs(30), async {
         for kind in ["openai-chat","openai-responses","anthropic","gemini"] {
             let server = NativeServer::start(kind).await;
@@ -2655,18 +3254,16 @@ async fn four_native_apis_preserve_signed_blocks_and_tool_continuation() {
                 assert_eq!(headers.get_all(header).iter().count(),1);
                 assert_eq!(headers.get_all("content-type").iter().count(),1,"{kind}");
                 assert!(!request.to_string().contains("native-secret"));
-                assert!(request.to_string().contains(&reference), "{kind}: {request}");
-                assert!(!request.to_string().contains(IMAGE), "{kind}: {request}");
                 if kind != "anthropic" {
                     assert!(!request.to_string().contains("cache_control"), "{kind}: {request}");
                 }
             }
             let first = &requests[0].2;
             match kind {
-                "anthropic" => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"text","text":reference,"cache_control":{"type":"ephemeral"}})),
-                "gemini" => assert!(first["contents"].as_array().unwrap().iter().flat_map(|message| message["parts"].as_array().unwrap()).any(|part|part["text"]==reference)),
-                "openai-responses" => assert!(first["input"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"].to_string().contains(&reference)),
-                _ => assert!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"].to_string().contains(&reference)),
+                "anthropic" => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE},"cache_control":{"type":"ephemeral"}})),
+                "gemini" => assert_eq!(*first["contents"].as_array().unwrap().iter().flat_map(|message| message["parts"].as_array().unwrap()).find(|part|part.get("inlineData").is_some()).unwrap(),json!({"inlineData":{"mimeType":"image/png","data":IMAGE}})),
+                "openai-responses" => assert_eq!(first["input"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"input_image","image_url":format!("data:image/png;base64,{IMAGE}")})),
+                _ => assert_eq!(first["messages"].as_array().unwrap().iter().find(|message| message["role"]=="user").unwrap()["content"][1],json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{IMAGE}")}})),
             }
             let next = &requests[1].2;
             match kind {
@@ -3838,6 +4435,8 @@ impl ToolDriver for ImageEcho {
 }
 
 const TOOL_IMAGE_MARKER: &str = "[Image: sent in the following user message as tool output.]";
+const TOOL_ERROR_MARKER: &str = "[Error: this tool result reports a failed tool call.]";
+const TOOL_IMAGE_LABEL: &str = "Tool output from tool call";
 
 fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
     events
@@ -3850,8 +4449,7 @@ fn tool_result_events(events: &[Arc<AgentEvent>]) -> Vec<&ToolContent> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_result_images_become_references_in_every_native_protocol() {
-    let reference = String::from("img:12c5f2d047c10416");
+async fn tool_result_images_take_the_form_its_protocol_defines() {
     tokio::time::timeout(Duration::from_secs(30), async {
         for kind in ["openai-chat", "openai-responses", "anthropic", "gemini"] {
             let server = NativeServer::start(kind).await;
@@ -3892,8 +4490,6 @@ async fn tool_result_images_become_references_in_every_native_protocol() {
             let requests = server.endpoint.requests.lock().unwrap().clone();
             assert_eq!(requests.len(), 2, "{kind}");
             let next = &requests[1].2;
-            assert!(!next.to_string().contains(IMAGE), "{kind}: {next}");
-            assert!(!next.to_string().contains(TOOL_IMAGE_MARKER), "{kind}: references need no image follow-up");
             let omitted = "[Image omitted: the image cannot be sent to this model.]";
             match kind {
                 "anthropic" => {
@@ -3906,9 +4502,15 @@ async fn tool_result_images_become_references_in_every_native_protocol() {
                         .unwrap();
                     assert_eq!(
                         result["content"],
-                        format!("result text{reference}{omitted}{omitted}"),
+                        json!([
+                            {"type":"text","text":"result text"},
+                            {"type":"image","source":{"type":"base64","media_type":"image/png","data":IMAGE}},
+                            {"type":"text","text":omitted},
+                            {"type":"text","text":omitted},
+                        ]),
                         "{kind}"
                     );
+                    assert!(!next.to_string().contains(TOOL_IMAGE_MARKER), "{kind}: no marker when the protocol carries the image inside");
                 }
                 "gemini" => {
                     let contents = next["contents"].as_array().unwrap();
@@ -3918,22 +4520,39 @@ async fn tool_result_images_become_references_in_every_native_protocol() {
                         .find(|part| part.get("functionResponse").is_some())
                         .unwrap();
                     let content = response["functionResponse"]["response"]["content"].as_str().unwrap();
-                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {response}");
+                    assert!(
+                        content.contains("result text") && content.contains(TOOL_IMAGE_MARKER),
+                        "{kind}: {response}"
+                    );
                     assert_eq!(content.matches(omitted).count(), 2, "{kind}: {response}");
+                    let user = contents.last().unwrap();
+                    assert_eq!(user["role"], "user", "{kind}");
+                    let parts = user["parts"].as_array().unwrap();
+                    assert!(parts[0]["text"].as_str().unwrap().starts_with(TOOL_IMAGE_LABEL), "{kind}: {}", parts[0]);
+                    assert_eq!(parts[1], json!({"inlineData":{"mimeType":"image/png","data":IMAGE}}), "{kind}");
                 }
                 "openai-responses" => {
                     let input = next["input"].as_array().unwrap();
                     let output = input.iter().find(|item| item["type"] == "function_call_output").unwrap();
                     let content = output["output"].as_str().unwrap();
-                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {output}");
+                    assert!(content.contains(TOOL_IMAGE_MARKER), "{kind}: {output}");
                     assert_eq!(content.matches(omitted).count(), 2, "{kind}: {output}");
+                    let user = input.iter().rev().find(|item| item["role"] == "user").unwrap();
+                    let parts = user["content"].as_array().unwrap();
+                    assert!(parts[0]["text"].as_str().unwrap().starts_with(TOOL_IMAGE_LABEL), "{kind}: {}", parts[0]);
+                    assert_eq!(parts[1], json!({"type":"input_image","image_url":format!("data:image/png;base64,{IMAGE}")}), "{kind}");
                 }
                 _ => {
                     let messages = next["messages"].as_array().unwrap();
                     let tool = messages.iter().find(|message| message["role"] == "tool").unwrap();
                     let content = tool["content"].as_str().unwrap();
-                    assert!(content.contains("result text") && content.contains(&reference), "{kind}: {tool}");
+                    assert!(content.contains(TOOL_IMAGE_MARKER), "{kind}: {tool}");
                     assert_eq!(content.matches(omitted).count(), 2, "{kind}: {tool}");
+                    let user = messages.last().unwrap();
+                    assert_eq!(user["role"], "user", "{kind}");
+                    let parts = user["content"].as_array().unwrap();
+                    assert_eq!(parts[0]["text"], format!("{TOOL_IMAGE_LABEL} call-1: the image after this text is that call's result."), "{kind}");
+                    assert_eq!(parts[1], json!({"type":"image_url","image_url":{"url":format!("data:image/png;base64,{IMAGE}")}}), "{kind}");
                 }
             }
             session.submit("another".into(), InputMode::Queue, "main").await.unwrap();
@@ -4005,12 +4624,12 @@ async fn a_model_without_image_input_gets_references_and_unreferenceable_image_p
 
 /// The request the two inside-form protocols get in the test below: one
 /// assistant tool call and one error tool result that carries an image.
-fn error_tool_result_request() -> ModelRequest {
+fn error_tool_result_request(is_error: bool) -> ModelRequest {
     let mut input = serde_json::Map::new();
     input.insert("text".into(), json!("result text"));
     let mut request = ModelRequest::new(
         "local",
-        "test-model",
+        "anthropic.claude-3-5-sonnet-20241022-v2:0",
         vec![
             Message::text(Role::User, "question"),
             Message {
@@ -4042,7 +4661,7 @@ fn error_tool_result_request() -> ModelRequest {
                         },
                     ]),
                     structured_content: None,
-                    is_error: Some(true),
+                    is_error: Some(is_error),
                 }]),
             },
         ],
@@ -4081,7 +4700,7 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     let mut stream = host
         .0
         .invoke(
-            Arc::new(error_tool_result_request()),
+            Arc::new(error_tool_result_request(true)),
             ModelConnection::Http(HttpModelConnection {
                 protocol: ModelProtocol::Anthropic,
                 base_url: server.uri(),
@@ -4147,7 +4766,7 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     let mut stream = host
         .0
         .invoke(
-            Arc::new(error_tool_result_request()),
+            Arc::new(error_tool_result_request(true)),
             ModelConnection::Bedrock(BedrockModelConnection {
                 base_url: server.uri(),
                 network: Default::default(),
@@ -4180,6 +4799,86 @@ async fn an_error_tool_result_image_keeps_the_flag_and_the_image() {
     );
     assert_eq!(result["toolResult"]["status"], "error", "{body}");
 
+    root.shutdown().await.unwrap();
+}
+
+/// AWS supports Bedrock's optional `toolResult.status` field only on Amazon
+/// Nova and Anthropic Claude 3 and 4. Another model receives no status for
+/// either result status, and a failure names itself in the result text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bedrock_model_outside_the_status_families_receives_no_tool_result_status() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    for is_error in [false, true] {
+        let server = MockServer::start().await;
+        let body = [
+            bedrock_frame("messageStart", json!({"role":"assistant"})),
+            bedrock_frame(
+                "contentBlockDelta",
+                json!({"contentBlockIndex":0,"delta":{"text":"ok"}}),
+            ),
+            bedrock_frame("contentBlockStop", json!({"contentBlockIndex":0})),
+            bedrock_frame("messageStop", json!({"stopReason":"end_turn"})),
+            bedrock_frame(
+                "metadata",
+                json!({"usage":{"inputTokens":1,"outputTokens":1}}),
+            ),
+        ]
+        .concat();
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/vnd.amazon.eventstream")
+                    .set_body_bytes(body),
+            )
+            .mount(&server)
+            .await;
+        let mut request = error_tool_result_request(is_error);
+        request.model_id = "us.meta.llama4-maverick-17b-instruct-v1:0".into();
+        let mut stream = host
+            .0
+            .invoke(
+                Arc::new(request),
+                ModelConnection::Bedrock(BedrockModelConnection {
+                    base_url: server.uri(),
+                    network: Default::default(),
+                    headers: Default::default(),
+                    auth: BedrockAuth::Bearer("native-secret".into()),
+                }),
+                CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        while let Some(chunk) = stream.next().await {
+            chunk.unwrap();
+        }
+        let sent = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&sent[0].body).unwrap();
+        let result = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|message| message["content"].as_array().into_iter().flatten())
+            .find(|part| part.get("toolResult").is_some())
+            .unwrap();
+        assert!(
+            result["toolResult"].get("status").is_none(),
+            "is_error={is_error}: the status field is unsupported: {body}"
+        );
+        let text = result["toolResult"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("result text") && text.contains("following user message"),
+            "is_error={is_error}: the image leaves the result and its text stays: {body}"
+        );
+        assert_eq!(
+            text.starts_with(TOOL_ERROR_MARKER),
+            is_error,
+            "is_error={is_error}: a failure names itself in the text: {body}"
+        );
+    }
     root.shutdown().await.unwrap();
 }
 
@@ -5435,4 +6134,649 @@ async fn an_override_replaces_the_user_agent_and_keeps_the_library_parts() {
     );
     root.shutdown().await.unwrap();
     server.close().await;
+}
+
+#[tokio::test]
+async fn chatgpt_plan_replays_namespaced_tool_calls_without_stored_responses() {
+    let server = NativeServer::start("openai-responses").await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let connection = || {
+        ModelConnection::Http(HttpModelConnection {
+            protocol: ModelProtocol::OpenaiResponses,
+            base_url: server.url.clone(),
+            network: Default::default(),
+            headers: Default::default(),
+            bearer: Some("chatgpt-plan-fixture".into()),
+            api_key: None,
+            preset: Some("openai-chatgpt".into()),
+        })
+    };
+    let mut request = ModelRequest::new(
+        "openai-chatgpt",
+        "gpt-5-mini",
+        vec![Message::text(Role::User, "use the local tool")],
+    );
+    request.system = Some(Arc::new(SystemPrompt::Text(
+        "Instructions stay in context".into(),
+    )));
+    request.tools = Some(MockTools.definitions().into());
+    request.config = Some(ModelConfig {
+        max_tokens: Some(2000.0),
+        temperature: Some(0.25),
+        top_p: Some(0.8),
+        ..Default::default()
+    });
+    let mut result = host
+        .0
+        .invoke(
+            Arc::new(request.clone()),
+            connection(),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut parts = None;
+    let mut stop = None;
+    while let Some(chunk) = result.next().await {
+        match chunk.unwrap() {
+            ModelChunk::Content(value) => parts = Some(value),
+            ModelChunk::MessageStop { reason, .. } => stop = Some(reason),
+            _ => {}
+        }
+    }
+    assert_eq!(stop, Some(ModelStopReason::ToolUse));
+    let parts = parts.unwrap();
+    let tool_results: Vec<_> = parts
+        .iter()
+        .filter_map(|part| match part {
+            MessagePart::ToolUse { id, .. } => Some(MessagePart::ToolResult {
+                tool_use_id: id.clone(),
+                content: "local result".into(),
+                is_error: None,
+                structured_content: None,
+            }),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tool_results.len(), 2);
+    request.messages.extend([
+        Arc::new(Message {
+            role: Role::Assistant,
+            content: MessageContent::Parts(parts),
+        }),
+        Arc::new(Message {
+            role: Role::ToolResult,
+            content: MessageContent::Parts(tool_results),
+        }),
+    ]);
+    let mut result = host
+        .0
+        .invoke(Arc::new(request), connection(), CancellationToken::new())
+        .await
+        .unwrap();
+    let mut stop = None;
+    while let Some(chunk) = result.next().await {
+        if let ModelChunk::MessageStop { reason, .. } = chunk.unwrap() {
+            stop = Some(reason);
+        }
+    }
+    assert_eq!(stop, Some(ModelStopReason::EndTurn));
+
+    let requests = server.endpoint.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    for (uri, headers, body) in &requests {
+        assert_eq!(uri.path(), "/v1/responses");
+        assert_eq!(headers["authorization"], "Bearer chatgpt-plan-fixture");
+        assert!(!headers.contains_key("originator"));
+        assert!(!headers.contains_key("chatgpt-account-id"));
+        assert_eq!(body["store"], false);
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["input"][0]["role"], "developer");
+        assert_eq!(body["tools"][0]["type"], "namespace");
+        assert_eq!(body["tools"][0]["name"], "dim");
+        for field in [
+            "temperature",
+            "top_p",
+            "max_output_tokens",
+            "previous_response_id",
+        ] {
+            assert!(body.get(field).is_none(), "unexpected {field}");
+        }
+    }
+    let replay = requests[1].2["input"].as_array().unwrap();
+    let call = replay
+        .iter()
+        .find(|item| item["type"] == "function_call")
+        .unwrap();
+    assert_eq!(call["namespace"], "dim");
+    assert!(
+        replay
+            .iter()
+            .any(|item| item["type"] == "function_call_output"
+                && item["call_id"] == call["call_id"]
+                && item["output"] == "local result")
+    );
+    root.shutdown().await.unwrap();
+    server.close().await;
+}
+
+/// Every chunk of one reply, read through dim's model host at `protocol`, so
+/// the assertions cover dim's own mapping of what the provider streams.
+async fn host_reply(
+    protocol: ModelProtocol,
+    base_url: String,
+) -> Vec<std::result::Result<ModelChunk, HostError>> {
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol,
+                base_url,
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: Some("test-key".into()),
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut chunks = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        chunks.push(chunk);
+    }
+    root.shutdown().await.unwrap();
+    chunks
+}
+
+/// The reply text `chunks` carry, or the first failure as its text.
+fn reply_text(
+    chunks: Vec<std::result::Result<ModelChunk, HostError>>,
+) -> std::result::Result<String, String> {
+    let mut text = String::new();
+    for chunk in chunks {
+        match chunk {
+            Ok(ModelChunk::Text(delta)) => text.push_str(&delta),
+            Ok(_) => {}
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Ok(text)
+}
+
+/// A signed Gemini text part closes its block, so the next part opens a new
+/// one and the signature is replayed on the part that carried it
+/// (arcships/aimux@b7479351, #467). The chunk is the one the provider's own
+/// test reads (`aimux-providers/src/google/tests/language_model.rs`, case
+/// `a_signed_part_closes_its_text_block`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_a_signed_part_closes_its_text_block_and_replays_the_split() {
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Endpoint {
+        requests: Arc<Mutex<Vec<(Uri, Value)>>>,
+    }
+    async fn respond(
+        State(endpoint): State<Endpoint>,
+        uri: Uri,
+        Json(request): Json<Value>,
+    ) -> Response {
+        let turn = {
+            let mut requests = endpoint.requests.lock().unwrap();
+            requests.push((uri, request));
+            requests.len()
+        };
+        let chunks = if turn == 1 {
+            vec![json!({"candidates":[{"content":{"role":"model","parts":[
+                {"text":"first"},
+                {"text":" block","thoughtSignature":"sig-1"},
+                {"text":"second"}
+            ]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}})]
+        } else {
+            vec![
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"finished"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+            ]
+        };
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(sse(chunks)))
+            .unwrap()
+    }
+
+    let endpoint = Endpoint::default();
+    let router = Router::new()
+        .route("/v1beta/{*path}", post(respond))
+        .with_state(endpoint.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1beta", listener.local_addr().unwrap());
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let join = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let models = Arc::new(
+        AimuxModels::from_config(
+            serde_json::from_value(json!({
+                "defaultModel":{"providerId":"local","modelId":"test-model"},
+                "providers":[{"id":"local","kind":"gemini","baseUrl":url,"headers":{"x-goog-api-key":"test-key"},"models":[{"id":"test-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let agent = model_agent(models, None).await;
+    let session = agent.create_session(session_config()).await.unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let content = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelContent(data) => Some(data.content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert_eq!(content.len(), 2, "{content:?}");
+    assert!(
+        matches!(
+            &content[0],
+            MessagePart::Text {
+                text,
+                provider_metadata: Some(ContentMetadata::Gemini { thought_signature }),
+                ..
+            } if text == "first block" && thought_signature == "sig-1"
+        ),
+        "{content:?}"
+    );
+    assert!(
+        matches!(&content[1], MessagePart::Text { text, .. } if text == "second"),
+        "{content:?}"
+    );
+    session
+        .submit("second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = endpoint.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "{}", requests.len());
+    let parts = requests[1].1["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "model")
+        .unwrap()["parts"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        parts,
+        vec![
+            json!({"text":"first block","thoughtSignature":"sig-1"}),
+            json!({"text":"second"}),
+        ],
+        "{}",
+        requests[1].1
+    );
+    drop(session);
+    cancel.cancel();
+    join.await.unwrap();
+}
+
+/// A real Gemini stream signs the last part of each text block with an empty
+/// part, so two signed blocks in one round keep their own text and signature
+/// (arcships/aimux@b7479351, #467; the same chunk shape the provider's
+/// `a_signed_part_closes_its_text_block` case carries).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_two_signed_blocks_keep_their_own_text_and_signature() {
+    use std::sync::Mutex;
+
+    #[derive(Clone, Default)]
+    struct Endpoint {
+        requests: Arc<Mutex<Vec<(Uri, Value)>>>,
+    }
+    async fn respond(
+        State(endpoint): State<Endpoint>,
+        uri: Uri,
+        Json(request): Json<Value>,
+    ) -> Response {
+        let turn = {
+            let mut requests = endpoint.requests.lock().unwrap();
+            requests.push((uri, request));
+            requests.len()
+        };
+        let chunks = if turn == 1 {
+            vec![json!({"candidates":[{"content":{"role":"model","parts":[
+                {"text":"first"},
+                {"text":"","thoughtSignature":"sig-1"},
+                {"text":"second"},
+                {"text":"","thoughtSignature":"sig-2"}
+            ]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":2,"totalTokenCount":3}})]
+        } else {
+            vec![
+                json!({"candidates":[{"content":{"role":"model","parts":[{"text":"finished"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+            ]
+        };
+        Response::builder()
+            .status(200)
+            .header("content-type", "text/event-stream")
+            .body(Body::from(sse(chunks)))
+            .unwrap()
+    }
+
+    let endpoint = Endpoint::default();
+    let router = Router::new()
+        .route("/v1beta/{*path}", post(respond))
+        .with_state(endpoint.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1beta", listener.local_addr().unwrap());
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let join = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(stop.cancelled_owned())
+            .await
+            .unwrap();
+    });
+    let models = Arc::new(
+        AimuxModels::from_config(
+            serde_json::from_value(json!({
+                "defaultModel":{"providerId":"local","modelId":"test-model"},
+                "providers":[{"id":"local","kind":"gemini","baseUrl":url,"headers":{"x-goog-api-key":"test-key"},"models":[{"id":"test-model","contextWindow":128000,"maxOutputTokens":4096,"config":{"maxTokens":4096}}]}]
+            }))
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let agent = model_agent(models, None).await;
+    let session = agent.create_session(session_config()).await.unwrap();
+    session
+        .submit("first".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    let content = events
+        .iter()
+        .find_map(|event| match &event.kind {
+            EventKind::ModelContent(data) => Some(data.content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    assert_eq!(content.len(), 2, "{content:?}");
+    assert!(
+        matches!(
+            &content[0],
+            MessagePart::Text {
+                text,
+                provider_metadata: Some(ContentMetadata::Gemini { thought_signature }),
+                ..
+            } if text == "first" && thought_signature == "sig-1"
+        ),
+        "{content:?}"
+    );
+    assert!(
+        matches!(
+            &content[1],
+            MessagePart::Text {
+                text,
+                provider_metadata: Some(ContentMetadata::Gemini { thought_signature }),
+                ..
+            } if text == "second" && thought_signature == "sig-2"
+        ),
+        "{content:?}"
+    );
+    session
+        .submit("second".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = endpoint.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2, "{}", requests.len());
+    let parts = requests[1].1["contents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|message| message["role"] == "model")
+        .unwrap()["parts"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        parts,
+        vec![
+            json!({"text":"first","thoughtSignature":"sig-1"}),
+            json!({"text":"second","thoughtSignature":"sig-2"}),
+        ],
+        "{}",
+        requests[1].1
+    );
+    drop(session);
+    cancel.cancel();
+    join.await.unwrap();
+}
+
+/// A Gemini stream finishes once it has seen both a finish reason and usage,
+/// in either order: a usage chunk followed by the finish reason ends the turn,
+/// and a text chunk behind the finish reason is not read (arcships/aimux@b7479351,
+/// #469; the provider pins the same shape in
+/// `the_stream_ends_at_the_finish_reason_after_the_usage`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_usage_before_the_finish_reason_finishes_the_stream() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![
+        json!({"candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"index":0}],"usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":1,"totalTokenCount":2}}),
+        json!({"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}]}),
+        json!({"candidates":[{"content":{"role":"model","parts":[{"text":"late"}]},"index":0}]}),
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let chunks = host_reply(ModelProtocol::Gemini, format!("{}/v1beta", server.uri())).await;
+    assert_eq!(
+        reply_text(chunks),
+        Ok("done".to_owned()),
+        "the stream must end at the finish reason after the usage, before the trailing text"
+    );
+}
+
+/// A `usageMetadata` the schema cannot read is ignored instead of failing the
+/// chunk (arcships/aimux#469 follow-up, `lenient_stream_usage`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_a_malformed_usage_metadata_does_not_fail_the_chunk() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![json!({
+        "candidates":[{"content":{"role":"model","parts":[{"text":"done"}]},"finishReason":"STOP","index":0}],
+        "usageMetadata":{"promptTokenCount":"many","candidatesTokenCount":1,"totalTokenCount":2}
+    })]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let chunks = host_reply(ModelProtocol::Gemini, format!("{}/v1beta", server.uri())).await;
+    assert_eq!(reply_text(chunks), Ok("done".to_owned()));
+}
+
+/// A Chat Completions `usage` the schema cannot read is ignored instead of
+/// failing the chunk that carries it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn openai_chat_a_malformed_usage_does_not_fail_the_chunk() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![json!({
+        "id":"chat-1",
+        "choices":[{"index":0,"delta":{"content":"done"},"finish_reason":"stop"}],
+        "usage":{"prompt_tokens":"many","completion_tokens":1,"total_tokens":2}
+    })]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let chunks = host_reply(ModelProtocol::OpenaiChat, format!("{}/v1", server.uri())).await;
+    assert_eq!(reply_text(chunks), Ok("done".to_owned()));
+}
+
+/// A refusal content part opens its own text block beside an `output_text`
+/// part (arcships/aimux#466, #468).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_a_refusal_beside_output_text_keeps_its_own_block() {
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    let server = MockServer::start().await;
+    let body = sse(vec![
+        json!({"type":"response.created","response":{"id":"resp-1","created_at":1,"model":"test-model"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","phase":"final_answer","content":[]}}),
+        json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]}}),
+        json!({"type":"response.output_text.delta","item_id":"msg-1","output_index":0,"content_index":0,"delta":"before"}),
+        json!({"type":"response.content_part.added","item_id":"msg-1","output_index":0,"content_index":1,"part":{"type":"refusal","refusal":""}}),
+        json!({"type":"response.refusal.delta","item_id":"msg-1","output_index":0,"content_index":1,"delta":"denied"}),
+        json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message","id":"msg-1","role":"assistant","phase":"final_answer","content":[]}}),
+        json!({"type":"response.completed","response":{"id":"resp-1","created_at":1,"model":"test-model","usage":{"input_tokens":1,"output_tokens":2}}}),
+    ]);
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut stream = host
+        .0
+        .invoke(
+            Arc::new(ModelRequest::new(
+                "local",
+                "test-model",
+                vec![Message::text(Role::User, "question")],
+            )),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: format!("{}/v1", server.uri()),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: Some("test-key".into()),
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let mut content = Vec::new();
+    let mut text = String::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk.unwrap() {
+            ModelChunk::Text(delta) => text.push_str(&delta),
+            ModelChunk::Content(parts) => content = parts,
+            _ => {}
+        }
+    }
+    assert_eq!(text, "beforedenied");
+    assert_eq!(content.len(), 2, "{content:?}");
+    assert!(
+        matches!(&content[0], MessagePart::Text { text, .. } if text == "before"),
+        "{content:?}"
+    );
+    assert!(
+        matches!(&content[1], MessagePart::Text { text, .. } if text == "denied"),
+        "{content:?}"
+    );
+    root.shutdown().await.unwrap();
+}
+
+/// A Responses provider option outside the namespace schema fails before the
+/// request is sent: the whole `openai` namespace is parsed against the
+/// provider's own schema (arcships/aimux#328, RFC-0046 R1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn responses_a_service_tier_outside_the_schema_fails_before_sending() {
+    use wiremock::MockServer;
+
+    let server = MockServer::start().await;
+    let root = rutis::Ctx::root().unwrap();
+    root.plugin(AimuxPlugin::default()).await.unwrap();
+    let host = root.get::<ModelHost>().unwrap();
+    let mut request = ModelRequest::new(
+        "local",
+        "test-model",
+        vec![Message::text(Role::User, "question")],
+    );
+    request.config = Some(
+        serde_json::from_value(json!({
+            "providerOptions": {"openai": {"serviceTier": "turbo"}}
+        }))
+        .unwrap(),
+    );
+    let outcome = host
+        .0
+        .invoke(
+            Arc::new(request),
+            ModelConnection::Http(HttpModelConnection {
+                protocol: ModelProtocol::OpenaiResponses,
+                base_url: format!("{}/v1", server.uri()),
+                network: Default::default(),
+                headers: Default::default(),
+                bearer: None,
+                api_key: Some("test-key".into()),
+                preset: None,
+            }),
+            CancellationToken::new(),
+        )
+        .await;
+    let mut failure = None;
+    match outcome {
+        Err(error) => failure = Some(error.to_string()),
+        Ok(mut stream) => {
+            while let Some(chunk) = stream.next().await {
+                if let Err(error) = chunk {
+                    failure = Some(error.to_string());
+                }
+            }
+        }
+    }
+    root.shutdown().await.unwrap();
+    let failure = failure.unwrap_or_else(|| "the request was not refused".into());
+    assert!(failure.contains("provider options"), "{failure}");
+    assert!(
+        server.received_requests().await.unwrap().is_empty(),
+        "the request must not be sent"
+    );
 }

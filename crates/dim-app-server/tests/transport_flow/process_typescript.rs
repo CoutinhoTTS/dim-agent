@@ -1764,6 +1764,82 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         json!({"code":"closed","message":missing.to_string()})
     );
     store.delete_session("wire-source").await.unwrap();
+    let unregistered = home.join("unregistered");
+    std::fs::create_dir_all(&unregistered).unwrap();
+    let used_config = SessionConfig {
+        cwd: unregistered.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    raw.create_session("unregistered-user", &used_config)
+        .await
+        .unwrap();
+    let refused = client
+        .rpc(
+            "storefixture.unregistered_refuse",
+            json!({"root": unregistered}),
+        )
+        .await;
+    assert_ok(&refused);
+    assert_eq!(refused["result"]["code"], "invalid");
+    assert_eq!(refused["result"]["called"], false);
+    assert!(unregistered.is_dir());
+    raw.rollback_session("unregistered-user").await.unwrap();
+
+    let held = home.join("unregistered-held");
+    std::fs::create_dir_all(&held).unwrap();
+    let ready = home.join("unregistered-ready");
+    let removal = client
+        .send(
+            "storefixture.unregistered_remove",
+            json!({"root": held, "ready": ready}),
+        )
+        .await;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !ready.exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&ready).unwrap(),
+        held.to_string_lossy()
+    );
+    let held_config = SessionConfig {
+        cwd: held.to_string_lossy().into_owned(),
+        ..Default::default()
+    };
+    let concurrent_creation = {
+        let store = store.clone();
+        let agent_id = agent_id.clone();
+        tokio::spawn(async move {
+            store
+                .create_owned_session(
+                    "unregistered-late",
+                    &held_config,
+                    &agent_id,
+                    3,
+                    None,
+                    SessionOrigin::Client,
+                    None,
+                )
+                .await
+        })
+    };
+    let refused = tokio::time::timeout(Duration::from_secs(10), concurrent_creation)
+        .await
+        .expect("the path being removed is refused without waiting")
+        .unwrap()
+        .expect_err("the path being removed is refused");
+    assert!(
+        matches!(&refused, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{refused:?}"
+    );
+    assert_ok(&client.rpc("storefixture.release", json!({})).await);
+    let removed = client.response(removal).await;
+    assert_ok(&removed);
+    assert_eq!(removed["result"], json!({"removed":true}));
+    assert!(!held.exists());
     let refused = client
         .rpc(
             "storefixture.refuse",
@@ -1788,7 +1864,7 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
         std::fs::read_to_string(&ready).unwrap(),
         workspace.to_string_lossy()
     );
-    let mut concurrent_creation = {
+    let concurrent_creation = {
         let store = store.clone();
         tokio::spawn(async move {
             store
@@ -1804,20 +1880,19 @@ async fn node_store_preserves_repository_results_and_worktree_removal_exclusion(
                 .await
         })
     };
+    let refused = tokio::time::timeout(Duration::from_secs(10), concurrent_creation)
+        .await
+        .expect("the path being removed is refused without waiting")
+        .unwrap()
+        .expect_err("the path being removed is refused");
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut concurrent_creation)
-            .await
-            .is_err(),
-        "creation must remain excluded until the foreign removal settles"
+        matches!(&refused, AgentError::InvalidInput(message) if message.contains("is being removed")),
+        "{refused:?}"
     );
     assert_ok(&client.rpc("storefixture.release", json!({})).await);
     let removed = client.response(removal).await;
     assert_ok(&removed);
     assert_eq!(removed["result"], json!({"removed":true}));
-    assert!(matches!(
-        concurrent_creation.await.unwrap(),
-        Err(AgentError::InvalidInput(_))
-    ));
     assert!(!workspace.exists());
     assert!(store.worktree_directories().await.unwrap().is_empty());
     assert!(!store.has_records("late").await.unwrap());
