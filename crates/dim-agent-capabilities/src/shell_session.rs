@@ -718,7 +718,6 @@ impl ShellSession {
         let mut settled: Vec<Settlement> = Vec::new();
         let mut orphans: Vec<(String, PathBuf)> = Vec::new();
         let mut cleanup_unconfirmed = false;
-        let occupying;
         #[allow(
             unused_assignments,
             reason = "the early generation return leaves the initial value unread"
@@ -743,111 +742,12 @@ impl ShellSession {
                 inner.shell_exit = Some(note);
             }
             inner.had_reset = true;
-            occupying = inner.occupying.take();
             if inner.dialect == ShellDialect::Posix {
                 orphans = inner
                     .background
                     .iter()
                     .map(|(id, task)| (id.clone(), task.output_path.clone()))
                     .collect();
-            }
-        }
-        if let Some(occ) = occupying {
-            let page = self
-                .host
-                .output(OutputRequest {
-                    task_id: occ.task_id.clone(),
-                    cursor: None,
-                    limit: Some(OUTPUT_LIMIT as u64),
-                })
-                .await
-                .ok();
-            let preview = page.map(|page| page.text).unwrap_or_default();
-            let reply = self
-                .host
-                .wait(
-                    WaitRequest {
-                        task_id: occ.task_id.clone(),
-                        timeout_ms: Some(2_000),
-                    },
-                    never_cancelled(),
-                )
-                .await
-                .ok();
-            if reply
-                .as_ref()
-                .is_none_or(|reply| reply.status == WaitStatus::Running)
-            {
-                let id = occ.task_id.clone();
-                let path = occ.output_path.clone();
-                let ended = occ.ended.clone();
-                let fallback = reset_result(&id, &path, &preview);
-                let mut inner = self.inner.lock().await;
-                if inner.occupying.is_none() {
-                    inner.occupying = Some(occ);
-                }
-                drop(inner);
-                let this = self.clone();
-                let host = self.host.clone();
-                self.tasks.lock().await.spawn(async move {
-                    let reply = host
-                        .wait(
-                            WaitRequest {
-                                task_id: id.clone(),
-                                timeout_ms: None,
-                            },
-                            never_cancelled(),
-                        )
-                        .await;
-                    let data = match reply {
-                        Ok(reply) => ended_from_reply(&id, &reply, &path),
-                        Err(_) => ExecEndedData {
-                            task_id: id.clone(),
-                            status: ExecStatus::Failed,
-                            result: fallback,
-                        },
-                    };
-                    let mut inner = this.inner.lock().await;
-                    if inner
-                        .occupying
-                        .as_ref()
-                        .is_none_or(|task| task.task_id != id)
-                    {
-                        return;
-                    }
-                    inner.occupying = None;
-                    inner.occupy_tail = match &data.result.content {
-                        ToolContent::Text(text) => Some(text.clone()),
-                        _ => None,
-                    };
-                    inner.occupy_exit = None;
-                    drop(inner);
-                    let _ = host
-                        .settle(TaskRequest {
-                            task_id: id.clone(),
-                        })
-                        .await;
-                    this.settle(data);
-                    ended.notify_waiters();
-                });
-            } else {
-                let reply = reply.expect("checked above");
-                let data = ended_from_reply(&occ.task_id, &reply, &occ.output_path);
-                {
-                    let mut inner = self.inner.lock().await;
-                    inner.occupy_tail = Some(preview);
-                    inner.occupy_exit = None;
-                }
-                let _ = self
-                    .host
-                    .settle(TaskRequest {
-                        task_id: occ.task_id.clone(),
-                    })
-                    .await;
-                settled.push(Settlement {
-                    data,
-                    ended: Some(occ.ended),
-                });
             }
         }
         for (task_id, output_path) in orphans {
@@ -1289,16 +1189,8 @@ impl ShellSession {
         let this = self.clone();
         let id = command_id.to_owned();
         let path = output_path.to_path_buf();
-        let lifecycle = self.lifecycle.clone();
         let tasks = self.tasks.lock().await;
         tasks.spawn(async move {
-            let cancelled: crate::host::CancelledFn = Arc::new(move || {
-                let lifecycle = lifecycle.clone();
-                Box::pin(async move {
-                    lifecycle.cancelled().await;
-                    Ok(())
-                })
-            });
             let reply = this
                 .host
                 .wait(
@@ -1306,7 +1198,7 @@ impl ShellSession {
                         task_id: id.clone(),
                         timeout_ms: None,
                     },
-                    cancelled,
+                    never_cancelled(),
                 )
                 .await;
             let Ok(reply) = reply else {
