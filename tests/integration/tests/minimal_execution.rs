@@ -341,7 +341,8 @@ async fn until(
 /// writes nothing and exhausts it, while one that is merely slow keeps
 /// refreshing it. The bound is therefore about progress, not about how fast
 /// the machine reads 2.7 MB. Giving up reports only what the wait observed:
-/// the bytes written so far, not a claim about whether output was arriving.
+/// the bytes written and the polls since the last growth, not a claim about
+/// whether output was arriving.
 async fn until_settled(
     session: &Session,
     what: &str,
@@ -371,7 +372,8 @@ async fn until_settled(
     }
     panic!(
         "timed out waiting for {what}: no settlement in {MAX_SETTLE_POLLS} \
-         polls, {seen} bytes written: {events:#?}"
+         polls, {seen} bytes written, {idle} polls since the last growth: \
+         {events:#?}"
     );
 }
 
