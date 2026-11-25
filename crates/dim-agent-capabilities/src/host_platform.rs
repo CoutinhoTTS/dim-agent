@@ -3851,6 +3851,7 @@ impl HostPlatform {
         }
         let root =
             std::fs::canonicalize(self.exec_root_path()).unwrap_or_else(|_| self.exec_root_path());
+        let input_root = self.home.join(".dim").join("exec");
         let target = canonicalize_existing_prefix(path)?;
         if target == root || !target.starts_with(&root) {
             return Err(io::Error::new(
@@ -3860,7 +3861,8 @@ impl HostPlatform {
         }
         let mut current = root.clone();
         for component in path
-            .strip_prefix(&root)
+            .strip_prefix(&input_root)
+            .or_else(|_| path.strip_prefix(&root))
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "outside the exec root"))?
             .components()
         {

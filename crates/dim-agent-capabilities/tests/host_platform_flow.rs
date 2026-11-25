@@ -1878,6 +1878,48 @@ async fn output_removal_refuses_traversal_and_links() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn remove_output_directory_accepts_a_symlinked_home() {
+    let dir = std::env::temp_dir().join(unique("dim-host-remove-symlink"));
+    let home = dir.join("real-home");
+    std::fs::create_dir_all(&home).unwrap();
+    let alias = dir.join("alias-home");
+    std::os::unix::fs::symlink(&home, &alias).unwrap();
+    let root = rutis::Ctx::root_with(tokio::runtime::Handle::current());
+    let catalog = dim_agent_capabilities::catalog();
+    let build = Default::default();
+    let names = dim_agent_runtime::Names::copy(&catalog, &build);
+    let _execution = root
+        .provide(ExecutionSettingsHost::fixed(Default::default()))
+        .unwrap();
+    let _toolchain = root.provide(ToolchainSourceHost::fixed(vec![])).unwrap();
+    let plugin = root.plugin(
+        HostPlatformPlugin::new(
+            &names,
+            HostPlatformConfig {
+                execution: names.key().unwrap(),
+                toolchain: names.key().unwrap(),
+                exec_shell_file: None,
+                home: Some(alias.clone()),
+            },
+        )
+        .unwrap(),
+    );
+    (&plugin).await.unwrap();
+    let platform = root.get::<HostPlatform>().unwrap();
+    let output = alias.join(".dim/exec/session/branch");
+    std::fs::create_dir_all(&output).unwrap();
+    platform
+        .remove_output_directory(RemoveOutputDirectoryRequest {
+            path: path_string(&output),
+        })
+        .await
+        .unwrap();
+    assert!(!output.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[tokio::test]
 async fn a_shell_burst_completes_without_a_private_subscriber() {
     let dir = std::env::temp_dir().join(unique("dim-host-burst"));
