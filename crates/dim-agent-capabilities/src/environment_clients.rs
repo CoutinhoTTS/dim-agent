@@ -4,7 +4,7 @@
 //! read-only `SessionClientsHost`. This capability appends a snapshot of the
 //! attached connections at branch open and on every `ClientsChanged` fact.
 use crate::{
-    branch_input::{append_own, append_own_dispatched},
+    branch_input::{append_own, append_own_dispatched, opens_with_identity_input},
     context_block,
 };
 use dim_agent_runtime::{
@@ -15,6 +15,7 @@ use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
@@ -260,17 +261,24 @@ impl DynPlugin for ClientsBranchPlugin {
             let lifecycle = ctx.cancellation_token();
             let tasks = TaskTracker::new();
             let last = Arc::new(std::sync::Mutex::new(None));
+            let identity_input =
+                opens_with_identity_input(&dispatcher, ctx, "EnvironmentClientsOpening")?;
             if phase.phase() == BranchPhase::Loading {
                 let clients = clients.clone();
                 let timeline = timeline.clone();
                 let dispatcher = dispatcher.clone();
                 let session = session.clone();
                 let last = last.clone();
+                let identity_input = identity_input.clone();
                 let registered = phase.register_opening(Arc::new(move || {
                     let (clients, timeline, dispatcher) =
                         (clients.clone(), timeline.clone(), dispatcher.clone());
                     let (session, last) = (session.clone(), last.clone());
+                    let identity_input = identity_input.clone();
                     Box::pin(async move {
+                        if identity_input.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
                         let current = snapshot(
                             &clients
                                 .presences(SessionPresenceRequest {

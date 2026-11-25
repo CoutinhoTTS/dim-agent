@@ -1478,9 +1478,9 @@ async fn presence_snapshots(session: &dim_agent_runtime::Session) -> usize {
         .count()
 }
 
-/// A child line's own history starts with TimelineTree's identity input; the
-/// environment snapshots follow it, so a line cut from `main` keeps the cache
-/// prefix of its identity first and both snapshots inside the opening.
+/// A child line's own history starts with TimelineTree's identity input, and
+/// the environment snapshots follow it: they append once the line is published,
+/// after the input that opens it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_child_line_opens_with_its_identity_input_before_its_environment_snapshots() {
     use dim_agent_capabilities::environment_clients::CLIENTS;
@@ -1518,7 +1518,27 @@ async fn a_child_line_opens_with_its_identity_input_before_its_environment_snaps
         .as_str()
         .unwrap()
         .to_owned();
-    let events = branch_events(&session, &child, ..).await.unwrap();
+    let events = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let events = branch_events(&session, &child, ..).await.unwrap();
+            let applied = |source: &str| {
+                let marker = format!("<dim-state source=\"{source}\">");
+                events.iter().any(|event| {
+                    matches!(&event.kind, EventKind::InputMessage(data)
+                        if data.blocks.iter().any(|block| matches!(block,
+                            dim_agent_types::InputBlock::Raw { text, .. } if text.starts_with(&marker)))
+                        && events.iter().any(|applied| matches!(&applied.kind,
+                            EventKind::InputApplied(applied) if applied.input_id == event.id)))
+                })
+            };
+            if applied(CLIENTS) && applied(SNAPSHOT_SOURCE) {
+                return events;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("both environment snapshots follow the line's identity input");
     let seen: Vec<_> = events.iter().map(|event| event.kind.key()).collect();
     let inputs: Vec<_> = events
         .iter()
@@ -1556,7 +1576,7 @@ async fn a_child_line_opens_with_its_identity_input_before_its_environment_snaps
         assert!(
             events.iter().any(|event| matches!(&event.kind,
                 EventKind::InputApplied(data) if data.input_id == snapshot.id)),
-            "the queue applies {label} during the line's opening: {seen:?}"
+            "the queue applies {label}: {seen:?}"
         );
     }
     server.shutdown();

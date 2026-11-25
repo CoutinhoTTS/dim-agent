@@ -61,7 +61,7 @@ Later conclusions for the same `N`, conclusions from another branch, and conclus
 
 ### 4.2 Evaluator branch
 
-The evaluator identity comes from the line source and parent ([§13](#13-ending-the-evaluator-with-427)), not from parsing historical prompt text. Execution starts only when this instance consumes the new host-created opening Queue input after its load cutoff. TimelineTree mounts the parts before appending that first input, and appends it before the opening seals. A reloaded instance does not replay the old opening input, so source metadata alone cannot restart evaluator work. The one-follow-up flag and report task belong to this execution only.
+The evaluator identity comes from the line source and parent ([§13](#13-ending-the-evaluator-with-427)), not from parsing historical prompt text. Execution starts only when this instance consumes the new host-created opening Queue input after its load cutoff. TimelineTree finishes opening the parts before appending that first input. A reloaded instance does not replay the old opening input, so source metadata alone cannot restart evaluator work. The one-follow-up flag and report task belong to this execution only.
 
 | Consumed event | Condition | Action |
 | --- | --- | --- |

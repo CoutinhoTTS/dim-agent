@@ -3,7 +3,9 @@
 //! Loop's decision at dispatch.
 use dim_agent_runtime::{AgentError, Dispatcher, Result, Timeline};
 use dim_agent_types::{AgentEvent, EventDraft, EventKind, InputMessageData};
+use rutis::Ctx;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Appends `data` with `tags` to the capability's own Timeline, at load or
 /// from its tasks afterwards.
@@ -44,4 +46,24 @@ pub(crate) async fn append_own_dispatched(
             .await
             .map_err(|_| AgentError::Closed("branch dispatch".into()))?;
     }
+}
+
+/// Whether this branch started under a parent line: TimelineTree writes that
+/// line's identity input after the opening seals, so it is the line's first
+/// input and a capability's opening receipt appends nothing ahead of it. The
+/// published branch's first pass appends there instead.
+pub(crate) fn opens_with_identity_input(
+    dispatcher: &Dispatcher,
+    ctx: &Ctx,
+    name: &str,
+) -> Result<Arc<AtomicBool>> {
+    let opened = Arc::new(AtomicBool::new(false));
+    let seen = opened.clone();
+    dispatcher.subscribe(ctx, name, &["branch/start"], move |event| {
+        if matches!(&event.kind, EventKind::BranchStart(data) if data.parent.is_some()) {
+            seen.store(true, Ordering::Release);
+        }
+        Box::pin(async { Ok(()) })
+    })?;
+    Ok(opened)
 }

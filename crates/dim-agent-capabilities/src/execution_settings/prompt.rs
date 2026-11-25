@@ -6,7 +6,7 @@
 //! register a Prompt source.
 use super::{ExecutionSettings, ExecutionSettingsHost, SOURCE};
 use crate::{
-    branch_input::{append_own, append_own_dispatched},
+    branch_input::{append_own, append_own_dispatched, opens_with_identity_input},
     host::ToolExecutionContext,
     settings::{SettingsChanged, settings_changes},
     tool_registry::{ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry},
@@ -20,6 +20,7 @@ use rutis::{Ctx, Error};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -262,17 +263,24 @@ impl DynPlugin for SettingsSnapshotBranch {
             let lifecycle = ctx.cancellation_token();
             let tasks = TaskTracker::new();
             let shared = Arc::new(std::sync::Mutex::new((None, true)));
+            let identity_input =
+                opens_with_identity_input(&dispatcher, ctx, "SettingsSnapshotOpening")?;
             if phase.phase() == BranchPhase::Loading {
                 let host = host.clone();
                 let timeline = timeline.clone();
                 let dispatcher = dispatcher.clone();
                 let lifecycle = lifecycle.clone();
                 let shared = shared.clone();
+                let identity_input = identity_input.clone();
                 let registered = phase.register_opening(Arc::new(move || {
                     let (host, timeline, dispatcher) =
                         (host.clone(), timeline.clone(), dispatcher.clone());
                     let (lifecycle, shared) = (lifecycle.clone(), shared.clone());
+                    let identity_input = identity_input.clone();
                     Box::pin(async move {
+                        if identity_input.load(Ordering::Acquire) {
+                            return Ok(());
+                        }
                         let read = tokio::time::timeout(RETRY, host.read(lifecycle)).await;
                         match read {
                             Ok(Ok(settings)) => {

@@ -71,22 +71,24 @@ The branch part registers its listener and an opening receipt during `apply`
 when the branch is `Loading`. The receipt reads the current value, appends the
 snapshot, and returns once the branch dispatched it: the input queue has
 written the snapshot's `input/applied` by then, so the branch's opening seals
-with both committed and dispatched. `session.create`, a child line's creation
-and a restore therefore return with the snapshot in the branch's published
-history, and the first request carries the value. The read is bounded by the
-part's own retry interval, so a source that does not answer leaves the
-snapshot to the published branch instead of holding the opening: the waiting
-ends, the part logs it, and `pending` stays set.
+with both committed and dispatched. `session.create` and a restore therefore
+return with the snapshot in the branch's published history, and the first
+request carries the value. The read is bounded by the part's own retry
+interval, so a source that does not answer leaves the snapshot to the published
+branch instead of holding the opening: the waiting ends, the part logs it, and
+`pending` stays set.
 
-A child line's first input is TimelineTree's identity block, and both
-environment snapshots follow it: TimelineTree appends that input before the
-opening receipts run, so the line's own history keeps its identity first and
-the snapshots after it.
+A child line's own history starts with TimelineTree's identity input, which the
+tree writes after the branch opening seals. The receipt therefore appends
+nothing for such a line, whose `branch/start` names the parent it was cut
+from: the input that opens it stays its first input, and the first loop pass
+after `BranchLifecycle::activated()` reads the value and appends the snapshot,
+so it follows that input.
 
 A branch whose opening sealed before the part mounted, such as an
-`ExecutionSettings` reload onto a live branch, registers nothing; the first
-loop pass after `BranchLifecycle::activated()` appends the snapshot there
-instead. A failed or timed-out opening read, and a failed opening append, keep
+`ExecutionSettings` reload onto a live branch, registers nothing either; the
+first loop pass after `BranchLifecycle::activated()` appends the snapshot
+there. A failed or timed-out opening read, and a failed opening append, keep
 `pending`, so that pass retries.
 
 ### Settings change
@@ -127,7 +129,7 @@ A read failure is not a value. The design does not append `unknown` or a fabrica
 | The setting module's read port | Read the effective values for the body |
 | The branch's input path | Append the snapshot |
 | `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes |
-| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, so its `input/applied` is inside the opening fence |
+| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, and `branch/start` with a parent tells a line whose identity input opens it after the opening |
 | Process bus (`SettingsChanged`) | Wake on a committed write |
 
 Service faces follow the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services): the execution source's process `executionSettingsHost` is a data face with asynchronous `read({})`; `timeline`, `branchLifecycle` and `dispatcher` are data faces. This Rust projection is not a leaf-ready foreign part.
@@ -164,8 +166,8 @@ None to the runtime or rutis.
 
 | Scenario | Expected |
 | --- | --- |
-| Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active; `session.create`, a child line's creation and a restore return with both |
-| A child line opens | The identity input is the line's first input; the snapshot and its `input/applied` follow it inside the opening |
+| Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active, so `session.create` and a restore return with both |
+| A child line opens | The identity input is the line's first input; the snapshot follows it once the line is published |
 | The settings source does not answer during the opening | Log; the branch opens; the first loop pass after activation reads and appends one snapshot |
 | A temporary route adopted with no `session.idle` after create or restore | Adopted; the opening left nothing undispatched |
 | Opening sealed before the part mounted | The snapshot is appended after activation |

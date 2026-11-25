@@ -99,19 +99,21 @@ The branch part registers an opening receipt in `apply` when the branch is
 `Loading`. The receipt reads the current presence list, appends the snapshot,
 and returns once the branch dispatched it: the input queue has written the
 snapshot's `input/applied` by then, so the branch's opening seals with both
-committed and dispatched. `session.create`, a child line's creation and a
-restore therefore return with the snapshot in the branch's published history,
-and the first request carries it. The presence list comes from the App
-Server's in-memory registry, so the receipt awaits no I/O of its own.
+committed and dispatched. `session.create` and a restore therefore return with
+the snapshot in the branch's published history, and the first request carries
+it. The presence list comes from the App Server's in-memory registry, so the
+receipt awaits no I/O of its own.
 
-A child line's first input is TimelineTree's identity block, and both
-environment snapshots follow it: TimelineTree appends that input before the
-opening receipts run, so the line's own history keeps its identity first and
-the snapshots after it.
+A child line's own history starts with TimelineTree's identity input, which the
+tree writes after the branch opening seals. The receipt therefore appends
+nothing for such a line, whose `branch/start` names the parent it was cut
+from: the input that opens it stays its first input, and the first loop pass
+after `BranchLifecycle::activated()` appends the snapshot, so it follows that
+input.
 
 A branch whose opening sealed before the part mounted, such as a `Connection`
-reload onto a live branch, registers nothing; the first loop pass after
-`BranchLifecycle::activated()` appends the snapshot there instead.
+reload onto a live branch, registers nothing either; the first loop pass after
+`BranchLifecycle::activated()` appends the snapshot there.
 
 ### Connection change
 
@@ -169,7 +171,7 @@ The in-memory presence read is infallible; it returns an empty list for an unkno
 | `SessionClientsHost` | Read the current connections |
 | The branch's input path | Append the snapshot |
 | `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes |
-| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, so its `input/applied` is inside the opening fence |
+| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, and `branch/start` with a parent tells a line whose identity input opens it after the opening |
 | Process bus (`ClientsChanged`) | Wake on a connection change |
 
 The process `sessionClientsHost` is a data face with the request and reply defined in [service faces §4.9](../service-faces.md#49-旧主机端口credentialvariableshost-等六个). `sessionIdentity`, `timeline` and `branchLifecycle` are also data faces in the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services). This Rust projection still uses owner methods outside the dispatched operations and is not a leaf-ready foreign part.
@@ -204,8 +206,8 @@ None to the runtime or rutis.
 
 | Scenario | Expected |
 | --- | --- |
-| Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active; `session.create`, a child line's creation and a restore return with both |
-| A child line opens | The identity input is the line's first input; the snapshot and its `input/applied` follow it inside the opening |
+| Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active, so `session.create` and a restore return with both |
+| A child line opens | The identity input is the line's first input; the snapshot follows it once the line is published |
 | A temporary route adopted with no `session.idle` after create | Adopted; the opening left nothing undispatched |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
 | Two TUI leaves | Two `tui` entries, not one count |
