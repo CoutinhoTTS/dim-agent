@@ -3593,20 +3593,7 @@ pub fn terminate_job(pid: u32) -> io::Result<()> {
         Ok(())
     }
     #[cfg(windows)]
-    {
-        native::terminate_tree(pid)?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        while native::tree_alive(pid) {
-            if tokio::time::Instant::now() >= deadline {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "job processes are still alive",
-                ));
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        Ok(())
-    }
+    native::terminate_tree(pid)
 }
 
 async fn observe_job_release(
@@ -3650,7 +3637,20 @@ pub async fn kill_job(pid: u32) -> io::Result<()> {
         wait_job_exit(pid).await
     }
     #[cfg(windows)]
-    native::terminate_tree(pid)
+    {
+        native::terminate_tree(pid)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while native::tree_alive(pid) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "job processes are still alive",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(())
+    }
 }
 
 async fn job_released(pid: u32) -> bool {
