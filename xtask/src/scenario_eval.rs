@@ -63,7 +63,10 @@
 //!
 //! The judge's window is read from the judge's selection snapshot or from the
 //! `--model-config` file, and an evaluation whose judge declares no window
-//! fails before its first call. A run's view is judged in one call, and a
+//! fails before its first call. The view keeps every event in order, gives
+//! each request against the previous request of its line, and renders a
+//! request's consecutive thinking deltas as one line with their text joined.
+//! A run's view is judged in one call, and a
 //! view that does not fit the window less the reply's `maxTokens` leaves the
 //! run unjudged without a call: there is no judging in parts, because a probe
 //! that counts, orders or holds over a whole run cannot be answered from one
@@ -168,7 +171,20 @@
 //!   after it is created and before the message. The runner resolves the
 //!   Session id into `params.sessionId`; a branch defaults to `main` the
 //!   way the methods treat it. A call that fails fails the run, and the
-//!   error names the method.
+//!   error names the method. Such a run stopped at `setup_failed`: it ran
+//!   before the message, so no request of it saw the configured text. It is
+//!   a failed run, enters no probe rate, and the report lists it apart from a
+//!   run that failed later.
+//! - `afterIdle` is the step a scenario runs after its first idle: every one
+//!   of the scenario's lines — `main` and the line a `calls` step opened —
+//!   with no `completed` compaction of this run is compacted with
+//!   `session.context.compact`, then each line is asked `request`. A
+//!   compaction that does not complete fails the run there, so the requests
+//!   after it are only judged when a compaction happened. A run the turn cap
+//!   stops before that step, or before a submitted request ran on its line,
+//!   is an incomplete fixture: it is neither failed nor judged and enters no
+//!   probe rate. A run its wall clock stops is failed, and a run that ends
+//!   idle is scored for what its export holds.
 //! - `sources` declares the event producers a scenario runs with and the
 //!   Session's subscription to them. One producer row is installed, only
 //!   when `sources` is present, and it declares every source through the
@@ -1173,6 +1189,7 @@ fn pooled_record(source: &Path, run: SavedRun, scenarios: &[Scenario]) -> Result
         window: run.window,
         duration_ms: run.duration_ms,
         failed: run.failed,
+        incomplete: run.incomplete,
         judge_outcome: run.judge_outcome,
         error: run.error,
         judge_error: run.judge_error,
@@ -1248,7 +1265,9 @@ async fn rejudge_one(
     limits: JudgeWindow,
     cancel: &CancellationToken,
 ) -> Result<RunRecord> {
-    let judging = if saved.judge_outcome == JudgeOutcome::NotAsked {
+    let judging = if saved.incomplete.is_some() {
+        Judging::unobserved(scenario)
+    } else if saved.judge_outcome == JudgeOutcome::NotAsked {
         Judging::not_asked(scenario, saved.judge_error.clone())
     } else {
         let path = source
@@ -1272,6 +1291,7 @@ async fn rejudge_one(
         window: saved.window,
         duration_ms: saved.duration_ms,
         failed: failed(stop, saved.error.as_deref(), judging.outcome),
+        incomplete: saved.incomplete.clone(),
         judge_outcome: judging.outcome,
         error: saved.error.clone(),
         judge_error: judging.error,
@@ -1306,6 +1326,10 @@ struct SavedRun {
     duration_ms: f64,
     #[serde(default)]
     failed: bool,
+    /// Why the harness never produced a request the scenario's probe reads;
+    /// `None` in a record written before the runner wrote it.
+    #[serde(default)]
+    incomplete: Option<String>,
     judge_outcome: JudgeOutcome,
     #[serde(default)]
     error: Option<String>,
@@ -1428,6 +1452,7 @@ fn stop_name(stop: &str) -> Result<&'static str> {
         "idle" => Ok("idle"),
         "turns" => Ok("turns"),
         "seconds" => Ok("seconds"),
+        "setup_failed" => Ok("setup_failed"),
         "switch_target_not_reached" => Ok("switch_target_not_reached"),
         "switch_target_ended" => Ok("switch_target_ended"),
         "switch_target_unknown" => Ok("switch_target_unknown"),
@@ -2062,6 +2087,9 @@ struct ScenarioFile {
     #[serde(default)]
     moves: Vec<Switch>,
     budget: Budget,
+    /// The step after the run's first idle, when the scenario runs one.
+    #[serde(default)]
+    after_idle: Option<AfterIdle>,
     probes: Vec<Probe>,
 }
 
@@ -2112,6 +2140,10 @@ pub(crate) enum SwitchRole {
 /// registered yet (`unknown_branch`): its first input starts the line's first
 /// turn before the line is marked ready.
 const UNKNOWN_BRANCH_RETRIES: u32 = 3;
+
+/// The `at` a `session.branch_create` call writes to start where the Session
+/// did: `drive` replaces it with the sequence `session.create` returned.
+const SESSION_OPEN: &str = "session_open";
 
 /// The tool line a `branch/create` notice opened: the branch tool's line, which
 /// [`SwitchRole::LatestToolLine`] names. Any other notice answers `None`.
@@ -2356,11 +2388,50 @@ struct SwitchNote {
 
 /// The run's switch follow-ups and the notes they must follow: a move waits
 /// for each note before it submits the input its line answers, and the run is
-/// not judged when a request consumed an input without its note.
+/// not judged when a request consumed an input without its note. Every input
+/// the move submitted is a receipt like the message's, whether or not its line
+/// owes a note.
 #[derive(Default)]
 struct SwitchNotes {
     expected: Vec<SwitchNote>,
+    inputs: Vec<FixtureInput>,
 }
+
+/// The step a scenario runs after its first idle: every line that did not
+/// compact on its own is compacted by the runner, and each line then answers
+/// one request that sees the compacted context (Timeline branches §12.3). The
+/// lines are the Session's `main` and the one the `calls` step opened, and
+/// what a step does with them is fixed: a line without a completed compaction
+/// of this run gets `session.context.compact`, then both lines get `request`.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct AfterIdle {
+    pub(crate) request: String,
+}
+
+/// One input the runner submitted on the fixture's behalf. A run that its own
+/// budget stopped before a request carried the input to the model did not run
+/// the fixture its probe reads: it is incomplete, not scored (model-prompts
+/// §8.1).
+struct FixtureInput {
+    /// What the input is, named in the report when it was not observed.
+    what: &'static str,
+    /// The line the input was submitted to.
+    line: String,
+    /// The input id the Session answered; `None` when its reply named none.
+    input: Option<String>,
+}
+
+/// The scenario's own message.
+const MESSAGE_INPUT: &str = "the message";
+/// One of the requests the step after the first idle submitted.
+const AFTER_IDLE_INPUT: &str = "the request after the idle";
+/// The input a move sends to the line it moved to.
+const SWITCH_INPUT: &str = "the switch's follow-up";
+/// The input a move sends to the line it moved away from.
+const FORMER_INPUT: &str = "the former line's request after the switch";
+/// A steer the fixture scheduled.
+const STEER_INPUT: &str = "the steer";
 
 /// One source a scenario declares through the `eventHub` service, and
 /// optionally subscribes its Session's `main` branch to (EventHub design A.1,
@@ -2429,6 +2500,10 @@ pub(crate) struct EventSpec {
     #[serde(skip)]
     pub(crate) declared_mode: InputMode,
 }
+/// One call the runner makes before the message. A `session.branch_create`
+/// whose `parentBranchId` is `main` may set `at` to `"session_open"` instead
+/// of a sequence: the runner replaces it with the sequence `session.create`
+/// returned, so the line starts where the Session did.
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Call {
@@ -2498,6 +2573,9 @@ pub(crate) struct Scenario {
     #[serde(default)]
     pub(crate) moves: Vec<Switch>,
     pub(crate) budget: Budget,
+    /// The step after the run's first idle, when the scenario runs one.
+    #[serde(default)]
+    pub(crate) after_idle: Option<AfterIdle>,
     probes: Vec<Probe>,
 }
 
@@ -2606,6 +2684,19 @@ fn into_scenario(
         }
         if !call.params.is_object() && !call.params.is_null() {
             return Err(format!("call {}: params must be an object", call.method));
+        }
+        if call.params.get("at").and_then(Value::as_str) == Some(SESSION_OPEN) {
+            if call.method != "session.branch_create" {
+                return Err(format!(
+                    "call {}: {SESSION_OPEN} is only for session.branch_create",
+                    call.method
+                ));
+            }
+            if call.params.get("parentBranchId").and_then(Value::as_str) != Some("main") {
+                return Err(format!(
+                    "session.branch_create: {SESSION_OPEN} needs parentBranchId main"
+                ));
+            }
         }
     }
     if raw.sources.is_empty() && !raw.events.is_empty() {
@@ -2719,6 +2810,7 @@ fn into_scenario(
         steers: raw.steers,
         switch: raw.switch,
         moves: raw.moves,
+        after_idle: raw.after_idle,
         budget: raw.budget,
         probes: raw.probes,
     })
@@ -2737,9 +2829,12 @@ struct RunRecord {
     /// emitted.
     texts: Vec<ConfiguredText>,
     session: Option<String>,
-    /// `idle`, `turns`, `seconds`, `switch_target_not_reached`,
-    /// `switch_target_ended`, `switch_target_unknown`, `switch_note_missing`,
-    /// `switch_incomplete` or `error`.
+    /// `idle`, `turns`, `seconds`, `setup_failed`,
+    /// `switch_target_not_reached`, `switch_target_ended`,
+    /// `switch_target_unknown`, `switch_note_missing`, `switch_incomplete` or
+    /// `error`. `setup_failed` is the `calls` step before the first submit: no
+    /// model request of that run saw the configured text (Timeline branches
+    /// §12.3).
     stop: &'static str,
     turns: u32,
     window: Option<f64>,
@@ -2747,6 +2842,10 @@ struct RunRecord {
     /// Whether the run is a failed run, set once when the record is built
     /// (model-prompts §8.1).
     failed: bool,
+    /// Why the harness never produced a request the scenario's probe reads,
+    /// when it did not: the run is neither failed nor judged, enters no probe
+    /// rate, and does not count toward the floor.
+    incomplete: Option<String>,
     /// How the run's judging ended (model-prompts §8.1).
     judge_outcome: JudgeOutcome,
     error: Option<String>,
@@ -2790,10 +2889,11 @@ impl RunRecord {
             )
     }
     /// Whether the run is judged (model-prompts §8.1): it failed neither on
-    /// its own nor on its judging, and the judge answered every call with
-    /// usable verdicts. Only such a run counts toward the floor.
+    /// its own nor on its judging, the fixture was observed, and the judge
+    /// answered every call with usable verdicts. Only such a run counts
+    /// toward the floor.
     fn judged(&self) -> bool {
-        !self.failed && self.judge_outcome == JudgeOutcome::Judged
+        !self.failed && self.incomplete.is_none() && self.judge_outcome == JudgeOutcome::Judged
     }
 }
 
@@ -2863,6 +2963,10 @@ enum JudgeOutcome {
     /// The judge was never asked: the view of the run's export does not fit
     /// the judge's budget. The run is unjudged.
     Unfit,
+    /// The judge was never asked: the harness stopped the run before a request
+    /// its probes read existed, so the run is an incomplete fixture, not a
+    /// scored one.
+    Unobserved,
     /// The judge answered every call and gave no usable verdicts after the
     /// re-asks.
     Unreadable,
@@ -3071,6 +3175,10 @@ struct ChildOutcome {
     decline_retries: u32,
     switch_retries: u32,
     error: Option<String>,
+    /// Why the harness never produced a request the scenario's probe reads;
+    /// `None` when the fixture was observed.
+    #[serde(default)]
+    incomplete: Option<String>,
     judge_outcome: JudgeOutcome,
     judge_error: Option<String>,
     judge_reasks: u32,
@@ -3107,6 +3215,7 @@ fn harness_outcome(error: String, preflight: Vec<PreflightCheck>) -> ChildOutcom
         decline_retries: 0,
         switch_retries: 0,
         error: None,
+        incomplete: None,
         judge_outcome: JudgeOutcome::NotAsked,
         judge_error: None,
         judge_reasks: 0,
@@ -3652,6 +3761,7 @@ async fn child_drive(
         decline_retries: driven.decline_retries,
         switch_retries: driven.switch_retries,
         error: driven.error,
+        incomplete: driven.incomplete,
         judge_outcome: judging.outcome,
         judge_error: judging.error,
         judge_reasks: judging.reasks,
@@ -5255,6 +5365,7 @@ fn supervisor_outcome(
         decline_retries: 0,
         switch_retries: 0,
         error: Some(error),
+        incomplete: None,
         judge_outcome: JudgeOutcome::NotAsked,
         judge_error: Some(judge_error),
         judge_reasks: 0,
@@ -5594,6 +5705,7 @@ fn child_record(
         "idle" => "idle",
         "turns" => "turns",
         "seconds" => "seconds",
+        "setup_failed" => "setup_failed",
         "switch_target_not_reached" => "switch_target_not_reached",
         "switch_target_ended" => "switch_target_ended",
         "switch_target_unknown" => "switch_target_unknown",
@@ -5616,6 +5728,7 @@ fn child_record(
         window: outcome.window,
         duration_ms: outcome.duration_ms,
         failed: failed(stop, error.as_deref(), outcome.judge_outcome),
+        incomplete: outcome.incomplete.clone(),
         judge_outcome: outcome.judge_outcome,
         error,
 
@@ -5693,6 +5806,8 @@ impl Finished {
                 decline_retries: 0,
                 switch_retries: 0,
                 switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
                 error: Some(error),
             },
             export: None,
@@ -5740,6 +5855,20 @@ impl Judging {
             outcome: JudgeOutcome::CallFailed,
             probes: unparsed(scenario),
             error: Some(error),
+            reasks: 0,
+            calls: Vec::new(),
+            temperature_dropped: false,
+        }
+    }
+    /// A run the harness stopped before a request its probes read existed:
+    /// the judge is not asked, and every probe stays unparsed. The run is
+    /// incomplete, not failed; its reason travels on the record
+    /// (model-prompts §8.1).
+    fn unobserved(scenario: &Scenario) -> Self {
+        Self {
+            outcome: JudgeOutcome::Unobserved,
+            probes: unparsed(scenario),
+            error: None,
             reasks: 0,
             calls: Vec::new(),
             temperature_dropped: false,
@@ -5923,16 +6052,29 @@ async fn drive_once(
     // whose request consumed the input without it is failed before the judge,
     // so the policy comparison cannot score an answer that did not see the
     // text being evaluated (Timeline branches §12.4).
-    if driven.error.is_none()
-        && let Some(error) = switch_notes_unseen(&export, &driven.switch_notes.expected)
-    {
+    let notes = switch_note_check(&driven, &export);
+    if let NotesCheck::Unseen(error) = &notes {
         driven.stop = "switch_note_missing";
         driven.error = Some(error.clone());
         return Ok(Finished {
             driven,
             export: Some(export),
             view: None,
-            judging: Judging::not_asked(scenario, Some(error)),
+            judging: Judging::not_asked(scenario, Some(error.clone())),
+        });
+    }
+    // A run the harness stopped before the requests its probes read existed is
+    // incomplete, not scored: the probe's absence has no candidate behavior to
+    // read. A run that already failed keeps its failure (model-prompts §8.1).
+    if driven.error.is_none()
+        && let Some(reason) = incomplete_reason(&driven, scenario, &export, &notes)
+    {
+        driven.incomplete = Some(reason);
+        return Ok(Finished {
+            driven,
+            export: Some(export),
+            view: None,
+            judging: Judging::unobserved(scenario),
         });
     }
     let (Some(host), Some(resolver)) = (
@@ -6083,12 +6225,89 @@ fn settle_failed_turn(driven: &mut Driven, failed_turn: Option<String>) {
     }
 }
 
+/// The reason a run's own budget stop sends to every line: the requests that
+/// stop cut record it, so the export names the stop the same way.
+fn budget_stop_reason(stop: &str) -> String {
+    format!("budget: {stop}")
+}
+
+/// How a run's counted switch follow-ups ended (Timeline branches §12.4):
+/// every one was carried by a request that reached the model, one was stopped
+/// by the run's own turn cap before its model call, or one never reached the
+/// model for another reason.
+#[derive(Debug)]
+enum NotesCheck {
+    Observed,
+    /// The run's turn cap stopped a switch input before its model call: the
+    /// note was not at fault, and the probe has no request to read.
+    CapCut,
+    /// The request never reached the model for another reason.
+    Unseen(String),
+}
+
+/// The run's switch inputs and notes as the export shows them (Timeline
+/// branches §12.4). A run that already failed is not checked. Every input a
+/// move submitted must be carried by the request of the turn that consumed it,
+/// and every note is read over the inputs that did reach the model. A request
+/// that never reached the model fails the run as a missing note, and so does
+/// one that reached it without its note. A receipt the run's own turn cap
+/// stopped, or no turn consumed, leaves the probe with no request to read, but
+/// the check reads every receipt and note before it reports that cap: the run
+/// is an incomplete fixture rather than a missing note only when no receipt or
+/// note confirms a failure (model-prompts §8.1, issue #2140).
+fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
+    if driven.error.is_some() {
+        return NotesCheck::Observed;
+    }
+    let cap_stop = (driven.stop == "turns").then(|| budget_stop_reason(driven.stop));
+    let mut cap_cut = false;
+    for input in &driven.switch_notes.inputs {
+        let Some(id) = input.input.as_deref() else {
+            return NotesCheck::Unseen(format!(
+                "session.submit answered no input id for {}",
+                input.what
+            ));
+        };
+        match carried_request(export, &input.line, id, cap_stop.as_deref()) {
+            Carried::Call(_) => {}
+            // An input no turn consumed is not checked: no answer of its line
+            // is scored. When the run stopped on its turn cap, that cap is what
+            // left it unobserved, and the run is incomplete only if no other
+            // receipt or note confirms a failure.
+            Carried::Unconsumed if cap_stop.is_some() => cap_cut = true,
+            Carried::Unconsumed => {}
+            Carried::CapCut => cap_cut = true,
+            Carried::Unreached => {
+                return NotesCheck::Unseen(format!(
+                    "line {} consumed {} but its request never reached the model",
+                    input.line, input.what
+                ));
+            }
+        }
+    }
+    match switch_notes_unseen(export, &driven.switch_notes.expected, cap_stop.as_deref()) {
+        Some(error) => NotesCheck::Unseen(error),
+        None if cap_cut => NotesCheck::CapCut,
+        None => NotesCheck::Observed,
+    }
+}
+
 /// Why a scored switch follow-up did not see its note, or `None` when every
-/// consumed follow-up's request carries it: the request the line began after
-/// it consumed the input, and the note's exact text (Timeline branches §12.4).
-/// An input no request consumed is not checked: no answer of that line is
-/// scored.
-fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
+/// consumed follow-up's note reached the model: the request
+/// [`carried_request`] reads for the input, and the note's exact text
+/// (Timeline branches §12.4). An input no request consumed is not checked: no
+/// answer of that line is scored. A request a steer replaced before its model
+/// call is not checked either: the note travels in the request that replaces
+/// it in the same turn. A request the run's own turn-budget stop ended, whose
+/// reason `cap_stop` carries, is not reported either: that stop, not the note,
+/// kept it from the model (issue #2140). Every other request that never
+/// reached the model is reported, because no request of the line carried the
+/// text being evaluated.
+fn switch_notes_unseen(
+    export: &str,
+    notes: &[SwitchNote],
+    cap_stop: Option<&str>,
+) -> Option<String> {
     /// One `input/message` of the export, the line it is on, and the note it
     /// carries when it is one.
     struct Message {
@@ -6096,9 +6315,6 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
         note: Option<NoteSeen>,
     }
     let mut messages: BTreeMap<String, Message> = BTreeMap::new();
-    let mut consumed: Vec<(String, u64, String)> = Vec::new();
-    let mut starts: Vec<(String, u64, String)> = Vec::new();
-    let mut calls: BTreeMap<(String, String), Value> = BTreeMap::new();
     for line in export.lines() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -6108,38 +6324,16 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
         }
         let branch = record["branch_id"].as_str().unwrap_or_default().to_owned();
         let event = &record["event"];
-        let sequence = event["sequence"].as_u64().unwrap_or_default();
-        let id = event["id"].as_str().unwrap_or_default().to_owned();
-        match (event["type"].as_str(), event["name"].as_str()) {
-            (Some("input"), Some("message")) => {
-                messages.insert(
-                    id,
-                    Message {
-                        note: branch_line_note(event, &branch),
-                        branch,
-                    },
-                );
-            }
-            (Some("input"), Some("consumed")) => {
-                if let Some(input) = event["data"]["input_id"].as_str() {
-                    consumed.push((branch, sequence, input.to_owned()));
-                }
-            }
-            (Some("step"), Some("model-start")) => {
-                if let Some(request) = event["data"]["request_id"].as_str() {
-                    starts.push((branch, sequence, request.to_owned()));
-                }
-            }
-            (Some("model"), Some("call")) => {
-                if let Some(request) = event["data"]["request_id"].as_str() {
-                    calls.insert(
-                        (branch, request.to_owned()),
-                        event["data"]["request"].clone(),
-                    );
-                }
-            }
-            _ => {}
+        if (event["type"].as_str(), event["name"].as_str()) != (Some("input"), Some("message")) {
+            continue;
         }
+        messages.insert(
+            event["id"].as_str().unwrap_or_default().to_owned(),
+            Message {
+                note: branch_line_note(event, &branch),
+                branch,
+            },
+        );
     }
     for note in notes {
         let Some(message) = messages.get(&note.input) else {
@@ -6148,29 +6342,15 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
                 note.input, note.line
             ));
         };
-        let Some(consumed_at) = consumed
-            .iter()
-            .filter(|(branch, _, input)| branch == &message.branch && input == &note.input)
-            .map(|(_, sequence, _)| *sequence)
-            .min()
-        else {
-            continue;
-        };
-        let Some((_, _, request)) = starts
-            .iter()
-            .filter(|(branch, sequence, _)| branch == &message.branch && *sequence > consumed_at)
-            .min_by_key(|(_, sequence, _)| *sequence)
-        else {
-            return Some(format!(
-                "line {} consumed the switch input {} but started no request after it",
-                note.line, note.input
-            ));
-        };
-        let Some(call) = calls.get(&(message.branch.clone(), request.clone())) else {
-            return Some(format!(
-                "line {} consumed the switch input {} but its request never reached the model",
-                note.line, note.input
-            ));
+        let call = match carried_request(export, &message.branch, &note.input, cap_stop) {
+            Carried::Unconsumed | Carried::CapCut => continue,
+            Carried::Unreached => {
+                return Some(format!(
+                    "line {} consumed the switch input {} but its request never reached the model",
+                    note.line, note.input
+                ));
+            }
+            Carried::Call(call) => call,
         };
         let marker = note_marker(note.default, &note.other);
         let texts: Vec<&str> = messages
@@ -6193,6 +6373,174 @@ fn switch_notes_unseen(export: &str, notes: &[SwitchNote]) -> Option<String> {
     None
 }
 
+/// What an export shows of one input the runner submitted: whether its line
+/// consumed it, and the model call the request of that turn made (Timeline
+/// branches §12.4, model-prompts §8.1).
+#[derive(Debug)]
+enum Carried {
+    /// The line never consumed the input, so no request of its own answers it.
+    Unconsumed,
+    /// The request that began after the consumption reached the model; its
+    /// call carries the request body.
+    Call(Value),
+    /// The run's own turn cap stopped that request before its model call, when
+    /// the caller names the cap's reason.
+    CapCut,
+    /// No request the consuming turn began reached the model.
+    Unreached,
+}
+
+/// Reads one input the runner submitted from `export`: the turn its line
+/// consumed it in, and the first `step/model-start` after that consumption
+/// when no turn begins or ends in between. Only that request's own
+/// `model/call` answers for the input, or the call of a request that replaced
+/// it inside the same turn through `replaced by steer`. A start without a turn
+/// id joins no other start's turn and replaces nothing.
+fn carried_request(export: &str, branch: &str, input: &str, cap_stop: Option<&str>) -> Carried {
+    /// One `step/model-start` on the input's line.
+    struct Start {
+        turn: Option<String>,
+        sequence: u64,
+        request: String,
+    }
+    let mut consumed_at: Option<u64> = None;
+    let mut turns: Vec<u64> = Vec::new();
+    let mut starts: Vec<Start> = Vec::new();
+    let mut calls: BTreeMap<String, Value> = BTreeMap::new();
+    let mut replaced: BTreeSet<String> = BTreeSet::new();
+    let mut cut: BTreeSet<String> = BTreeSet::new();
+    let mut ended: BTreeMap<String, u64> = BTreeMap::new();
+    let mut ended_turns: BTreeMap<String, u64> = BTreeMap::new();
+    let mut interrupted: Vec<u64> = Vec::new();
+    for line in export.lines() {
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if record["kind"] != "event" || record["branch_id"].as_str() != Some(branch) {
+            continue;
+        }
+        let event = &record["event"];
+        let sequence = event["sequence"].as_u64().unwrap_or_default();
+        match (event["type"].as_str(), event["name"].as_str()) {
+            (Some("input"), Some("consumed")) => {
+                if event["data"]["input_id"].as_str() == Some(input) {
+                    consumed_at = Some(consumed_at.map_or(sequence, |at| at.min(sequence)));
+                }
+            }
+            (Some("step"), Some("model-start")) => {
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    starts.push(Start {
+                        turn: event["data"]["turn_id"].as_str().map(str::to_owned),
+                        sequence,
+                        request: request.to_owned(),
+                    });
+                }
+            }
+            (Some("model"), Some("call")) => {
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    calls.insert(request.to_owned(), event["data"]["request"].clone());
+                }
+            }
+            (Some("step"), Some("model-output-end")) => {
+                let reason = event["data"]["reason"].as_str().unwrap_or_default();
+                if let Some(request) = event["data"]["request_id"].as_str() {
+                    if event["data"]["status"] == "cancelled" && reason == "replaced by steer" {
+                        replaced.insert(request.to_owned());
+                    } else if Some(reason) == cap_stop {
+                        cut.insert(request.to_owned());
+                    } else {
+                        ended
+                            .entry(request.to_owned())
+                            .and_modify(|at| *at = (*at).min(sequence))
+                            .or_insert(sequence);
+                    }
+                }
+            }
+            (Some("turn"), Some("start")) => turns.push(sequence),
+            (Some("turn"), Some("end")) => {
+                turns.push(sequence);
+                if let Some(turn) = event["data"]["turn_id"].as_str() {
+                    ended_turns
+                        .entry(turn.to_owned())
+                        .and_modify(|at| *at = (*at).min(sequence))
+                        .or_insert(sequence);
+                }
+            }
+            (Some("stop"), Some("interrupt"))
+                if cap_stop.is_some() && event["data"]["reason"].as_str() == cap_stop =>
+            {
+                interrupted.push(sequence);
+            }
+            _ => {}
+        }
+    }
+    // The requests the run's own turn-budget stop ended: the one each of its
+    // interrupts found in flight on the line, and one whose own end names that
+    // stop, which the Loop writes when the interrupt lands before the
+    // request's `step/model-start`. A request that had already ended on its own
+    // was not in flight when the interrupt landed, and the stop sends to every
+    // line, idle ones included.
+    for at in &interrupted {
+        if let Some(start) = starts
+            .iter()
+            .filter(|start| start.sequence < *at)
+            .filter(|start| {
+                !ended.get(&start.request).is_some_and(|end| end < at)
+                    && !start
+                        .turn
+                        .as_ref()
+                        .is_some_and(|turn| ended_turns.get(turn).is_some_and(|end| end < at))
+            })
+            .max_by_key(|start| start.sequence)
+        {
+            cut.insert(start.request.clone());
+        }
+    }
+    let Some(consumed_at) = consumed_at else {
+        return Carried::Unconsumed;
+    };
+    let Some(first) = starts
+        .iter()
+        .filter(|start| start.sequence > consumed_at)
+        .min_by_key(|start| start.sequence)
+    else {
+        return Carried::Unreached;
+    };
+    // The input belongs to the turn that consumed it: a turn boundary between
+    // the consumption and the first start means that start is another turn's.
+    if turns
+        .iter()
+        .any(|sequence| *sequence > consumed_at && *sequence < first.sequence)
+    {
+        return Carried::Unreached;
+    }
+    let mut request = first;
+    loop {
+        if let Some(call) = calls.get(&request.request) {
+            return Carried::Call(call.clone());
+        }
+        let Some(turn) = request.turn.clone() else {
+            return Carried::Unreached;
+        };
+        if !replaced.contains(&request.request) {
+            return if cap_stop.is_some() && cut.contains(&request.request) {
+                Carried::CapCut
+            } else {
+                Carried::Unreached
+            };
+        }
+        let Some(next) = starts
+            .iter()
+            .filter(|start| start.sequence > request.sequence)
+            .filter(|start| start.turn.as_deref() == Some(turn.as_str()))
+            .min_by_key(|start| start.sequence)
+        else {
+            return Carried::Unreached;
+        };
+        request = next;
+    }
+}
+
 /// Whether any string in `value` carries `needle`: a request is JSON, so a
 /// text with quotes in it is compared through the parsed value.
 fn request_carries(value: &Value, needle: &str) -> bool {
@@ -6202,6 +6550,74 @@ fn request_carries(value: &Value, needle: &str) -> bool {
         Value::Object(map) => map.values().any(|item| request_carries(item, needle)),
         _ => false,
     }
+}
+
+/// Why the run's fixture was never observed, when it was not: every input the
+/// runner submitted must be carried by the request of the turn its line
+/// consumed it in, and a scenario with the step after the first idle must have
+/// run it. [`incomplete_reason`] decides which stops make a run that never ran
+/// such a request an incomplete fixture rather than a losing candidate: the
+/// probe has no request to read (model-prompts §8.1).
+fn fixture_incomplete(driven: &Driven, scenario: &Scenario, export: &str) -> Option<String> {
+    if scenario.after_idle.is_some()
+        && !driven
+            .inputs
+            .iter()
+            .any(|input| input.what == AFTER_IDLE_INPUT)
+    {
+        return Some(format!(
+            "the run stopped on {} before the step after the first idle",
+            driven.stop
+        ));
+    }
+    for input in &driven.inputs {
+        let Some(id) = input.input.as_deref() else {
+            return Some(format!(
+                "line {}: the Session named no input for {}, so the run cannot show it reached the model",
+                input.line, input.what
+            ));
+        };
+        match carried_request(export, &input.line, id, None) {
+            Carried::Call(_) => {}
+            Carried::Unconsumed => {
+                return Some(format!(
+                    "line {}: {} was never consumed before the run stopped on {}",
+                    input.line, input.what, driven.stop
+                ));
+            }
+            Carried::CapCut | Carried::Unreached => {
+                return Some(format!(
+                    "line {}: no request carried {} to the model before the run stopped on {}",
+                    input.line, input.what, driven.stop
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Why the run is an incomplete fixture, when it is: the harness's turn cap
+/// stopped it before a request its probes read existed — before the step after
+/// the first idle, before a submitted input's request, or before the request a
+/// switch follow-up needed. Any other stop keeps its own scoring: a run its
+/// wall clock or an error ended is failed, and a run that ended idle is scored
+/// for what its export holds (model-prompts §8.1).
+fn incomplete_reason(
+    driven: &Driven,
+    scenario: &Scenario,
+    export: &str,
+    notes: &NotesCheck,
+) -> Option<String> {
+    if driven.stop != "turns" {
+        return None;
+    }
+    fixture_incomplete(driven, scenario, export).or_else(|| match notes {
+        NotesCheck::CapCut => Some(
+            "the run's turn budget stopped the run before the switch follow-up reached the model"
+                .to_owned(),
+        ),
+        NotesCheck::Observed | NotesCheck::Unseen(_) => None,
+    })
 }
 
 pub(crate) async fn selection(
@@ -6279,6 +6695,13 @@ struct Driven {
     /// The switch follow-ups the run sent and the notes each line's request
     /// must carry; the run is not judged when one is missing.
     switch_notes: SwitchNotes,
+    /// The inputs the runner submitted on the fixture's behalf: the scenario's
+    /// message and the requests after the first idle.
+    inputs: Vec<FixtureInput>,
+    /// Why the fixture's observation never happened, when it did not: the run
+    /// is neither failed nor judged, enters no probe rate, and the report
+    /// lists it apart from both.
+    incomplete: Option<String>,
     error: Option<String>,
 }
 
@@ -6319,6 +6742,8 @@ async fn drive(
             decline_retries: 0,
             switch_retries: 0,
             switch_notes: SwitchNotes::default(),
+            inputs: Vec::new(),
+            incomplete: None,
             error: Some(error),
         };
     }
@@ -6332,8 +6757,11 @@ async fn drive(
         create["tools"] = json!(tools);
     }
     let created = client.rpc("session.create", create).await;
-    let session = match created {
-        Ok(reply) => reply["sessionId"].as_str().unwrap_or_default().to_owned(),
+    let (session, created_sequence) = match created {
+        Ok(reply) => (
+            reply["sessionId"].as_str().unwrap_or_default().to_owned(),
+            reply["sequence"].as_u64(),
+        ),
         Err(error) => {
             return Driven {
                 session: String::new(),
@@ -6345,6 +6773,8 @@ async fn drive(
                 decline_retries: 0,
                 switch_retries: 0,
                 switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
                 error: Some(format!("session.create failed: {error}")),
             };
         }
@@ -6359,6 +6789,8 @@ async fn drive(
         decline_retries: 0,
         switch_retries: 0,
         switch_notes: SwitchNotes::default(),
+        inputs: Vec::new(),
+        incomplete: None,
         error: None,
     };
     if let Err(error) = client
@@ -6407,6 +6839,18 @@ async fn drive(
             _ => serde_json::Map::new(),
         };
         params.insert("sessionId".to_owned(), json!(session));
+        if params.get("at").and_then(Value::as_str) == Some(SESSION_OPEN) {
+            let Some(sequence) = created_sequence else {
+                driven.stop = "setup_failed";
+                driven.error = Some(format!(
+                    "the calls step {} ({}) starts where the Session did, but session.create returned no sequence",
+                    index + 1,
+                    call.method
+                ));
+                return driven;
+            };
+            params.insert("at".to_owned(), json!(sequence));
+        }
         match client.rpc(&call.method, Value::Object(params)).await {
             Ok(reply) => {
                 if call.method == "session.branch_create" {
@@ -6414,7 +6858,11 @@ async fn drive(
                 }
             }
             Err(error) => {
-                driven.stop = "error";
+                // The calls step runs before the message, so no model request
+                // of this run has seen the text being evaluated: the failure
+                // is a setup failure, not the model's answer (Timeline
+                // branches §12.3).
+                driven.stop = "setup_failed";
                 driven.error = Some(format!(
                     "the calls step {} ({}) failed: {error}",
                     index + 1,
@@ -6446,13 +6894,34 @@ async fn drive(
             return driven;
         }
     }
-    if let Err(error) = submit(client, &session, &scenario.message, None, None).await {
-        driven.stop = "error";
-        driven.error = Some(error);
-        return driven;
-    }
+    let message = match submit(client, &session, &scenario.message, None, None).await {
+        Ok(input) => input,
+        Err(error) => {
+            driven.stop = "error";
+            driven.error = Some(error);
+            return driven;
+        }
+    };
+    driven.inputs.push(FixtureInput {
+        what: MESSAGE_INPUT,
+        line: "main".to_owned(),
+        input: message,
+    });
     let started = Instant::now();
-    let mut branches: BTreeSet<String> = ["main".to_owned()].into();
+    // The lines the run knows before its message: `main` and the line the calls
+    // step opened, whose id is known before its `branch/create` notice arrives
+    // — waiting on that notice alone would let a run that stops early go idle
+    // with the line still starting. They are also the lines the step after the
+    // first idle settles (Timeline branches §12.3).
+    let after_lines: Vec<String> = std::iter::once("main".to_owned())
+        .chain(user_line.clone())
+        .collect();
+    let mut branches: BTreeSet<String> = after_lines.iter().cloned().collect();
+    // The lines whose `context/compaction` this run has seen complete, and the
+    // step after the first idle, which compacts the rest before it asks each
+    // line for a request.
+    let mut compacted: BTreeSet<String> = BTreeSet::new();
+    let mut after_idle = scenario.after_idle.clone();
     let mut steers: Vec<(Steer, bool)> = scenario
         .steers
         .iter()
@@ -6506,7 +6975,16 @@ async fn drive(
     // The idle requests the quiet check keeps outstanding, one per line.
     let mut calls = IdleCalls::default();
     loop {
-        match fire_due(client, &session, &mut steers, started).await {
+        match fire_due(
+            client,
+            &session,
+            &mut steers,
+            &default,
+            &mut driven.inputs,
+            started,
+        )
+        .await
+        {
             Ok(submitted) => awaiting |= submitted,
             Err(error) => {
                 driven.stop = "error";
@@ -6653,7 +7131,52 @@ async fn drive(
         }
         if !pending && !awaiting && last_event.elapsed() >= QUIET {
             match idle(client, &session, &branches, &mut calls).await {
-                Ok(true) => break,
+                Ok(true) => {
+                    // The lines are idle: a scenario with a step after the
+                    // first idle runs it here, and its requests keep the loop
+                    // going until the second idle.
+                    let Some(after) = after_idle.take() else {
+                        break;
+                    };
+                    let settled = tokio::time::timeout(
+                        time_left(started, &scenario.budget),
+                        settle_after_idle(client, &session, &after_lines, &after, &compacted),
+                    )
+                    .await;
+                    match settled {
+                        Ok(Ok(submitted)) => {
+                            for (line, input) in submitted {
+                                driven.inputs.push(FixtureInput {
+                                    what: AFTER_IDLE_INPUT,
+                                    line,
+                                    input,
+                                });
+                            }
+                            awaiting = true;
+                        }
+                        Ok(Err(error)) => {
+                            driven.stop = "error";
+                            driven.error = Some(error);
+                            return driven;
+                        }
+                        Err(_) => {
+                            driven.stop = "seconds";
+                            driven.timed_out = true;
+                            driven.cleanup_deadline = Some(
+                                tokio::time::Instant::now()
+                                    + cleanup_budget(
+                                        settings.stall_cleanup,
+                                        settings.cleanup_budget_ms,
+                                    ),
+                            );
+                            driven.error = Some(format!(
+                                "the step after the first idle did not answer before the run's {}s budget ran out",
+                                scenario.budget.seconds
+                            ));
+                            return driven;
+                        }
+                    }
+                }
                 Ok(false) => last_event = Instant::now(),
                 Err(error) => {
                     driven.stop = "error";
@@ -6676,6 +7199,15 @@ async fn drive(
                             && let Some(branch) = event["data"]["branch"].as_str()
                         {
                             branches.insert(branch.to_owned());
+                        }
+                        // A line that compacted on its own is not compacted
+                        // again after the idle: a second compaction of the same
+                        // tail does not shrink the input (context policy §5).
+                        if event["type"] == "context"
+                            && event["name"] == "compaction"
+                            && event["data"]["status"] == "completed"
+                        {
+                            compacted.insert(branch.clone());
                         }
                         if let Some(line) = tool_line(&event) {
                             latest_tool_line = Some(line.to_owned());
@@ -6705,7 +7237,16 @@ async fn drive(
                         if let Some(pending) = switches.front_mut() {
                             pending.notice(&branch, &event);
                         }
-                        match fire_triggered(client, &session, &mut steers, &event).await {
+                        match fire_triggered(
+                            client,
+                            &session,
+                            &mut steers,
+                            &default,
+                            &mut driven.inputs,
+                            &event,
+                        )
+                        .await
+                        {
                             Ok(submitted) => awaiting |= submitted,
                             Err(error) => {
                                 driven.stop = "error";
@@ -6771,13 +7312,14 @@ async fn drive(
         }
     }
     if driven.stop == "turns" || driven.stop == "seconds" {
+        let reason = budget_stop_reason(driven.stop);
         let stop = async {
             for branch in &branches {
                 let _ = client
                     .rpc(
                         "session.stop",
                         json!({"sessionId": session, "branchId": branch,
-                               "reason": format!("budget: {}", driven.stop)}),
+                               "reason": reason.as_str()}),
                     )
                     .await;
             }
@@ -7908,6 +8450,11 @@ async fn send_switch_follow_ups(
         let input = receipt.clone().ok_or_else(|| {
             format!("session.submit answered no input id for the switch to {target}")
         })?;
+        gate.inputs.push(FixtureInput {
+            what: SWITCH_INPUT,
+            line: message_line.clone(),
+            input: Some(input.clone()),
+        });
         for (line, default, other) in &wanted {
             if *line == message_line {
                 gate.expected.push(SwitchNote {
@@ -7921,18 +8468,23 @@ async fn send_switch_follow_ups(
     }
     if let Some(message) = pending.switch.former_message.as_deref() {
         let receipt = submit(client, session, message, None, Some(former.as_str())).await?;
-        if let Some(gate) = notes.as_mut()
-            && former != "main"
-        {
+        if let Some(gate) = notes.as_mut() {
             let input = receipt.ok_or_else(|| {
                 format!("session.submit answered no input id for the switch to {target}")
             })?;
-            gate.expected.push(SwitchNote {
+            gate.inputs.push(FixtureInput {
+                what: FORMER_INPUT,
                 line: former.clone(),
-                input,
-                default: false,
-                other: target.clone(),
+                input: Some(input.clone()),
             });
+            if former != "main" {
+                gate.expected.push(SwitchNote {
+                    line: former.clone(),
+                    input,
+                    default: false,
+                    other: target.clone(),
+                });
+            }
         }
     }
     if let Some(next) = switches.front_mut() {
@@ -7941,11 +8493,15 @@ async fn send_switch_follow_ups(
     Ok(SwitchFire::Fired)
 }
 
-/// Sends the timed steers that are due, and whether it sent one.
+/// Sends the timed steers that are due, and whether it sent one. A steer is a
+/// fixture input: its receipt names the line the Session's default branch was
+/// when it was sent.
 async fn fire_due(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     steers: &mut [(Steer, bool)],
+    line: &str,
+    inputs: &mut Vec<FixtureInput>,
     started: Instant,
 ) -> std::result::Result<bool, String> {
     let mut sent = false;
@@ -7955,7 +8511,13 @@ async fn fire_due(
             .is_some_and(|after| started.elapsed().as_secs_f64() >= after);
         if due && !*fired {
             *fired = true;
-            let _ = submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            let receipt =
+                submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            inputs.push(FixtureInput {
+                what: STEER_INPUT,
+                line: line.to_owned(),
+                input: receipt,
+            });
             sent = true;
         }
     }
@@ -7965,9 +8527,11 @@ async fn fire_due(
 /// Sends the event-triggered steers whose substring the notice's
 /// `step/tool-use` event carries, and whether it sent one.
 async fn fire_triggered(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     steers: &mut [(Steer, bool)],
+    line: &str,
+    inputs: &mut Vec<FixtureInput>,
     event: &Value,
 ) -> std::result::Result<bool, String> {
     if event["type"] != "step" || event["name"] != "tool-use" {
@@ -7982,7 +8546,13 @@ async fn fire_triggered(
             .is_some_and(|trigger| data.contains(trigger.as_str()));
         if triggered && !*fired {
             *fired = true;
-            let _ = submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            let receipt =
+                submit(client, session, &steer.text, Some(InputMode::Steer), None).await?;
+            inputs.push(FixtureInput {
+                what: STEER_INPUT,
+                line: line.to_owned(),
+                input: receipt,
+            });
             sent = true;
         }
     }
@@ -8108,6 +8678,57 @@ impl IdleCalls {
     }
 }
 
+/// The step after the first idle: every line without a completed compaction of
+/// this run is compacted, then each line is asked one request (Timeline
+/// branches §12.3). A compaction that does not complete ends the run here
+/// instead of letting the next request be judged as one after a compaction:
+/// the probe reads identity across a compaction, and a run that did not compact
+/// measures nothing else. Answers each line's input, in the order sent, so the
+/// caller can tell whether a request followed it.
+async fn settle_after_idle(
+    client: &mut impl SwitchClient,
+    session: &str,
+    lines: &[String],
+    after: &AfterIdle,
+    compacted: &BTreeSet<String>,
+) -> std::result::Result<Vec<(String, Option<String>)>, String> {
+    for line in lines {
+        if compacted.contains(line) {
+            continue;
+        }
+        let reply = client
+            .rpc(
+                "session.context.compact",
+                json!({"sessionId": session, "branchId": line}),
+            )
+            .await
+            .map_err(|error| format!("{line}: session.context.compact failed: {error}"))?;
+        match reply["status"].as_str() {
+            Some("completed") => {}
+            Some("skipped") => {
+                return Err(format!(
+                    "{line}: the compaction after the first idle was skipped: {}",
+                    reply["reason"].as_str().unwrap_or("no reason given")
+                ));
+            }
+            status => {
+                return Err(format!(
+                    "{line}: the compaction after the first idle answered {}",
+                    status.unwrap_or("no status")
+                ));
+            }
+        }
+    }
+    let mut submitted = Vec::with_capacity(lines.len());
+    for line in lines {
+        let input = submit(client, session, &after.request, None, Some(line))
+            .await
+            .map_err(|error| format!("{line}: the request after the idle failed: {error}"))?;
+        submitted.push((line.clone(), input));
+    }
+    Ok(submitted)
+}
+
 /// Whether every known line is idle and no notice arrived while it asked.
 /// `session.idle` returns when the line is idle; a short deadline keeps a busy
 /// line from holding the driver, and a call whose deadline passes stays
@@ -8157,12 +8778,31 @@ async fn idle(
 /// The export as the judge reads it (issue #635): every line in order, with
 /// each request-bearing event's request rendered against the previous request
 /// of the same line, so a run does not carry a request's unchanged history
-/// once per model call.
+/// once per model call. A request's consecutive `step/thinking` deltas render
+/// as one line with their text joined, because a delta line carries mostly an
+/// id and field names and the judge reads the run as a whole (issue #2139).
 fn judge_view(export: &str) -> String {
+    /// A request's open `step/thinking` line and its deltas' text so far.
+    struct Thinking {
+        key: (String, String, String),
+        line: Value,
+        text: String,
+    }
+    let flush = |view: &mut String, thinking: &mut Option<Thinking>| {
+        if let Some(mut thinking) = thinking.take() {
+            thinking.line["event"]["data"]["delta"] = json!(thinking.text);
+            view.push_str(
+                &serde_json::to_string(&thinking.line).expect("a parsed line serializes"),
+            );
+            view.push('\n');
+        }
+    };
     let mut view = String::new();
     let mut previous: BTreeMap<String, Value> = BTreeMap::new();
+    let mut thinking: Option<Thinking> = None;
     for raw in export.lines() {
         let Ok(mut line) = serde_json::from_str::<Value>(raw) else {
+            flush(&mut view, &mut thinking);
             view.push_str(raw);
             view.push('\n');
             continue;
@@ -8173,10 +8813,49 @@ fn judge_view(export: &str) -> String {
             line["event"]["data"]["request"] = rendered_request(&request, previous.get(&branch));
             previous.insert(branch, request);
         }
-        view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
-        view.push('\n');
+        let Some(key) = thinking_key(&line) else {
+            flush(&mut view, &mut thinking);
+            view.push_str(&serde_json::to_string(&line).expect("a parsed line serializes"));
+            view.push('\n');
+            continue;
+        };
+        let delta = line["event"]["data"]["delta"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        if let Some(open) = thinking.as_mut()
+            && open.key == key
+        {
+            open.text.push_str(&delta);
+            continue;
+        }
+        flush(&mut view, &mut thinking);
+        thinking = Some(Thinking {
+            key,
+            line,
+            text: delta,
+        });
     }
+    flush(&mut view, &mut thinking);
     view
+}
+
+/// The request a `step/thinking` line belongs to: the line, the turn and the
+/// request. A delta joins the open thinking line only when all three match.
+fn thinking_key(line: &Value) -> Option<(String, String, String)> {
+    (line["event"]["type"] == "step" && line["event"]["name"] == "thinking").then(|| {
+        (
+            line["branch_id"].as_str().unwrap_or_default().to_owned(),
+            line["event"]["data"]["turn_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            line["event"]["data"]["request_id"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+        )
+    })
 }
 
 /// One request as [`judge_view`] renders it, starting from the request object
@@ -8470,7 +9149,9 @@ struct ProbeCounts {
 
 /// The arm's metrics over its scenarios and runs (model-prompts §8.1). An
 /// unjudged or failed run adds nothing to the probe rates; the arm counts it
-/// in its own rate.
+/// in its own rate. An incomplete fixture is compared with neither: it is
+/// reported apart, and its arm's rates are read over the runs it attempted
+/// that had something to compare.
 #[derive(Default)]
 struct Metrics {
     /// `(scenario, probe)` → its counted runs and the passes among them.
@@ -8484,11 +9165,21 @@ struct Metrics {
     /// Runs the judge gave no answer to, that did not fail on their own,
     /// left out of every other count.
     unjudged: u32,
-    /// Every run of the arm, failed and unjudged included.
+    /// The runs the arm's rates are computed over: judged, failed and unjudged.
     runs: u32,
+    /// Every run the arm attempted, the incomplete fixtures included.
+    attempted: u32,
+    /// Runs the harness's turn cap stopped before the request its probe reads
+    /// existed, left out of `runs` (model-prompts §8.1).
+    incomplete: u32,
 }
 impl Metrics {
     fn add(&mut self, scenario: &Scenario, record: &RunRecord) {
+        self.attempted += 1;
+        if record.incomplete.is_some() {
+            self.incomplete += 1;
+            return;
+        }
         self.runs += 1;
         if record.unjudged() {
             self.unjudged += 1;
@@ -8708,7 +9399,7 @@ impl Instrument {
         self.judge_window = self.judge_window.take().or(measured.judge_window);
         let asked = !matches!(
             record.judge_outcome,
-            JudgeOutcome::NotAsked | JudgeOutcome::Unfit
+            JudgeOutcome::NotAsked | JudgeOutcome::Unfit | JudgeOutcome::Unobserved
         );
         match record.temperature_dropped {
             Some(dropped) => self.judge_temperature_dropped += usize::from(dropped),
@@ -8764,6 +9455,9 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         };
         metrics.entry(record.arm).or_default().add(scenario, record);
     }
+    let empty = Metrics::default();
+    let current = metrics.get("current").unwrap_or(&empty);
+    let candidate = metrics.get("candidate").unwrap_or(&empty);
     let window = instrument.judge_window.map_or_else(String::new, |window| {
         format!(
             ", window {}, max output {}",
@@ -8819,6 +9513,13 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         instrument.judge.model_id,
         carried(&instrument.judge_configuration),
         instrument.runs,
+    );
+    // The rates quote the runs with something to compare; the arm's attempts
+    // and the fixtures its own turn cap left unobserved are reported beside
+    // them, and enter no rate (model-prompts §8.1).
+    text += &format!(
+        "| attempted runs | current {}, candidate {} |\n| incomplete fixtures | current {}, candidate {} |\n",
+        current.attempted, candidate.attempted, current.incomplete, candidate.incomplete,
     );
     if instrument.sources.is_none() {
         let tokens: Vec<String> = instrument
@@ -8888,9 +9589,6 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
         );
         text.push('\n');
     }
-    let empty = Metrics::default();
-    let current = metrics.get("current").unwrap_or(&empty);
-    let candidate = metrics.get("candidate").unwrap_or(&empty);
     // The fewest judged runs an arm ran a scenario: the floor the verdict
     // needs. Failed and unjudged runs are compared in their own rows and do
     // not count here, because they enter no probe rate (model-prompts §8.1).
@@ -8932,6 +9630,50 @@ fn report(instrument: &Instrument, scenarios: &[Scenario], records: &[RunRecord]
                 record.scenario,
                 record.run,
                 error.lines().next().unwrap_or_default(),
+            );
+        }
+    }
+    // A run that failed before its first request is a setup failure, not the
+    // model's answer: the report names it apart from the run failures beside
+    // the rates it left, so a probe no run was judged on is not read as a lost
+    // identity (Timeline branches §12.3).
+    let failed_runs: Vec<&RunRecord> = records.iter().filter(|record| record.failed).collect();
+    if !failed_runs.is_empty() {
+        text += "\n| arm | scenario | run | failure | error |\n| --- | --- | --- | --- | --- |\n";
+        for record in failed_runs {
+            let failure = if record.stop == "setup_failed" {
+                "setup"
+            } else {
+                "run"
+            };
+            let error = record.error.as_deref().unwrap_or_default();
+            text += &format!(
+                "| {} | {} | {} | {failure} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                error.lines().next().unwrap_or_default(),
+            );
+        }
+    }
+    // A run the harness stopped before a request its probes read existed is an
+    // incomplete fixture, not the model's answer: the report names it apart
+    // from the failed runs and the rates it left, so a probe no run was judged
+    // on is not read as a lost identity (model-prompts §8.1).
+    let incomplete_runs: Vec<&RunRecord> = records
+        .iter()
+        .filter(|record| record.incomplete.is_some())
+        .collect();
+    if !incomplete_runs.is_empty() {
+        text += "\n| arm | scenario | run | incomplete |\n| --- | --- | --- | --- |\n";
+        for record in incomplete_runs {
+            let reason = record.incomplete.as_deref().unwrap_or_default();
+            text += &format!(
+                "| {} | {} | {} | {} |\n",
+                record.arm,
+                record.scenario,
+                record.run,
+                reason.lines().next().unwrap_or_default(),
             );
         }
     }
@@ -9041,6 +9783,7 @@ mod tests {
             steers: Vec::new(),
             switch: None,
             moves: Vec::new(),
+            after_idle: None,
             budget: Budget {
                 turns: 4,
                 seconds: 60.,
@@ -9066,6 +9809,7 @@ mod tests {
             window: None,
             duration_ms: 0.,
             failed: failed("idle", None, judge_outcome),
+            incomplete: None,
             judge_outcome,
             error: None,
             judge_error: None,
@@ -9089,6 +9833,13 @@ mod tests {
                     quote: None,
                 })
                 .collect(),
+        }
+    }
+    /// The error a `NotesCheck` reported, when it found an unseen request.
+    fn unseen_note(check: NotesCheck) -> Option<String> {
+        match check {
+            NotesCheck::Unseen(error) => Some(error),
+            NotesCheck::Observed | NotesCheck::CapCut => None,
         }
     }
     fn metrics(scenario: &Scenario, records: &[RunRecord]) -> Metrics {
@@ -9430,6 +10181,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(directory);
     }
 
+    /// `session_open` is filled from `session.create`, so only a
+    /// `session.branch_create` on `main` may write it: any other call or
+    /// parent would name a line the Session never opened. A numeric `at` is
+    /// still a call's own sequence, whatever its parent.
+    #[test]
+    fn the_session_open_placeholder_needs_a_main_branch_create() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-parse-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(directory.join("workspace")).unwrap();
+        let parse = |calls: Value| {
+            let file: ScenarioFile = serde_json::from_value(json!({
+                "message": "first",
+                "calls": calls,
+                "budget": {"turns": 3, "seconds": 60, "window": 1000},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "it ran"}]
+            }))
+            .unwrap();
+            into_scenario("case".into(), directory.clone(), file)
+        };
+        let create = |at: Value, parent: &str| {
+            json!([{"method": "session.branch_create",
+                    "params": {"parentBranchId": parent, "at": at,
+                               "prompt": "the user's line"}}])
+        };
+        let scenario = parse(create(json!(SESSION_OPEN), "main")).unwrap();
+        assert_eq!(scenario.calls[0].params["at"], SESSION_OPEN);
+        let Err(error) = parse(create(json!(SESSION_OPEN), "3")) else {
+            panic!("a line cut from another line cannot start where the Session did");
+        };
+        assert!(
+            error.contains(SESSION_OPEN) && error.contains("main"),
+            "{error}"
+        );
+        let Err(error) = parse(json!([{"method": "session.context.usage",
+                                       "params": {"at": SESSION_OPEN}}]))
+        else {
+            panic!("the placeholder is only a branch_create's at");
+        };
+        assert!(error.contains("session.branch_create"), "{error}");
+        let scenario = parse(create(json!(0), "3")).unwrap();
+        assert_eq!(scenario.calls[0].params["at"], 0);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
     /// A second move fires right after the first, and a move that names a
     /// former-default input sends it to the line it moved away from: the note
     /// a move writes goes in as `append` input, which never starts a turn, so
@@ -9735,12 +10532,1401 @@ mod tests {
             other: "main".into(),
         }];
         assert!(
-            switch_notes_unseen(&export(note), &notes).is_none(),
+            switch_notes_unseen(&export(note), &notes, None).is_none(),
             "the request carries the note"
         );
-        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes)
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
             .expect("the request without the note is unseen");
         assert!(unseen.contains("line 2"), "{unseen}");
+    }
+
+    /// A steer can replace the request a line began after it consumed a switch
+    /// input before that request reaches the model. The replacement request in
+    /// the same turn carries the note, so the check reads the first request
+    /// after the consumption that reached the model (issue #2140).
+    #[test]
+    fn a_replaced_request_does_not_hide_the_note_its_replacement_carries() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |request: &str| {
+            [
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"turn_id": "t1", "request_id": "r1"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "o1", "sequence": 5, "type": "step", "name": "model-output-end",
+                                 "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                          "reason": "replaced by steer"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s2", "sequence": 6, "type": "step", "name": "model-start",
+                                 "data": {"turn_id": "t1", "request_id": "r2"}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "m2", "sequence": 7, "type": "model", "name": "call",
+                                 "data": {"request_id": "r2",
+                                          "request": {"messages": [{"role": "user", "content": request}]}}}}),
+            ]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        assert!(
+            switch_notes_unseen(&export(note), &notes, None).is_none(),
+            "the replacement request carries the note"
+        );
+        let unseen = switch_notes_unseen(&export("the follow-up was answered"), &notes, None)
+            .expect("the request without the note is still unseen");
+        assert!(unseen.contains("does not carry the note"), "{unseen}");
+    }
+
+    /// A run that closed its session before the follow-up's request reached the
+    /// model is failed on its note: no request of the line carried the text to
+    /// the model, so the probe would score an answer that did not see it
+    /// (Timeline branches §12.4). The same export with no request started after
+    /// the consumption is failed the way the check read it before #2140.
+    #[test]
+    fn a_note_whose_request_the_run_closed_before_the_model_is_unseen() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = |start: bool| {
+            let mut records = vec![
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                                 "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                        "text": note}]}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                                 "data": {}}}),
+                json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                                 "data": {"input_id": "f1"}}}),
+            ];
+            if start {
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                                 "data": {"request_id": "r1"}}}));
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "o1", "sequence": 5, "type": "step", "name": "model-output-end",
+                                 "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                          "reason": "timeline closed"}}}));
+                records.push(json!({"kind": "event", "branch_id": "2",
+                       "event": {"id": "e1", "sequence": 6, "type": "turn", "name": "end",
+                                 "data": {"status": "cancelled", "reason": "timeline closed"}}}));
+            }
+            records
+                .iter()
+                .map(|record| serde_json::to_string(record).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let unseen = switch_notes_unseen(&export(true), &notes, None)
+            .expect("the closed request never reached the model");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+        let unseen = switch_notes_unseen(&export(false), &notes, None)
+            .expect("no request started after the consumption");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A run that stopped on its turn budget ended the request before its
+    /// model call: the note is not a missing note, but the run has no request
+    /// for its probe to read, so it is an incomplete fixture. The same export
+    /// with any other stop is a missing note (issue #2140).
+    #[test]
+    fn a_turn_budget_stop_makes_a_note_its_stop_ended_incomplete() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = [
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                             "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                    "text": note}]}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                             "data": {}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                             "data": {"input_id": "f1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                             "data": {"turn_id": "t1", "request_id": "r1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "i1", "sequence": 5, "type": "stop", "name": "interrupt",
+                             "data": {"reason": "budget: turns", "scope": "turn"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "o1", "sequence": 6, "type": "step", "name": "model-output-end",
+                             "data": {"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                                      "reason": "budget: turns"}}}),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let switch_note = || SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        };
+        let notes = [switch_note()];
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![switch_note()],
+                inputs: vec![FixtureInput {
+                    what: SWITCH_INPUT,
+                    line: "2".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        assert!(
+            matches!(switch_note_check(&driven, &export), NotesCheck::CapCut),
+            "the run's turn budget ended the request before its model call"
+        );
+        let unseen = switch_notes_unseen(&export, &notes, None)
+            .expect("any other stop still reports the note");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A turn-budget stop exempts the request it stopped and nothing else: a
+    /// follow-up whose request never reached the model for another reason is
+    /// still reported when a later request of its line meets the cap
+    /// (issue #2140).
+    #[test]
+    fn a_turn_budget_stop_keeps_a_missing_follow_up_the_cap_did_not_stop() {
+        let note = |line: &str| {
+            format!(
+                "<dim-branch-line branch=\"{line}\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>"
+            )
+        };
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let carried =
+            |text: &str| json!({"blocks": [{"type": "raw", "key": "branch:line", "text": text}]});
+        let export = [
+            // The cap found line 2's follow-up in flight, so that note is not
+            // reported.
+            event("2", 1, "n2", ["input", "message"], carried(&note("2"))),
+            event("2", 2, "f2", ["input", "message"], json!({})),
+            event(
+                "2",
+                3,
+                "c2",
+                ["input", "consumed"],
+                json!({"input_id": "f2"}),
+            ),
+            event(
+                "2",
+                4,
+                "s2",
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r1"}),
+            ),
+            event(
+                "2",
+                5,
+                "i2",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "turn"}),
+            ),
+            // Line 3's follow-up ended before the model for another reason,
+            // and the request the cap stopped on that line is a later one.
+            event("3", 10, "n3", ["input", "message"], carried(&note("3"))),
+            event("3", 11, "f3", ["input", "message"], json!({})),
+            event(
+                "3",
+                12,
+                "c3",
+                ["input", "consumed"],
+                json!({"input_id": "f3"}),
+            ),
+            event(
+                "3",
+                13,
+                "s3",
+                ["step", "model-start"],
+                json!({"turn_id": "t3", "request_id": "r2"}),
+            ),
+            event(
+                "3",
+                14,
+                "o3",
+                ["step", "model-output-end"],
+                json!({"turn_id": "t3", "request_id": "r2", "status": "cancelled",
+                       "reason": "timeline closed"}),
+            ),
+            event(
+                "3",
+                20,
+                "s4",
+                ["step", "model-start"],
+                json!({"turn_id": "t4", "request_id": "r3"}),
+            ),
+            event(
+                "3",
+                21,
+                "m4",
+                ["model", "call"],
+                json!({"request_id": "r3",
+                       "request": {"messages": [{"role": "user",
+                                                  "content": "the follow-up was answered"}]}}),
+            ),
+            event(
+                "3",
+                22,
+                "i3",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "turn"}),
+            ),
+        ]
+        .iter()
+        .map(|event| serde_json::to_string(event).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let notes = [
+            SwitchNote {
+                line: "2".into(),
+                input: "f2".into(),
+                default: true,
+                other: "main".into(),
+            },
+            SwitchNote {
+                line: "3".into(),
+                input: "f3".into(),
+                default: true,
+                other: "main".into(),
+            },
+        ];
+        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"));
+        assert!(
+            unseen.as_deref().is_some_and(
+                |error| error.contains("line 3") && error.contains("never reached the model")
+            ),
+            "the follow-up the cap did not stop is still missing: {unseen:?}"
+        );
+    }
+
+    /// A request that had already ended when the turn-budget stop reached its
+    /// line was not in flight, so the stop did not keep it from the model: its
+    /// note is still reported (issue #2140). The stop goes to every line, idle
+    /// ones included, so the last start before its interrupt is not always the
+    /// request it stopped.
+    #[test]
+    fn a_turn_budget_stop_does_not_exempt_a_request_that_ended_before_it() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let export = |end: Value| {
+            [
+                event(
+                    1,
+                    "n1",
+                    ["input", "message"],
+                    json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+                ),
+                event(2, "f1", ["input", "message"], json!({})),
+                event(3, "c1", ["input", "consumed"], json!({"input_id": "f1"})),
+                event(
+                    4,
+                    "s1",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t1", "request_id": "r1"}),
+                ),
+                end,
+                event(
+                    6,
+                    "i1",
+                    ["stop", "interrupt"],
+                    json!({"reason": "budget: turns", "scope": "turn"}),
+                ),
+            ]
+            .iter()
+            .map(|record| serde_json::to_string(record).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+        };
+        for end in [
+            event(
+                5,
+                "o1",
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "completed",
+                       "finish_reason": "end_turn"}),
+            ),
+            event(
+                5,
+                "e1",
+                ["turn", "end"],
+                json!({"turn_id": "t1", "status": "completed", "reason": "end_turn"}),
+            ),
+        ] {
+            let unseen = switch_notes_unseen(&export(end), &notes, Some("budget: turns"))
+                .expect("a request that ended before the stop still needs its note");
+            assert!(unseen.contains("never reached the model"), "{unseen}");
+        }
+    }
+
+    /// A start that carries no turn id is not exempted by the turn-budget stop
+    /// the way a placed request is: without the turn, nothing says the stop
+    /// found this request in flight, and grouping every such start under one
+    /// turn would drop the turn the check reads (Timeline branches §12.4).
+    #[test]
+    fn a_start_without_a_turn_id_is_exempted_by_no_stop() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "f1".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let export = [
+            event(
+                1,
+                "n1",
+                ["input", "message"],
+                json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+            ),
+            event(2, "f1", ["input", "message"], json!({})),
+            event(3, "c1", ["input", "consumed"], json!({"input_id": "f1"})),
+            event(
+                4,
+                "s1",
+                ["step", "model-start"],
+                json!({"request_id": "r1"}),
+            ),
+            event(
+                5,
+                "i1",
+                ["stop", "interrupt"],
+                json!({"reason": "budget: turns", "scope": "turn"}),
+            ),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let unseen = switch_notes_unseen(&export, &notes, Some("budget: turns"))
+            .expect("an unplaced request is not exempted by the stop");
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A turn-budget stop does not hide a request that reached the model
+    /// without the note: the stop explains a request that never reached the
+    /// model, not one that did (Timeline branches §12.4).
+    #[test]
+    fn a_turn_budget_stop_still_reports_a_request_that_reached_the_model_without_the_note() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let export = [
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "n1", "sequence": 1, "type": "input", "name": "message",
+                             "data": {"blocks": [{"type": "raw", "key": "branch:line",
+                                                    "text": note}]}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "f1", "sequence": 2, "type": "input", "name": "message",
+                             "data": {}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "c1", "sequence": 3, "type": "input", "name": "consumed",
+                             "data": {"input_id": "f1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "s1", "sequence": 4, "type": "step", "name": "model-start",
+                             "data": {"request_id": "r1"}}}),
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": "m1", "sequence": 5, "type": "model", "name": "call",
+                             "data": {"request_id": "r1",
+                                      "request": {"messages": [{"role": "user", "content": "the follow-up was answered"}]}}}}),
+        ]
+        .iter()
+        .map(|record| serde_json::to_string(record).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![SwitchNote {
+                    line: "2".into(),
+                    input: "f1".into(),
+                    default: true,
+                    other: "main".into(),
+                }],
+                inputs: Vec::new(),
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let unseen = unseen_note(switch_note_check(&driven, &export)).expect("the note is missing");
+        assert!(unseen.contains("does not carry the note"), "{unseen}");
+    }
+
+    /// The fixture's own inputs must be consumed and followed by a request on
+    /// their line. A run its own budget stopped before the step after the first
+    /// idle, or before the follow-up request, leaves the probe with nothing to
+    /// read: it is an incomplete fixture, not a losing candidate
+    /// (model-prompts §8.1).
+    #[test]
+    fn a_fixture_its_budget_stopped_before_its_requests_is_incomplete() {
+        let event = |branch: &str, sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let mut scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let mut driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let export = [
+            event(
+                "main",
+                1,
+                ["input", "message"],
+                json!({"user": {"content": "message"}}),
+            ),
+            event("main", 2, ["input", "consumed"], json!({"input_id": "m1"})),
+            event(
+                "main",
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                "main",
+                4,
+                ["model", "call"],
+                json!({"request_id": "r1", "request": {}}),
+            ),
+        ]
+        .join("\n");
+        let reason = fixture_incomplete(&driven, &scenario, &export).unwrap();
+        assert!(
+            reason.contains("before the step after the first idle"),
+            "{reason}"
+        );
+
+        driven.inputs.push(FixtureInput {
+            what: AFTER_IDLE_INPUT,
+            line: "main".into(),
+            input: Some("f1".into()),
+        });
+        let consumed = [
+            event(
+                "main",
+                6,
+                ["input", "message"],
+                json!({"user": {"content": "Re-run the tests."}}),
+            ),
+            event("main", 7, ["input", "consumed"], json!({"input_id": "f1"})),
+        ]
+        .join("\n");
+        let reason =
+            fixture_incomplete(&driven, &scenario, &format!("{export}\n{consumed}")).unwrap();
+        assert!(reason.contains("no request carried"), "{reason}");
+
+        let after = [
+            consumed.clone(),
+            event(
+                "main",
+                8,
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r2"}),
+            ),
+            event(
+                "main",
+                9,
+                ["model", "call"],
+                json!({"request_id": "r2", "request": {}}),
+            ),
+        ]
+        .join("\n");
+        assert_eq!(
+            fixture_incomplete(&driven, &scenario, &format!("{export}\n{after}")),
+            None,
+            "the request after the follow-up makes the fixture complete"
+        );
+    }
+
+    /// A run that stopped on its wall clock is a failed run, not an incomplete
+    /// fixture: the harness did not stop it before a request its probes read
+    /// existed, the run's own budget did, and a probe that saw no request is
+    /// the candidate's outcome (model-prompts §8.1).
+    #[test]
+    fn a_run_that_stopped_on_its_wall_clock_is_failed_not_incomplete() {
+        let mut scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let driven = Driven {
+            session: "s".into(),
+            stop: "seconds",
+            timed_out: true,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let export = json!({"kind": "event", "branch_id": "main",
+                            "event": {"id": "e1", "sequence": 1, "type": "input",
+                                      "name": "message", "data": {}}})
+        .to_string();
+        assert_eq!(
+            incomplete_reason(&driven, &scenario, &export, &NotesCheck::Observed),
+            None,
+            "the wall clock ended the run, not the step after the first idle"
+        );
+        assert!(
+            failed(driven.stop, driven.error.as_deref(), JudgeOutcome::Judged),
+            "a run that stopped on its wall clock is a failed run"
+        );
+    }
+
+    /// A switch follow-up request the run's turn cap stopped has no request
+    /// for its probe to read: the note check reports the cap, and the run is
+    /// incomplete rather than scored (model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_switch_follow_up_makes_the_run_incomplete() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(
+                1,
+                ["input", "message"],
+                json!({"user": {"content": "message"}}),
+            ),
+            event(2, ["input", "consumed"], json!({"input_id": "m1"})),
+            event(
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                4,
+                ["model", "call"],
+                json!({"request_id": "r1", "request": {}}),
+            ),
+        ]
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 4,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let reason =
+            incomplete_reason(&driven, &scenario(Vec::new()), &export, &NotesCheck::CapCut)
+                .unwrap();
+        assert!(
+            reason.contains("switch follow-up") && reason.contains("turn budget"),
+            "{reason}"
+        );
+    }
+
+    /// An input belongs to the turn that consumed it: a later turn's request
+    /// does not carry it, a call with no `step/model-start` is no request, and
+    /// a request a steer replaced inside the same turn answers for it
+    /// (model-prompts §8.1).
+    #[test]
+    fn a_fixture_input_is_carried_only_by_the_request_of_its_turn() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let driven = Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![FixtureInput {
+                what: MESSAGE_INPUT,
+                line: "main".into(),
+                input: Some("m1".into()),
+            }],
+            incomplete: None,
+            error: None,
+        };
+        let scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        let message: Vec<String> = vec![
+            event(
+                1,
+                ["input", "message"],
+                json!({"user": {"content": "message"}}),
+            ),
+            event(2, ["input", "consumed"], json!({"input_id": "m1"})),
+        ];
+        let mut later_turn = message.clone();
+        later_turn.extend([
+            event(
+                3,
+                ["turn", "end"],
+                json!({"turn_id": "t1", "status": "cancelled", "reason": "end_turn"}),
+            ),
+            event(4, ["turn", "start"], json!({"turn_id": "t2"})),
+            event(
+                5,
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r2"}),
+            ),
+            event(
+                6,
+                ["model", "call"],
+                json!({"request_id": "r2", "request": {}}),
+            ),
+        ]);
+        assert!(
+            fixture_incomplete(&driven, &scenario, &later_turn.join("\n"))
+                .is_some_and(|reason| reason.contains("no request carried")),
+            "a later turn's request does not carry the input"
+        );
+        let mut call_only = message.clone();
+        call_only.push(event(
+            3,
+            ["model", "call"],
+            json!({"request_id": "r1", "request": {}}),
+        ));
+        assert!(
+            fixture_incomplete(&driven, &scenario, &call_only.join("\n")).is_some(),
+            "a call with no request start did not carry the input"
+        );
+        let mut replaced = message.clone();
+        replaced.extend([
+            event(
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                4,
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                       "reason": "replaced by steer"}),
+            ),
+            event(
+                5,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r2"}),
+            ),
+            event(
+                6,
+                ["model", "call"],
+                json!({"request_id": "r2", "request": {}}),
+            ),
+        ]);
+        assert_eq!(
+            fixture_incomplete(&driven, &scenario, &replaced.join("\n")),
+            None,
+            "the request that replaced it in the same turn carries the input"
+        );
+    }
+
+    /// A switch follow-up the run's turn cap stopped before any turn consumed
+    /// it leaves the probe with no request to read: the run is an incomplete
+    /// fixture, not a scored answer, and a run that ended idle keeps the
+    /// scoring it had (model-prompts §8.1).
+    #[test]
+    fn a_switch_follow_up_no_turn_consumed_is_an_incomplete_fixture() {
+        let export = json!({"kind": "event", "branch_id": "2",
+                            "event": {"id": "e1", "sequence": 1, "type": "model", "name": "call",
+                                      "data": {"request_id": "r1", "request": {}}}})
+        .to_string();
+        let driven = |stop: &'static str| Driven {
+            session: "s".into(),
+            stop,
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs: vec![FixtureInput {
+                    what: SWITCH_INPUT,
+                    line: "2".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        assert!(
+            matches!(
+                switch_note_check(&driven("turns"), &export),
+                NotesCheck::CapCut
+            ),
+            "the turn cap left the follow-up unobserved"
+        );
+        assert!(
+            matches!(
+                switch_note_check(&driven("idle"), &export),
+                NotesCheck::Observed
+            ),
+            "an input no turn consumed is not checked on an idle run"
+        );
+    }
+
+    /// A switch input the line consumed, whose request never reached the model
+    /// for any reason other than the run's turn cap, fails the run before the
+    /// judge: no request of the consuming turn carried the input, on the root
+    /// line that owes no note as on any other (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_consumed_switch_input_whose_request_never_reached_the_model_is_unseen() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(1, ["input", "message"], json!({})),
+            event(2, ["input", "consumed"], json!({"input_id": "f1"})),
+            event(
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                4,
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                       "reason": "timeline closed"}),
+            ),
+        ]
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "idle",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs: vec![FixtureInput {
+                    what: FORMER_INPUT,
+                    line: "main".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let unseen = unseen_note(switch_note_check(&driven, &export))
+            .expect("the request that consumed the input never reached the model");
+        assert!(
+            unseen.contains("line main consumed the former line's request after the switch"),
+            "{unseen}"
+        );
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
+    /// A switch input belongs to the turn its line consumed it in: a request a
+    /// later turn began does not answer for it, even when it carries the note
+    /// (Timeline branches §12.4).
+    #[test]
+    fn a_later_turn_does_not_answer_for_a_switch_input() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "2",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(
+                1,
+                ["input", "message"],
+                json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+            ),
+            event(2, ["input", "message"], json!({})),
+            event(3, ["input", "consumed"], json!({"input_id": "e2"})),
+            event(
+                4,
+                ["turn", "end"],
+                json!({"turn_id": "t1", "status": "cancelled", "reason": "end_turn"}),
+            ),
+            event(5, ["turn", "start"], json!({"turn_id": "t2"})),
+            event(
+                6,
+                ["step", "model-start"],
+                json!({"turn_id": "t2", "request_id": "r2"}),
+            ),
+            event(
+                7,
+                ["model", "call"],
+                json!({"request_id": "r2",
+                       "request": {"messages": [{"role": "user", "content": note}]}}),
+            ),
+        ]
+        .join("\n");
+        let notes = [SwitchNote {
+            line: "2".into(),
+            input: "e2".into(),
+            default: true,
+            other: "main".into(),
+        }];
+        let unseen = switch_notes_unseen(&export, &notes, None);
+        assert!(
+            unseen
+                .as_deref()
+                .is_some_and(|error| error.contains("never reached the model")),
+            "a later turn does not answer for the input: {unseen:?}"
+        );
+    }
+
+    /// The outcome a run's record takes from its note check and its incomplete
+    /// reason, in the order the runner reads them (model-prompts §8.1): a note
+    /// check that finds an unseen request fails the run before the judge, and
+    /// only a run without one is an incomplete fixture.
+    fn scored_switch_run(driven: &Driven, export: &str) -> (NotesCheck, Option<String>, Metrics) {
+        let scenario = scenario(Vec::new());
+        let check = switch_note_check(driven, export);
+        let mut stop = driven.stop;
+        let mut error = driven.error.clone();
+        let mut incomplete = None;
+        let judge = if let NotesCheck::Unseen(message) = &check {
+            stop = "switch_note_missing";
+            error = Some(message.clone());
+            JudgeOutcome::NotAsked
+        } else {
+            incomplete = incomplete_reason(driven, &scenario, export, &check);
+            if incomplete.is_some() {
+                JudgeOutcome::NotAsked
+            } else {
+                JudgeOutcome::Judged
+            }
+        };
+        let mut record = record("current", &scenario, &[], judge);
+        record.stop = stop;
+        record.failed = failed(stop, error.as_deref(), judge);
+        record.incomplete = incomplete.clone();
+        let mut metrics = Metrics::default();
+        metrics.add(&scenario, &record);
+        (check, incomplete, metrics)
+    }
+
+    /// A run whose receipt the turn cap left unobserved still fails on every
+    /// confirmed failure it shows, and enters gate 1's failed runs rather than
+    /// the report's incomplete fixtures (model-prompts §8.1).
+    fn assert_confirmed_failure(
+        case: &str,
+        check: &NotesCheck,
+        incomplete: &Option<String>,
+        metrics: &Metrics,
+        needle: &str,
+    ) {
+        match check {
+            NotesCheck::Unseen(error) => {
+                assert!(error.contains(needle), "{case}: {error}");
+            }
+            NotesCheck::Observed | NotesCheck::CapCut => {
+                panic!(
+                    "{case}: the receipt the cap cut hid the failure this run confirms: {check:?}"
+                )
+            }
+        }
+        assert_eq!(
+            incomplete, &None,
+            "{case}: a confirmed failure is not an incomplete fixture"
+        );
+        assert_eq!(
+            (
+                metrics.attempted,
+                metrics.runs,
+                metrics.failed,
+                metrics.incomplete
+            ),
+            (1, 1, 1, 0),
+            "{case}: a confirmed failure enters gate 1's failed runs, not its incomplete fixtures"
+        );
+    }
+
+    /// A receipt the run's turn cap left unobserved does not hide another
+    /// receipt that reached the model without its note, whether the missing
+    /// note came before or after the cap-cut one (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_receipt_does_not_hide_a_request_that_reached_the_model_without_its_note() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let missing_note = || -> Vec<Value> {
+            vec![
+                event(
+                    "2",
+                    1,
+                    "n2",
+                    ["input", "message"],
+                    json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+                ),
+                event("2", 2, "f2", ["input", "message"], json!({})),
+                event(
+                    "2",
+                    3,
+                    "c2",
+                    ["input", "consumed"],
+                    json!({"input_id": "f2"}),
+                ),
+                event(
+                    "2",
+                    4,
+                    "s2",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t2", "request_id": "r2"}),
+                ),
+                event(
+                    "2",
+                    5,
+                    "m2",
+                    ["model", "call"],
+                    json!({"request_id": "r2",
+                           "request": {"messages": [{"role": "user",
+                                                      "content": "the follow-up was answered"}]}}),
+                ),
+            ]
+        };
+        let cap_cut = || -> Vec<Value> {
+            vec![
+                event("3", 1, "f3", ["input", "message"], json!({})),
+                event(
+                    "3",
+                    2,
+                    "c3",
+                    ["input", "consumed"],
+                    json!({"input_id": "f3"}),
+                ),
+                event(
+                    "3",
+                    3,
+                    "s3",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t3", "request_id": "r3"}),
+                ),
+                event(
+                    "3",
+                    4,
+                    "i3",
+                    ["stop", "interrupt"],
+                    json!({"reason": "budget: turns", "scope": "turn"}),
+                ),
+                event(
+                    "3",
+                    5,
+                    "o3",
+                    ["step", "model-output-end"],
+                    json!({"turn_id": "t3", "request_id": "r3", "status": "cancelled",
+                           "reason": "budget: turns"}),
+                ),
+            ]
+        };
+        let unconsumed = || -> Vec<Value> {
+            vec![
+                event("3", 1, "f3", ["input", "message"], json!({})),
+                event(
+                    "3",
+                    2,
+                    "s3",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t3", "request_id": "r3"}),
+                ),
+            ]
+        };
+        let receipt = |line: &str, input: &str| FixtureInput {
+            what: SWITCH_INPUT,
+            line: line.into(),
+            input: Some(input.into()),
+        };
+        let driven = |inputs: Vec<FixtureInput>| Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![SwitchNote {
+                    line: "2".into(),
+                    input: "f2".into(),
+                    default: true,
+                    other: "main".into(),
+                }],
+                inputs,
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let cases = [
+            (
+                "the missing note's receipt first",
+                vec![receipt("2", "f2"), receipt("3", "f3")],
+                [missing_note(), cap_cut()].concat(),
+            ),
+            (
+                "the cap-cut receipt first",
+                vec![receipt("3", "f3"), receipt("2", "f2")],
+                [cap_cut(), missing_note()].concat(),
+            ),
+            (
+                "the cap left the other receipt unconsumed",
+                vec![receipt("2", "f2"), receipt("3", "f3")],
+                [missing_note(), unconsumed()].concat(),
+            ),
+            (
+                "the cap left the earlier receipt unconsumed",
+                vec![receipt("3", "f3"), receipt("2", "f2")],
+                [unconsumed(), missing_note()].concat(),
+            ),
+        ];
+        for (case, inputs, export) in cases {
+            let export = export
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (check, incomplete, metrics) = scored_switch_run(&driven(inputs), &export);
+            assert_confirmed_failure(
+                case,
+                &check,
+                &incomplete,
+                &metrics,
+                "does not carry the note",
+            );
+        }
+    }
+
+    /// A receipt the run's turn cap left unobserved does not hide a later
+    /// receipt whose request never reached the model, whether that later
+    /// receipt is on another line or on the root (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_receipt_does_not_hide_a_later_request_that_never_reached_the_model() {
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let cap_cut = || -> Vec<Value> {
+            vec![
+                event("2", 1, "f2", ["input", "message"], json!({})),
+                event(
+                    "2",
+                    2,
+                    "c2",
+                    ["input", "consumed"],
+                    json!({"input_id": "f2"}),
+                ),
+                event(
+                    "2",
+                    3,
+                    "s2",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t2", "request_id": "r2"}),
+                ),
+                event(
+                    "2",
+                    4,
+                    "i2",
+                    ["stop", "interrupt"],
+                    json!({"reason": "budget: turns", "scope": "turn"}),
+                ),
+                event(
+                    "2",
+                    5,
+                    "o2",
+                    ["step", "model-output-end"],
+                    json!({"turn_id": "t2", "request_id": "r2", "status": "cancelled",
+                           "reason": "budget: turns"}),
+                ),
+            ]
+        };
+        let unconsumed =
+            || -> Vec<Value> { vec![event("2", 1, "f2", ["input", "message"], json!({}))] };
+        let unreached = |branch: &str| -> Vec<Value> {
+            vec![
+                event(branch, 1, "u1", ["input", "message"], json!({})),
+                event(
+                    branch,
+                    2,
+                    "u2",
+                    ["input", "consumed"],
+                    json!({"input_id": "u1"}),
+                ),
+                event(
+                    branch,
+                    3,
+                    "u3",
+                    ["turn", "end"],
+                    json!({"turn_id": "tu", "status": "cancelled", "reason": "end_turn"}),
+                ),
+                event(
+                    branch,
+                    4,
+                    "u4",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t4", "request_id": "r4"}),
+                ),
+            ]
+        };
+        let receipt = |line: &str, input: &str| FixtureInput {
+            what: SWITCH_INPUT,
+            line: line.into(),
+            input: Some(input.into()),
+        };
+        let driven = |inputs: Vec<FixtureInput>| Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs,
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let cases = [
+            (
+                "a later request on another line never reached the model",
+                vec![receipt("2", "f2"), receipt("3", "u1")],
+                [cap_cut(), unreached("3")].concat(),
+            ),
+            (
+                "a later request on the root never reached the model",
+                vec![receipt("2", "f2"), receipt("main", "u1")],
+                [cap_cut(), unreached("main")].concat(),
+            ),
+            (
+                "the cap left the first receipt unconsumed",
+                vec![receipt("2", "f2"), receipt("3", "u1")],
+                [unconsumed(), unreached("3")].concat(),
+            ),
+        ];
+        for (case, inputs, export) in cases {
+            let export = export
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (check, incomplete, metrics) = scored_switch_run(&driven(inputs), &export);
+            assert_confirmed_failure(
+                case,
+                &check,
+                &incomplete,
+                &metrics,
+                "never reached the model",
+            );
+        }
+    }
+
+    /// A run that ended idle is scored as it was before the incomplete class
+    /// existed: the stop is the product's state, not the harness's turn cap,
+    /// so an input it left unrun is the candidate's outcome, not a fixture
+    /// the report sets aside (model-prompts §8.1).
+    #[test]
+    fn an_idle_run_is_scored_rather_than_incomplete() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let message = || FixtureInput {
+            what: MESSAGE_INPUT,
+            line: "main".into(),
+            input: Some("m1".into()),
+        };
+        let driven = |stop: &'static str| Driven {
+            session: "s".into(),
+            stop,
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes::default(),
+            inputs: vec![message()],
+            incomplete: None,
+            error: None,
+        };
+        let scenario = scenario(vec![probe("identity", ProbeKind::MustShow)]);
+        let message_event = event(
+            1,
+            ["input", "message"],
+            json!({"user": {"content": "message"}}),
+        );
+        let consumed = event(2, ["input", "consumed"], json!({"input_id": "m1"}));
+
+        assert!(
+            fixture_incomplete(&driven("turns"), &scenario, &message_event).is_some(),
+            "the input the run left unrun is what the fixture check reads"
+        );
+        assert_eq!(
+            incomplete_reason(
+                &driven("idle"),
+                &scenario,
+                &message_event,
+                &NotesCheck::Observed
+            ),
+            None,
+            "a run that ended idle is not the harness's stop"
+        );
+
+        let no_request = [message_event, consumed].join("\n");
+        assert!(
+            fixture_incomplete(&driven("turns"), &scenario, &no_request)
+                .is_some_and(|reason| reason.contains("no request carried")),
+            "the consumed input without a request is what the fixture check reads"
+        );
+        assert_eq!(
+            incomplete_reason(
+                &driven("idle"),
+                &scenario,
+                &no_request,
+                &NotesCheck::Observed
+            ),
+            None,
+            "a run that ended idle is not the harness's stop"
+        );
+
+        let idle = record(
+            "current",
+            &scenario,
+            &[("identity", ProbeVerdict::Unparsed)],
+            JudgeOutcome::Judged,
+        );
+        assert!(!idle.failed, "idle is not one of the failed stops");
+        let mut metrics = Metrics::default();
+        metrics.add(&scenario, &idle);
+        assert_eq!(
+            (metrics.runs, metrics.failed, metrics.unjudged),
+            (1, 0, 0),
+            "the idle run is counted, as it was before the class existed"
+        );
+        assert_eq!(
+            metrics
+                .probes
+                .get(&("case".to_owned(), "identity".to_owned())),
+            Some(&ProbeCounts { passed: 0, runs: 1 }),
+            "the probe the run left unanswered is counted as a loss"
+        );
     }
 
     /// A switch that has started its target stays with it: a tool line opened
@@ -9823,6 +12009,140 @@ mod tests {
         );
     }
 
+    /// Every follow-up a move sends keeps a receipt: the input on the line its
+    /// message went to and the one on the line it left, the root included. A
+    /// run whose turn cap stops a follow-up before a turn consumes it has no
+    /// request to score (model-prompts §8.1).
+    #[tokio::test]
+    async fn a_move_keeps_a_receipt_for_each_follow_up_it_sends() {
+        let turn_start = json!({"type": "turn", "name": "start", "data": {}});
+        let switch = Switch {
+            to: SwitchTarget::Id("2".into()),
+            message: "to the tool line".into(),
+            branch_id: Some("main".into()),
+            former_message: Some("report to the user".into()),
+        };
+        let mut switches: VecDeque<PendingSwitch> =
+            [PendingSwitch::new(switch, None, false)].into();
+        let mut default = "main".to_owned();
+        let mut client = SwitchRecorder {
+            inputs: ["i1".to_owned(), "i2".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        let mut notes = SwitchNotes::default();
+        switches
+            .front_mut()
+            .expect("the move is pending")
+            .notice("2", &turn_start);
+        assert!(
+            matches!(
+                fire_switch(
+                    &mut client,
+                    "session",
+                    &mut switches,
+                    &mut default,
+                    None,
+                    Some(&mut notes)
+                )
+                .await,
+                Ok(SwitchFire::Fired)
+            ),
+            "the move fires"
+        );
+        let received: Vec<(&str, &str)> = notes
+            .inputs
+            .iter()
+            .map(|input| (input.what, input.line.as_str()))
+            .collect();
+        assert_eq!(
+            received,
+            [(SWITCH_INPUT, "main"), (FORMER_INPUT, "main")],
+            "both follow-ups keep their receipt, on the line they went to"
+        );
+    }
+
+    /// A steer the fixture submits keeps a receipt: the input the Session
+    /// answered, on the line the runner sent it from, whether it was due on
+    /// the clock or triggered by a tool call (model-prompts §8.1).
+    #[tokio::test]
+    async fn a_sent_steer_keeps_a_receipt_on_the_line_it_went_to() {
+        let mut steers = vec![
+            (
+                Steer {
+                    after_seconds: Some(0.1),
+                    when_tool_call: None,
+                    text: "timed".into(),
+                },
+                false,
+            ),
+            (
+                Steer {
+                    after_seconds: None,
+                    when_tool_call: Some("read".into()),
+                    text: "triggered".into(),
+                },
+                false,
+            ),
+        ];
+        let mut inputs = Vec::new();
+        let mut client = SwitchRecorder {
+            inputs: ["s1".to_owned(), "s2".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        let started = Instant::now() - Duration::from_secs(1);
+        assert!(
+            fire_due(
+                &mut client,
+                "session",
+                &mut steers,
+                "main",
+                &mut inputs,
+                started
+            )
+            .await
+            .expect("the timed steer is sent"),
+            "the timed steer is due"
+        );
+        let event = json!({"type": "step", "name": "tool-use",
+                           "data": {"name": "read", "arguments": {"path": "parser/expr.py"}}});
+        assert!(
+            fire_triggered(
+                &mut client,
+                "session",
+                &mut steers,
+                "line-2",
+                &mut inputs,
+                &event
+            )
+            .await
+            .expect("the triggered steer is sent"),
+            "the tool call triggers the steer"
+        );
+        let received: Vec<(&str, &str, Option<&str>)> = inputs
+            .iter()
+            .map(|input| (input.what, input.line.as_str(), input.input.as_deref()))
+            .collect();
+        assert_eq!(
+            received,
+            [
+                (STEER_INPUT, "main", Some("s1")),
+                (STEER_INPUT, "line-2", Some("s2")),
+            ],
+            "each steer keeps the line the runner sent it from and the id the Session answered"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.submit", "session.submit"],
+            "a steer is one submission"
+        );
+        assert!(
+            client.calls.iter().all(|(_, params)| {
+                params["mode"] == "steer" && params.get("branchId").is_none()
+            }),
+            "a steer goes to the default branch and names no line"
+        );
+    }
+
     /// The switch's calls, recorded, and the refusals its
     /// `session.branch_set_default` calls answer, in order; no Session stands
     /// behind it.
@@ -9854,6 +12174,41 @@ mod tests {
                 return Ok(json!({"event": {"id": input}}));
             }
             Ok(json!({}))
+        }
+    }
+    /// Answers the step after the first idle's two calls and records them: its
+    /// compaction with the status the test set, and each request with an input
+    /// id.
+    struct AfterIdleRecorder {
+        calls: Vec<(String, Value)>,
+        compaction: &'static str,
+    }
+    impl Default for AfterIdleRecorder {
+        fn default() -> Self {
+            Self {
+                calls: Vec::new(),
+                compaction: "completed",
+            }
+        }
+    }
+    impl AfterIdleRecorder {
+        fn methods(&self) -> Vec<&str> {
+            self.calls
+                .iter()
+                .map(|(method, _)| method.as_str())
+                .collect()
+        }
+    }
+    impl SwitchClient for AfterIdleRecorder {
+        async fn rpc(&mut self, method: &str, params: Value) -> dim_client::Result<Value> {
+            self.calls.push((method.to_owned(), params));
+            Ok(match method {
+                "session.context.compact" => json!({
+                    "status": self.compaction,
+                    "reason": "nothing_to_compact",
+                }),
+                _ => json!({"event": {"id": "input"}}),
+            })
         }
     }
 
@@ -10268,6 +12623,150 @@ mod tests {
             workspace_files(&flooding.directory),
             workspace_files(&never_ending.directory),
             "flooding and never-ending start from one workspace"
+        );
+    }
+
+    /// The step after the first idle compacts only the lines that did not
+    /// compact on their own, then asks every line of the scenario one
+    /// request (Timeline branches §12.3).
+    #[tokio::test]
+    async fn the_step_after_the_idle_compacts_the_rest_and_asks_every_line() {
+        let mut client = AfterIdleRecorder::default();
+        let lines = vec!["main".to_owned(), "line".to_owned()];
+        let compacted: BTreeSet<String> = ["main".to_owned()].into();
+        let after = AfterIdle {
+            request: "re-run the tests".into(),
+        };
+        let submitted = settle_after_idle(&mut client, "session", &lines, &after, &compacted)
+            .await
+            .unwrap();
+        assert_eq!(
+            submitted,
+            [
+                ("main".to_owned(), Some("input".to_owned())),
+                ("line".to_owned(), Some("input".to_owned()))
+            ],
+            "every line's request is returned with the input the Session named"
+        );
+        assert_eq!(
+            client.methods(),
+            [
+                "session.context.compact",
+                "session.submit",
+                "session.submit"
+            ],
+            "the line that compacted is not compacted again, and both are asked"
+        );
+        assert_eq!(client.calls[0].1["branchId"], "line");
+        assert_eq!(client.calls[1].1["branchId"], "main");
+        assert_eq!(client.calls[1].1["text"], "re-run the tests");
+        assert_eq!(client.calls[2].1["branchId"], "line");
+    }
+
+    /// A compaction that does not complete fails the run there: the requests
+    /// after it would be judged as ones after a compaction (Timeline branches
+    /// §12.3).
+    #[tokio::test]
+    async fn a_compaction_the_idle_step_could_not_complete_fails_the_run() {
+        let after = AfterIdle {
+            request: "re-run the tests".into(),
+        };
+        for (status, reason) in [
+            ("skipped", "nothing_to_compact"),
+            ("failed", "no error given"),
+        ] {
+            let mut client = AfterIdleRecorder {
+                compaction: status,
+                ..AfterIdleRecorder::default()
+            };
+            let error = settle_after_idle(
+                &mut client,
+                "session",
+                &["main".to_owned()],
+                &after,
+                &BTreeSet::new(),
+            )
+            .await
+            .expect_err("a line that did not compact cannot be judged on it");
+            assert!(error.contains(status) || error.contains(reason), "{error}");
+            assert_eq!(
+                client.methods(),
+                ["session.context.compact"],
+                "no request follows a compaction that did not complete"
+            );
+        }
+    }
+
+    /// The opening scenarios pre-register the probe that their runs open one
+    /// line for one job, and the compact scenario opens its parser line before
+    /// the message, keeps `main` off it, and settles both lines after the
+    /// first idle (Timeline branches §12.3). No model runs, so CI catches a
+    /// drift in the committed probes, calls or step before a manual run.
+    #[test]
+    fn the_opening_scenarios_pre_register_their_probe_and_the_compact_scenario_opens_its_line() {
+        let root = repository().join("xtask").join("scenario-eval");
+        let branches = read_scenarios(&root.join("timeline-branches")).unwrap();
+        let compact = read_scenarios(&root.join("timeline-branches-compact")).unwrap();
+        fn find<'a>(scenarios: &'a [Scenario], id: &str) -> &'a Scenario {
+            scenarios
+                .iter()
+                .find(|scenario| scenario.id == id)
+                .unwrap_or_else(|| panic!("{id} is in the committed set"))
+        }
+        for id in ["long-work-and-a-flaky-test", "refactor-and-a-pasted-report"] {
+            assert!(
+                find(&branches, id).probes.iter().any(|probe| {
+                    probe.id == "line-opened-for-one-job" && probe.kind == ProbeKind::MustShow
+                }),
+                "{id} pre-registers the probe that its run opens a line for one job"
+            );
+        }
+        let identity = find(&compact, "identity-after-compaction");
+        assert_eq!(
+            identity.calls.len(),
+            1,
+            "identity-after-compaction opens its line before the message"
+        );
+        assert_eq!(identity.calls[0].method, "session.branch_create");
+        assert_eq!(identity.calls[0].params["parentBranchId"], "main");
+        assert_eq!(identity.calls[0].params["at"], "session_open");
+        assert!(
+            identity.calls[0].params["prompt"]
+                .as_str()
+                .is_some_and(|prompt| prompt.contains("parser/")),
+            "the line is given the parser/ subsystem: {:?}",
+            identity.calls[0].params["prompt"]
+        );
+        assert_eq!(
+            identity.steers.len(),
+            1,
+            "identity-after-compaction keeps main off the line's subsystem"
+        );
+        assert!(
+            identity.steers[0]
+                .text
+                .contains("Keep main strictly on cache/"),
+            "the steer keeps main on cache/: {}",
+            identity.steers[0].text
+        );
+        let after = identity
+            .after_idle
+            .as_ref()
+            .expect("identity-after-compaction settles both lines after the first idle");
+        assert!(
+            after.request.contains("Re-run the tests") && !after.request.contains("which line"),
+            "the request re-runs a line's own tests and names no line: {}",
+            after.request
+        );
+        let probe = identity
+            .probes
+            .iter()
+            .find(|probe| probe.id == "identity-after-compaction")
+            .expect("the identity probe");
+        assert_eq!(
+            probe.text,
+            "after a compaction, a line's next request still carries its own identity block",
+            "the probe reads a line's own identity, not main's roster"
         );
     }
 
@@ -11380,6 +13879,56 @@ mod tests {
         );
     }
 
+    /// A run whose calls step failed never sent the configured text to a model:
+    /// the report lists it as a setup failure, apart from a run that failed on
+    /// its own, and neither enters the probe's rate (Timeline branches §12.3).
+    #[test]
+    fn the_report_lists_a_setup_failure_apart_from_a_run_failure() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut setup = record(
+            "candidate",
+            &scenario,
+            &[("reports", ProbeVerdict::Unparsed)],
+            JudgeOutcome::NotAsked,
+        );
+        setup.stop = "setup_failed";
+        setup.error =
+            Some("the calls step 1 (session.branch_create) failed: branch_not_found".into());
+        setup.failed = true;
+        let mut run = record(
+            "current",
+            &scenario,
+            &[("reports", ProbeVerdict::Present)],
+            JudgeOutcome::Judged,
+        );
+        run.stop = "seconds";
+        run.error = Some("the run stopped on its wall clock".into());
+        run.failed = true;
+        let records = [setup, run];
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains(
+                "| candidate | case | 0 | setup | the calls step 1 (session.branch_create) failed"
+            ),
+            "a setup failure is named as one: {text}"
+        );
+        assert!(
+            text.contains("| current | case | 0 | run | the run stopped on its wall clock |"),
+            "a run failure is named as one: {text}"
+        );
+        let metrics = metrics(&scenario, &records);
+        assert_eq!(metrics.failed, 2, "both are failed runs for gate 1");
+        assert_eq!(
+            metrics.counts(&("case".to_owned(), "reports".to_owned())),
+            ProbeCounts::default(),
+            "neither enters the probe's rate"
+        );
+    }
+
     /// The same holds when the judge answered unreadably: twenty unjudged
     /// runs compare zero probes with zero probes, and the verdict is
     /// inconclusive (model-prompts §8.1).
@@ -11515,6 +14064,50 @@ mod tests {
         assert_eq!(failed.candidate, Counts::new(1, 21));
     }
 
+    /// An incomplete fixture is not compared: the failed-run and unjudged-run
+    /// rates count the judged, failed and unjudged runs, and the report states
+    /// the arm's attempts and its incomplete fixtures beside them
+    /// (model-prompts §8.1).
+    #[test]
+    fn the_report_counts_an_incomplete_fixture_apart_from_the_compared_runs() {
+        let scenario = scenario(vec![probe("reports", ProbeKind::MustShow)]);
+        let mut records = arm(&scenario, "current", 1, 1);
+        records.extend(arm(&scenario, "candidate", 1, 1));
+        for arm in ["current", "candidate"] {
+            let mut incomplete = record(
+                arm,
+                &scenario,
+                &[("reports", ProbeVerdict::Unparsed)],
+                JudgeOutcome::Unobserved,
+            );
+            incomplete.stop = "turns";
+            incomplete.incomplete =
+                Some("the run stopped on turns before the step after the first idle".into());
+            records.push(incomplete);
+        }
+        let text = report(
+            &instrument(model()),
+            std::slice::from_ref(&scenario),
+            &records,
+        );
+        assert!(
+            text.contains("| case/reports (must_show) | 1/1 (1.000) | 1/1 (1.000) |"),
+            "the probe counts only the judged run: {text}"
+        );
+        assert!(
+            text.contains("| failed runs | 0/1 (0.000) | 0/1 (0.000) |"),
+            "the incomplete fixture is not in the failed-run denominator: {text}"
+        );
+        assert!(
+            text.contains("| attempted runs | current 2, candidate 2 |"),
+            "the report counts the attempt: {text}"
+        );
+        assert!(
+            text.contains("| incomplete fixtures | current 1, candidate 1 |"),
+            "the report counts the incomplete fixture apart: {text}"
+        );
+    }
+
     /// A candidate that violates a `must_not_show` probe more often fails
     /// through the probe's row and the pooled row beside it, and the report
     /// prints both arms' counts (model-prompts §8.1).
@@ -11646,6 +14239,8 @@ mod tests {
                 decline_retries: 0,
                 switch_retries: 0,
                 switch_notes: SwitchNotes::default(),
+                inputs: Vec::new(),
+                incomplete: None,
                 error: None,
             }
         }
@@ -11763,6 +14358,63 @@ mod tests {
         assert!(
             other["event"]["data"]["request"]["messages"].is_array(),
             "the other line's first request is given in full: {other}"
+        );
+    }
+
+    /// A request's thinking is judged as one line: a delta line spends most of
+    /// its bytes on an id and field names, and the judge reads the run as a
+    /// whole (model-prompts §8.1). The merged line keeps the first delta's id
+    /// and position and the text of every delta in order; a delta of another
+    /// request or line, or one after another event, starts its own line.
+    #[test]
+    fn a_requests_thinking_deltas_render_as_one_line() {
+        let thinking = |id: &str, sequence: u64, branch: &str, request: &str, delta: &str| {
+            json!({
+                "kind": "event",
+                "branch_id": branch,
+                "event": {"id": id, "sequence": sequence, "type": "step", "name": "thinking",
+                          "data": {"turn_id": "t1", "request_id": request, "delta": delta}},
+            })
+            .to_string()
+        };
+        let export = [
+            thinking("e1", 1, "main", "r1", "one "),
+            thinking("e2", 2, "main", "r1", "two"),
+            thinking("e3", 3, "main", "r1", " three"),
+            thinking("e4", 4, "main", "r2", "other request"),
+            thinking("e5", 5, "other", "r1", "other line"),
+            r#"{"kind":"event","branch_id":"main","event":{"id":"e6","sequence":6,"type":"turn","name":"end","data":{"status":"completed"}}}"#.to_owned(),
+            thinking("e7", 7, "main", "r1", "after a break"),
+            r#"{"kind":"end","branches":2,"events":7}"#.to_owned(),
+        ]
+        .join("\n");
+        let view = judge_view(&export);
+        let lines: Vec<Value> = view
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            lines.len(),
+            6,
+            "one line per request's thinking run and one per other event"
+        );
+        assert_eq!(
+            lines[0]["event"]["id"], "e1",
+            "the first delta names the merged line"
+        );
+        assert_eq!(
+            lines[0]["event"]["sequence"], 1,
+            "the merged line keeps the first delta's position"
+        );
+        assert_eq!(
+            lines[0]["event"]["data"]["delta"], "one two three",
+            "the merged line carries every delta's text in order"
+        );
+        assert_eq!(lines[1]["event"]["data"]["delta"], "other request");
+        assert_eq!(lines[2]["event"]["data"]["delta"], "other line");
+        assert_eq!(
+            lines[4]["event"]["data"]["delta"], "after a break",
+            "another event ends the run a delta joins"
         );
     }
 
@@ -12615,6 +15267,41 @@ mod tests {
                 .all(|request| !request.contains("SAVED VIEW unselected")),
             "a run --run did not select is not judged: {asked:?}"
         );
+    }
+
+    /// A run that the runner itself recorded with the `setup_failed` stop is
+    /// read back by the read a pool or a re-judge takes: `stop_name` keeps the
+    /// stop, so a read that meets a calls-step failure reports the run again
+    /// instead of refusing the whole set.
+    #[test]
+    fn a_saved_setup_failure_reads_back_by_its_own_stop() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-setup-failed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let saved = json!({
+            "arm": "current", "scenario": "identity-after-compaction", "run": 0,
+            "session": null, "stop": "setup_failed", "turns": 0, "window": null,
+            "durationMs": 1.0, "failed": true, "judgeOutcome": "not_asked",
+            "error": "the calls step 1 (session.branch_create) failed",
+            "judgeError": null, "judgeReasks": 0, "probes": []
+        });
+        std::fs::write(directory.join("runs.jsonl"), format!("{saved}\n")).unwrap();
+        let scenarios = read_scenarios(
+            &repository()
+                .join("xtask")
+                .join("scenario-eval")
+                .join("timeline-branches-compact"),
+        )
+        .unwrap();
+        let records = read_pooled_runs(&directory, &scenarios)
+            .expect("a saved setup failure is one of the stops the runner writes");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].stop, "setup_failed");
+        assert!(records[0].failed);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     /// A pool reports several finished evaluations under one rule: both
@@ -14065,6 +16752,65 @@ mod tests {
         }
     }
 
+    /// A run that reaches its turn budget before the step after the first idle
+    /// never compacts and never asks the follow-up request: the identity probe
+    /// has no request to read, so the run is incomplete, is not judged, and
+    /// stays out of the probe's denominator and the floor (model-prompts
+    /// §8.1).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_run_that_reaches_the_turn_budget_before_the_after_idle_step_is_incomplete() {
+        let fixture = Fixture::start(
+            "incomplete-turn-cap",
+            |text| judged(text).or_else(|| Some(content("done"))),
+            json!({
+                "message": "Say hello.",
+                "budget": {"turns": 1, "seconds": 60, "window": 24000},
+                "afterIdle": {"request": "Re-run the tests."},
+                "probes": [{"id": "ran", "kind": "must_show", "text": "the run has a transcript"}]
+            }),
+            &[],
+        )
+        .await;
+        let options = fixture.options(fixture.directory.join("out"));
+        let report = fixture.evaluate(&options).await.unwrap();
+        let records = fixture.records(&options.out);
+        assert_eq!(records.len(), 2, "one run per arm");
+        for record in &records {
+            assert_eq!(record["stop"], "turns", "{record}");
+            assert_eq!(record["failed"], false, "{record}");
+            assert_eq!(record["judgeOutcome"], "unobserved", "{record}");
+            let incomplete = record["incomplete"].as_str().unwrap_or_default();
+            assert!(
+                incomplete.contains("before the step after the first idle"),
+                "{record}"
+            );
+        }
+        assert!(
+            fixture.judge().is_empty(),
+            "an incomplete fixture is not sent to the judge"
+        );
+        assert!(
+            report.contains("| arm | scenario | run | incomplete |"),
+            "the report lists the incomplete fixture apart: {report}"
+        );
+        assert!(
+            report.contains("| case/ran (must_show) | – | – |"),
+            "the probe counts no run in either arm: {report}"
+        );
+        assert!(
+            report.contains("| attempted runs | current 1, candidate 1 |"),
+            "the report counts the attempt: {report}"
+        );
+        assert!(
+            report.contains("| incomplete fixtures | current 1, candidate 1 |"),
+            "the report counts the incomplete fixture apart: {report}"
+        );
+        assert!(
+            report.contains("| failed runs | – | – |"),
+            "an incomplete run leaves the failed-run comparison: {report}"
+        );
+    }
+
     /// Asserts that a run's `judge-view.jsonl` is its export line for line,
     /// with every request rebuilt from the view alone into the one the export
     /// carried, and answers the view's rendered requests in order.
@@ -14578,6 +17324,15 @@ mod tests {
         /// so the check is deferred, and the deferred read answers
         /// `session_reloading`: a failure that is not the deferral itself.
         DeferredUsageFails,
+        /// The Session is created at its opening sequence, which
+        /// `session.create` reports, and the submitted turn starts and ends
+        /// at once: a scenario's `session_open` call has a sequence to use.
+        OpensAtTheSessionStart,
+        /// The submitted turn starts and ends once; the step after the first
+        /// idle submits its request, and the peer writes the second turn's end
+        /// before that request can start, so the run reaches its turn budget
+        /// between the submission and the model call.
+        AfterIdleSubmitAtTheCap,
     }
 
     /// What a scripted peer read: the `requestId` of every decline, in order,
@@ -14593,6 +17348,8 @@ mod tests {
         usages: AtomicUsize,
         /// The `branchId` of every `session.branch_set_default`, in order.
         moves: Mutex<Vec<String>>,
+        /// The parameters of every `session.branch_create`, in order.
+        opens: Mutex<Vec<Value>>,
         attached: tokio::sync::Notify,
         closes: AtomicUsize,
     }
@@ -14723,7 +17480,10 @@ mod tests {
             // The line is busy until the peer writes the call's result, the
             // way a running turn is: `session.idle` stays unanswered and the
             // driver's own deadline reports the line busy.
-            let mut settled = false;
+            let mut settled = matches!(
+                script,
+                PeerScript::OpensAtTheSessionStart | PeerScript::AfterIdleSubmitAtTheCap
+            );
             // [`PeerScript::HeldIdle`]'s hold: the calls it kept, and the
             // deadline it answers them at. The deadline stands after the
             // release, so a later call starts no second hold.
@@ -14757,6 +17517,13 @@ mod tests {
                             .unwrap_or_default()
                             .to_owned(),
                     );
+                }
+                if method == "session.branch_create" {
+                    recorded
+                        .opens
+                        .lock()
+                        .unwrap()
+                        .push(request["params"].clone());
                 }
                 if method == "session.attach" {
                     recorded.attached.notify_one();
@@ -14883,6 +17650,8 @@ mod tests {
                         PeerScript::ChainedToolLineBeforeActivation
                         | PeerScript::ChainedToolLineAfterActivation => None,
                         PeerScript::DeferredUsageFails => None,
+                        PeerScript::OpensAtTheSessionStart => None,
+                        PeerScript::AfterIdleSubmitAtTheCap => None,
                     };
                     if let Some((request, sequence)) = closed {
                         if recorded.settled_at.load(Ordering::SeqCst) == 0 {
@@ -14919,7 +17688,11 @@ mod tests {
                         "features": ["session.create", "session.history"],
                         "daemonProfile": {"kind": "mock"},
                     }}),
-                    "session.create" => json!({"result": {"sessionId": "peer"}}),
+                    "session.create" => match &script {
+                        PeerScript::OpensAtTheSessionStart => json!({"result": {
+                            "sessionId": "peer", "sequence": 12}}),
+                        _ => json!({"result": {"sessionId": "peer"}}),
+                    },
                     "session.context.usage" => {
                         let read = recorded.usages.fetch_add(1, Ordering::SeqCst) + 1;
                         match (matches!(script, PeerScript::DeferredUsageFails), read) {
@@ -14933,6 +17706,7 @@ mod tests {
                         }
                     }
                     "session.idle" => json!({"result": {"sequence": PEER_SEQUENCE}}),
+                    "session.context.compact" => json!({"result": {"status": "completed"}}),
                     "session.branch_set_default"
                         if matches!(script, PeerScript::SwitchMoveRetries) =>
                     {
@@ -14990,6 +17764,24 @@ mod tests {
                         .unwrap();
                 }
                 if method == "session.submit" {
+                    if matches!(script, PeerScript::AfterIdleSubmitAtTheCap) {
+                        // The first turn runs and ends; the step after the idle
+                        // submits its request, and the peer ends the second
+                        // turn before that request can start.
+                        let events = if submits == 1 {
+                            vec![("start", 1), ("end", 2)]
+                        } else {
+                            vec![("end", 3)]
+                        };
+                        for (name, sequence) in events {
+                            write
+                                .write_all(&notice(json!({"type": "turn", "name": name,
+                                                         "sequence": sequence, "data": {}})))
+                                .await
+                                .unwrap();
+                        }
+                        continue;
+                    }
                     write
                         .write_all(&notice(
                             json!({"type": "turn", "name": "start", "sequence": 1, "data": {}}),
@@ -15034,10 +17826,13 @@ mod tests {
                         PeerScript::HeldIdle
                             | PeerScript::SwitchNeverFires
                             | PeerScript::DeferredUsageFails
+                            | PeerScript::OpensAtTheSessionStart
                     ) {
                         if matches!(
                             script,
-                            PeerScript::SwitchNeverFires | PeerScript::DeferredUsageFails
+                            PeerScript::SwitchNeverFires
+                                | PeerScript::DeferredUsageFails
+                                | PeerScript::OpensAtTheSessionStart
                         ) {
                             write
                                 .write_all(&notice(json!({"type": "turn", "name": "end",
@@ -15156,6 +17951,88 @@ mod tests {
         assert!(
             error.contains("the decline of c1 failed") && error.contains("session_reloading"),
             "{error}"
+        );
+    }
+
+    /// A `session.branch_create` whose `at` is `session_open` is sent with the
+    /// sequence `session.create` reported, so the line starts where the
+    /// Session did without the scenario naming a number.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_open_call_starts_the_line_where_the_session_did() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-drive-{}",
+            std::process::id()
+        ));
+        let (socket, reads) =
+            scripted_peer(&directory, 8_000, PeerScript::OpensAtTheSessionStart).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        scenario.calls = vec![Call {
+            method: "session.branch_create".into(),
+            params: json!({"parentBranchId": "main", "at": SESSION_OPEN,
+                           "prompt": "the line's job"}),
+        }];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let opened = reads.opens.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "idle", "{:?}", driven.error);
+        assert_eq!(opened.len(), 1, "one line is opened before the message");
+        assert_eq!(
+            opened[0]["at"], 12,
+            "the reply's sequence fills the placeholder: {}",
+            opened[0]
+        );
+        assert_eq!(opened[0]["parentBranchId"], "main");
+        assert_eq!(opened[0]["sessionId"], "peer");
+    }
+
+    /// A `session_open` call needs the sequence `session.create` reports: a
+    /// reply without one fails the run in its calls step, before the message,
+    /// and the call is never sent.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_session_open_call_without_a_session_sequence_is_a_setup_failure() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-session-open-missing-{}",
+            std::process::id()
+        ));
+        let (socket, reads) = scripted_peer(&directory, 8_000, PeerScript::SwitchNeverFires).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.seconds = 10.;
+        scenario.calls = vec![Call {
+            method: "session.branch_create".into(),
+            params: json!({"parentBranchId": "main", "at": SESSION_OPEN,
+                           "prompt": "the line's job"}),
+        }];
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let opened = reads.opens.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "setup_failed", "{:?}", driven.error);
+        assert!(opened.is_empty(), "the call is not sent without a sequence");
+        assert!(
+            driven.error.unwrap_or_default().contains("no sequence"),
+            "the error names the missing sequence"
         );
     }
 
@@ -15317,6 +18194,64 @@ mod tests {
         assert!(
             failed(driven.stop, driven.error.as_deref(), JudgeOutcome::Judged),
             "the incomplete switch is a failed run and enters no probe rate"
+        );
+    }
+
+    /// A run that reaches its turn budget after the step after the first idle
+    /// submitted a request, but before that request reached the model, has no
+    /// request for the identity probe to read: the runner keeps the
+    /// submission, and the export decides that it was never observed
+    /// (model-prompts §8.1).
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_turn_budget_after_the_after_idle_submit_leaves_the_request_unobserved() {
+        let directory = std::env::temp_dir().join(format!(
+            "dim-scenario-eval-after-idle-cap-{}",
+            std::process::id()
+        ));
+        let (socket, _) =
+            scripted_peer(&directory, 8_000, PeerScript::AfterIdleSubmitAtTheCap).await;
+        let mut client = driver_client(socket).await;
+        let mut scenario = scenario(Vec::new());
+        scenario.budget.turns = 2;
+        scenario.budget.seconds = 10.;
+        scenario.budget.window = 8_000;
+        scenario.after_idle = Some(AfterIdle {
+            request: "Re-run the tests.".into(),
+        });
+        let driven = drive(
+            &mut client,
+            &RunSettings::default(),
+            &scenario,
+            &std::env::temp_dir(),
+            &peer_model(),
+            &ProducerState::default(),
+            None,
+        )
+        .await;
+        let _ = std::fs::remove_dir_all(directory);
+        assert_eq!(driven.stop, "turns", "{:?}", driven.error);
+        assert_eq!(driven.turns, 2, "the run stopped on its turn budget");
+        let after: Vec<&FixtureInput> = driven
+            .inputs
+            .iter()
+            .filter(|input| input.what == AFTER_IDLE_INPUT)
+            .collect();
+        assert_eq!(
+            after.len(),
+            1,
+            "the step after the idle submitted its request"
+        );
+        assert_eq!(after[0].line, "main");
+        assert_eq!(after[0].input.as_deref(), Some("input-2"));
+        assert_eq!(
+            driven.inputs.len(),
+            2,
+            "the message and the request after the idle are the fixture's inputs"
+        );
+        assert!(
+            driven.incomplete.is_none(),
+            "the runner has no export yet: the export decides the observation"
         );
     }
 

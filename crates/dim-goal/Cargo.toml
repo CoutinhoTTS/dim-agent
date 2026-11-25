@@ -30,6 +30,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 dim-agent-aimux.workspace = true
+# A flow test holds one line's end with the timeline tree's testing hook.
+dim-agent-capabilities = { workspace = true, features = ["testing"] }
 # The flow tests drive Goal through the `testing` module; a self
 # dev-dependency enables the feature for them.
 dim-goal = { path = ".", features = ["testing"] }

@@ -23,6 +23,8 @@ aimux 桥接层是唯一持有提供方结构化错误、并看得到完整响�
 
 HTTP 连接或流的超时以传输 `ApiCall` 到达桥接层，是 `network`。`AiMuxError::Timeout` 在聊天调用中没有产生者；若它到达桥接层，是 `unknown`，且不重试。
 
+状态表里列出的状态若由流事件在自身的 `code` 里写成 JSON 整数或恰好三位的十进制数字字符串，决定的 kind 与它作为响应状态时相同：`502` 或 `504` 是 `server_error`，`429` 是 `rate_limited`，`401` 或 `403` 是 `auth_rejected`，其余照状态表。
+
 桥接层自己也给几段等待设上限：连续五分钟没有任何事件是 `network`，reason 为 `the stream delivered nothing for 300 seconds`。这个上限按每次等待计，不按整个请求计，所以持续有事件的回复不会被截断；上限到点时它优先于同时就绪的事件，取消请求又优先于两者。事件有生产者上报时刻的等待按那个时刻判定：传输层上报它产生响应头的时刻，所以在上限内写下的响应头，即使 driver 之后再 poll 也算按时；超过上限写下的响应头，即使在这个上限的计时器触发之前被读到，也算迟到。没有这种时刻的等待（provider 返回流、两个流分片之间）仍以上限优先。
 
 带上限的等待有三段。等响应头从发出请求开始计，发送请求体和跟随重定向都算在内，reason 为 `no response headers arrived within 300 seconds of sending the request`。等流启动从传输层产生响应头时开始计。先读一个流事件再返回流的 provider（OpenAI Chat、Anthropic、Gemini、xAI Responses），reason 为 `the response headers arrived, but no stream event followed within 300 seconds`。OpenAI Responses 的 provider 固定版本的 SDK 在返回流之前会读取响应元数据，它的 reason 为 `the response headers arrived, but the stream did not start within 300 seconds`：这段等待结束于流的启动，而不是 driver 看得到的事件。OpenAI 兼容和 Bedrock 的 provider 在响应头处就返回，它们的第一个事件落在两次事件之间的等待里，reason 为 `the stream delivered nothing for 300 seconds`。非 2xx 响应另算：它的响应体是短的诊断信息，读取单独有总计五分钟的上限，卡住的错误体不能拖住请求，请求仍然按 HTTP 状态和该状态对应的类别失败，而不是变成空闲的网络失败。连接原来可选的整请求超时不变，和这几段上限是两件事。
@@ -38,6 +40,8 @@ code 比较前先 trim 并转 ASCII 小写。
 - **条件码**（condition code）描述状态本身无法表达的特定条件：`insufficient_quota`、`context_length_exceeded`、`rate_limit_exceeded`、`engine_overloaded`、`invalid_api_key`、`content_policy_violation`、`max_tokens_exceeded`。这是状态不携带的信息，所以由它决定。
 - **类别标签**（class label）只重述一个 HTTP 类别：`api_error`、`server_error`、`invalid_request_error`、`authentication_error`。网关或中转会把这类标签加在它转发的错误上，无论状态是什么。响应带错误状态时，标签只能与之一致或相悖；相悖时，状态才是事实。
 
+流事件在自身的 `code` 里写成 JSON 整数或恰好三位的十进制数字字符串的三位数字状态同样是类别标签，由上面的状态表说明它属于哪一类：事件报告的是它实际遇到的失败，而 aimux 把事件映射成的状态只是它自己的判断，从不作为事实采用。其他字段里的三位数字或三位数字字符串，比如 `type` 或适配器给出的 provider code，只是不透明标签：它只按上面列出的条件码和类别标签参与判断，从不作为状态读取。
+
 ### 规则
 
 origin 为 Transport、没有响应状态或响应头且传输层标为不可重试的失败属于本地拒绝（`invalid_request`），例如序列化后的请求体超出字节上限。其他失败按同一规则处理：
@@ -45,12 +49,12 @@ origin 为 Transport、没有响应状态或响应头且传输层标为不可重
 1. 条件码决定，不重试的条件码优先于重试的，因此 `insufficient_quota` 与 `rate_limit_error` 同时出现时是 `quota_exhausted`；
 2. 否则 origin 为 Transport 的失败是 `network`；
 3. 否则由响应上的错误状态（4xx 或 5xx）决定，按上表；
-4. 否则由类别标签决定，实际上只发生在流事件上；
+4. 否则由类别标签决定，实际上只发生在流事件上：事件在自身 `code` 里写成的状态（整数或三位数字字符串），或提供方给出的命名标签；
 5. 否则 kind 为 `unknown`。
 
 4xx、5xx 以外的状态不是错误状态，不说明失败的 kind，第 3 步跳过它，交由类别标签决定。2xx 到达桥接层的情形：成功响应体过大或解析失败，或提供方在 2xx 响应体内报告了错误；3xx 的情形：无法跟随的重定向。
 
-流事件的状态是提供方对事件自身字符串的映射，不是响应状态：事件带显式 4xx 或 5xx 时用它，否则 aimux 由事件的 code 与 type 猜测，提供方什么都匹配不上时得到 500。Dim 无法区分显式状态与猜测值，因此流事件跳过第 3 步，由第 1、4 步决定；读那个状态会把每个无法识别的事件变成可重试的 `server_error`。501 和 505 是 `invalid_request` 出自第 3 步的状态表，不是本规则的例外；同时出现的条件码仍然决定。规则带来两处 kind 变化：只带服务器类别标签的 4xx 不再重试；带 `invalid_request_error` 的 5xx 成为 `server_error` 并被重试。
+流事件的状态是提供方对事件自身字符串的映射，不是响应状态：事件带显式 4xx 或 5xx 时用它，否则 aimux 由事件的 code 与 type 猜测，提供方什么都匹配不上时得到 500。Dim 无法区分显式状态与猜测值，因此流事件跳过第 3 步，由第 1、4 步决定；读那个状态会把每个无法识别的事件变成可重试的 `server_error`。事件在自身 `code` 里写成的三位数字整数或恰好三位的十进制数字字符串作为类别标签决定，400 到 599 以外的值不决定任何 kind；`type` 或 provider code 里的三位数字不是状态。501 和 505 是 `invalid_request` 出自第 3 步的状态表，不是本规则的例外；同时出现的条件码仍然决定。规则带来两处 kind 变化：只带服务器类别标签的 4xx 不再重试；带 `invalid_request_error` 的 5xx 成为 `server_error` 并被重试。
 
 桥接层产生的每个 `HostError::Failed` 都带事实，包括 `AiMuxError::Timeout`、`InvalidResponseData`/`JsonParse`、`InvalidArgument`/`InvalidPrompt` 和 `UnsupportedFunctionality`。
 

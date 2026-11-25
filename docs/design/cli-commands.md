@@ -489,6 +489,7 @@ Steering always uses the owner's full held input.
 
 The strip and `/queue` show only held operator messages from the existing unconsumed
 input projection, oldest first; the strip count excludes applied messages.
+Steer messages never appear in the queue, even before they are applied.
 During a run, `Shift+Left` on an empty draft recalls the newest
 held message subject to the attachment rule above. The strip shows the shortcut
 that steers the oldest held message from an empty draft for the selected mode.

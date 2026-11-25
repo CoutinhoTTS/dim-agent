@@ -37,10 +37,11 @@ Goal 有两个不同的对象：
 | clear | objective=null，state=none；终止当前 Goal。 |
 | goal_update completed / blocked | model judge 下完成/阻塞；evaluator judge 下 completed 只是本次执行的评估请求，状态保持 active。 |
 | evaluator 的有效 done / blocked | 完成/阻塞当前目标。 |
-| 中断、失败、取消、限额、无进展、评估失败、可控卸载 | 结束正在执行的 Goal，写 paused 和原因。 |
+| 中断、失败、取消、限额、无进展、评估失败 | 结束正在执行的 Goal，写 paused 和原因。 |
+| 可控卸载 | 先追平折叠：追得上才写 paused，追不平不写，由加载映射把运行中的 Goal 映射为内存 paused。 |
 | continuation、普通输入、任务和轮次变化 | 本实例内存变化，不写 Goal 状态事件。 |
 
-Goal 命令的模型状态输入与 trigger 仍紧邻，状态输入在前；结构化业务事件同批置后。状态只在提交成功且按序消费后可见；后一个命令等待先前本插件写入已消费，不能对旧目标组成下一条状态。设置和恢复的 Queue 输入仍驱动第一轮；evaluator 完成申请不产生假的目标状态变更。
+Goal 命令的模型状态输入与 trigger 仍紧邻，状态输入在前；结构化业务事件同批置后。状态只在提交成功且按序消费后可见；后一个命令等待先前本插件写入已消费，不能对旧目标组成下一条状态。自动状态记录只在折叠已追平分支的已提交截点、且它答复的事实仍然成立时写入：结算期间抵达的驱动输入、更新的轮次或中断让暂停不再成立，暂停就不写，交给随后那轮或该中断自己的暂停答复。状态记录或变更写失败时不接手它在结算期间搁置的 interrupt：那条暂停留在 fold 里，等之后的结算接手；这次结算取消掉的每个决定也不会再决定一次，因为结算在写入之前会等它取消掉的每个 task 收尾。设置和恢复的 Queue 输入仍驱动第一轮；evaluator 完成申请不产生假的目标状态变更。
 
 ## 3. Flows
 
@@ -88,7 +89,7 @@ turn-scope stop/interrupt、执行失败或取消使正在运行的 Goal 停止�
 
 加载行为唯一见 [Goal 状态设计](Goal-state-read.md#4-get-与冷恢复)：最后 active 映射为内存 paused，不写回、不读取旧轮次和次数、不补答旧决定、不恢复旧评估。set/resume 才开始新执行。
 
-Session/branch 部件的可控关闭会结束其正在运行的 Goal 并写 paused；进程直接崩溃或存储不可写时无法保证终态提交，由加载映射覆盖这一情况。客户端 detach、重连和查询不关闭原实例。
+Session/branch 部件的可控关闭会结束其正在运行的 Goal：折叠追得上就写 paused；追不平就不写，由加载映射把运行中的 Goal 映射为内存 paused。进程直接崩溃或存储不可写时同样无法保证终态提交，由加载映射覆盖这一情况。客户端 detach、重连和查询不关闭原实例。
 
 ### 4.3 Other key rows
 
@@ -234,7 +235,7 @@ active 协议文本与 guide 的变更必须用产品请求验证：重载后普
 | Consume | 只处理 S 后新事实。goal/state 改业务状态；普通输入/轮次/任务只更新本实例内存。 |
 | Write | Goal branch 经 timeline.append_batch 提交状态与必要输入；原 continuation 和评估操作走已声明服务。 |
 | Adoption | InputQueue 决定 applied/deleted，Loop 写 consumed；Goal 不代写。 |
-| Closing | 禁止新决定，取消/释放自有资源，运行中写 paused，再移除服务。 |
+| Closing | 禁止新决定，取消/释放自有资源，运行中先追平折叠再写 paused；追不平就不写，再移除服务。 |
 | Crash | 不能保证终态提交；下一次加载只在内存暂停。 |
 | Reconnect | 原实例仍活着则继续，不执行加载映射。 |
 
