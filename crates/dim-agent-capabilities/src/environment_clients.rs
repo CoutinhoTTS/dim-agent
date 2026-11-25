@@ -274,8 +274,9 @@ impl DynPlugin for ClientsBranchPlugin {
                     let lifecycle = lifecycle.clone();
                     Box::pin(async move {
                         // A retired part's receipt stays registered while the
-                        // opening still collects receipts: only the live part
-                        // writes.
+                        // opening still collects receipts, so it checks its own
+                        // generation before reading and again before the
+                        // append.
                         if lifecycle.is_cancelled() || opens_with_identity_input(&timeline).await {
                             return Ok(());
                         }
@@ -286,6 +287,9 @@ impl DynPlugin for ClientsBranchPlugin {
                                 })
                                 .presences,
                         );
+                        if lifecycle.is_cancelled() {
+                            return Ok(());
+                        }
                         match append_own_dispatched(&timeline, &dispatcher, input(current.clone()))
                             .await
                         {

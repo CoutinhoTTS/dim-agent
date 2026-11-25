@@ -276,8 +276,9 @@ impl DynPlugin for SettingsSnapshotBranch {
                     let (lifecycle, shared) = (lifecycle.clone(), shared.clone());
                     Box::pin(async move {
                         // A retired part's receipt stays registered while the
-                        // opening still collects receipts: only the live part
-                        // writes.
+                        // opening still collects receipts, so it checks its own
+                        // generation before reading and again before the
+                        // append.
                         if lifecycle.is_cancelled() || opens_with_identity_input(&timeline).await {
                             return Ok(());
                         }
@@ -285,10 +286,13 @@ impl DynPlugin for SettingsSnapshotBranch {
                         // without progress; half of it leaves the receipt room
                         // to append and dispatch what it read.
                         let bound = RETRY.min(opening_budget / 2);
-                        let read = tokio::time::timeout(bound, host.read(lifecycle)).await;
+                        let read = tokio::time::timeout(bound, host.read(lifecycle.clone())).await;
                         match read {
                             Ok(Ok(settings)) => {
                                 let current = snapshot(settings);
+                                if lifecycle.is_cancelled() {
+                                    return Ok(());
+                                }
                                 match append_own_dispatched(
                                     &timeline,
                                     &dispatcher,
