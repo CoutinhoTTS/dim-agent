@@ -129,9 +129,9 @@ hands Goal the pending mode and Goal checks that it would be effective.
 - **Registration.** When the entry tool registers and makes `shell` effective without an update,
   `ToolRegistry` holds the Session's mode gate from before `settle(shell, registration)` through
   the publish. The handler takes the mode and cause as data; it does not read the published value.
-  The Loop's turn-start read takes the same gate, so no turn pins `shell` before the pause text and
-  the withdrawals are committed; a `set`/`resume` that waits on the gate is refused after the
-  publish. A failure leaves the projection at `normal` and records a fault. A withdrawal that
+  The InputQueue's application read takes the same gate, so no input pins `shell` before the pause
+  text and the withdrawals are committed; a `set`/`resume` that waits on the gate is refused after
+  the publish. A failure leaves the projection at `normal` and records a fault. A withdrawal that
   removes the entry tool runs `normal` and does not resume a paused goal.
 - **Settle.** The Goal Session part fans out to every branch with an active goal: it writes
   `paused` with reason `mode`, a pause input text with a `mode` phrase as an `Append` input, so it
@@ -180,7 +180,7 @@ may change it behind the operator's back.
 | Situation | Rule | Why |
 | --- | --- | --- |
 | A new Session from a client | starts in the mode the request names, or `normal` when it names none; the client sends the mode it last used | the operator should not re-choose for every Session |
-| A running Session | the operator can switch it at any time; the next turn declares the new mode, a turn already started keeps its pin (an in-process budget recovery reuses it; a process restart settles the in-flight request), and a call already admitted finishes | otherwise a change of style means abandoning the conversation |
+| A running Session | the operator can switch it at any time; an input applied after the switch uses the new mode, a turn already started or already applied keeps its pin (an in-process budget recovery reuses it; a process restart settles the in-flight request), and a call already admitted finishes | otherwise a change of style means abandoning the conversation |
 | A branch (line) | has no mode of its own; every line of a Session runs the Session's mode | a line is the same agent; a line in another mode would hand the agent tools the operator excluded |
 | A member Session | starts in its creator Session's current mode, and the operator can switch it like any Session | the member is the same agent doing delegated work; the model must not decide how the agent acts |
 | The model | never chooses or changes a mode | it is the operator's choice of capability |
@@ -218,18 +218,18 @@ owns this projection. Three terms:
 - A Code Mode program discovers and calls exactly the `delegated` set: `tools.list` and
   `tools.describe` project it, and `tools.call` admits inside it. `codemode` itself is never
   delegated, so a program cannot nest one.
-- The Loop holds the turn's mode: a turn pins it when it starts, before its first request is
-  prepared, not when its input is applied. A turn deferred while compaction runs, or recovered
-  after a restart, therefore starts under the mode in force when it actually starts. On an update,
-  the Goal pause is committed before the live mode, so a turn that starts in `shell` after the pause
-  has it in history; a turn-start read takes the mode gate, so a registration cannot publish `shell`
-  under a pinned turn (§2). Every request
-  of the turn uses the pin, together with the callable set ToolBinding pins today. A switch takes
-  effect with the next turn and needs no re-adoption: the branch's configuration, the version pins
-  and the source sets stay as they are. A request retried through its own source (an in-process
-  budget recovery) keeps the pin; a process restart settles the in-flight request as the loop
-  already does and does not reissue it; the request that follows a tool result keeps the turn's
-  pin.
+- The Loop holds the turn's mode. The InputQueue records the effective mode when it applies an
+  input, under the mode gate, and the turn — even one deferred for compaction or recovered after a
+  restart — uses that recorded mode; the applied record carries it, so a rebuild recovers it. Every
+  request of the turn uses the pin, together with the callable set ToolBinding pins today. A switch
+  takes effect with the next applied input, not with the next request, and needs no re-adoption:
+  the branch's configuration, the version pins and the source sets stay as they are. A request
+  retried through its own source (an in-process budget recovery) keeps the pin; a process restart
+  settles the in-flight request as the loop already does and does not reissue it; the request that
+  follows a tool result keeps the turn's pin. An applied input keeps its mode: a continuation
+  applied under `normal` finishes under `normal`. A turn that pins `shell` is one whose input was
+  applied after the live value, and it waits for the committed pause text to be adopted before its
+  first request; the Dispatcher keeps running while it waits.
 - A tool that is only delegated never appears in a prompt, a declaration or the usage counter;
   `skill` is in both sets.
 - The mount list and an Agent profile's tool list narrow the surface and never widen it. `normal`
@@ -258,8 +258,8 @@ The mode is Session configuration; there is no daemon-wide default to maintain.
 
 The mode is live for the Session's lifetime:
 
-- `ToolRegistry` holds the Session's current mode, initialised from the configuration. A turn reads
-  it when it starts; nothing re-adopts a tool set when it changes.
+- `ToolRegistry` holds the Session's current mode, initialised from the configuration. The
+  InputQueue records it when it applies an input; nothing re-adopts a tool set when it changes.
 - `session.tool_mode.get` returns `{mode, effective}`: the mode the operator chose and the one in
   force. A mode whose entry tool is absent stays chosen and is not in force; that is the fallback.
   `session.tool_mode.update` runs, in order: Goal settles for the pending mode when it would be
@@ -393,15 +393,16 @@ there is no default row to set.
 ```
 
 The picker lists all three modes; `normal` is always available, and `codemode` or `shell` is shown
-as unavailable when its `hello.features` entry is absent. A switch takes effect from the next turn,
-and the row shows the effective mode, so a mode that fell back to `normal` is not reported as in
-force. A client that offers Goal disables `set` and `resume` while `shell` is in force (the
-`effective` value) and shows the named refusal otherwise.
+as unavailable when its `hello.features` entry is absent. A switch takes effect from the next
+applied input, and the row shows the effective mode, so a mode that fell back to `normal` is not
+reported as in force. A client that offers Goal disables `set` and `resume` while `shell` is in
+force (the `effective` value) and shows the named refusal otherwise.
 
 ## 9. Compatibility
 
 - Stored records: an absent `toolMode` is `normal`; `normal` is omitted when serialized, so the
-  native store's text form does not change for existing Sessions.
+  native store's text form does not change for existing Sessions. The applied input record gains
+  an optional `toolMode`; a record without it reads as `normal`, the only mode before this feature.
 - A fork copies its source's current configuration and therefore its mode.
 - The v3 Code Mode gate stays. `excluded_tools` keeps `codemode` out of that Session's callable set,
   the fallback rule makes the Session `normal`, and a v3 client can neither select nor receive Code
@@ -438,13 +439,14 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
 - Flow: a child `ask_user` is shown under the program and is answerable through
   `session.question.respond`; its result drives the program and is not duplicated into the model
   context unless the program returns it.
-- Flow: switch a running Session in each direction; the next turn declares the new visible set, a
-  request after a tool result in the same turn keeps the turn's pin, an in-process budget recovery
-  keeps its pin, a process restart settles the in-flight request without reissuing it, and a call
-  already admitted finishes.
+- Flow: switch a running Session in each direction; an input applied after the switch declares the
+  new visible set, a request after a tool result in the same turn keeps the turn's pin, an
+  in-process budget recovery keeps its pin, a process restart settles the in-flight request without
+  reissuing it, and a call already admitted finishes.
 - Flow: a turn whose input is applied but which is deferred for compaction, or recovered after a
-  restart, pins the mode when it starts; a switch in that interval applies to it, and a turn that
-  starts in `shell` has the Goal pause in its history.
+  restart, uses the mode recorded at application; a switch after the application does not change it.
+  A turn that pins `shell` waits for the committed pause text to be adopted before its first
+  request, and the Dispatcher keeps running while it waits.
 - Flow: fallback — a mode whose entry tool is absent stays chosen in `get` and is reported as not in
   force; the Session declares the `normal` surface.
 - Flow: a member created under `codemode` records it; switching the creator leaves the member
@@ -463,7 +465,7 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   started keeps the old pin and finishes under it; one that was applied but starts after the switch
   pins `shell` and carries the pause text. The same settle runs when `execute` registers and makes
   `shell` effective without an update: the registry holds the gate from before the settle through
-  the publish, and a turn that starts waits; it pins `shell` only after the pause text and the
+  the publish, and an input application waits; it pins `shell` only after the pause text and the
   withdrawals are committed. The pause is committed before the record write and the live mode, so a
   turn that starts in `shell` has the pause text in history; a cancelled update
   after the pause and before the record write leaves the goal paused and the mode unchanged.
@@ -535,9 +537,11 @@ Requirements go to other owners:
 - **PromptSources.** The environment block follows the surface: while `shell` is in force (the
   `effective` value) it drops the Windows file-encoding guidance about `read`/`edit`/`write`. Its
   owner carries this into [PromptSources](plugins/PromptSources.md).
-- **Loop.** Read the effective mode when the turn starts and hold it for the turn, including a
-  turn deferred for compaction or recovered after a restart; its page gains the turn's mode pin.
-  Its owner carries this into [Loop](../architecture/rust-agent/plugins/Loop.md).
+- **Loop.** Record the effective mode when the input is applied, under the mode gate, and recover
+  it from the applied record on a rebuild; hold it for the turn. Adopt a committed pause text
+  before starting a turn that pins `shell`, and keep the Dispatcher running while the turn waits.
+  Its page gains the turn's mode pin. Its owner carries this into
+  [Loop](../architecture/rust-agent/plugins/Loop.md).
 
 Everything else stays within the owners that already exist: ToolRegistry projects its own set and
 holds the live mode, the Loop holds the turn's mode pin, ToolBinding pins the callable set,
