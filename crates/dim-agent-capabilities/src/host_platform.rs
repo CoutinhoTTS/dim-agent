@@ -2879,7 +2879,7 @@ mod windows {
             let mut code = 0u32;
             let ok = GetExitCodeProcess(process, &mut code);
             CloseHandle(process);
-            ok != 0 && code == STILL_ACTIVE
+            ok != 0 && code == STILL_ACTIVE as u32
         }
     }
 
