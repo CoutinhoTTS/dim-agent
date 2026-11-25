@@ -122,6 +122,9 @@ pub enum Stage {
     /// After a change waited for the publication of the cutoff it loads the
     /// branch's current work from, before it queries that work.
     Query,
+    /// After a change composed its record from the fold and before it commits
+    /// that record and its trigger.
+    Batch,
     /// After a state record read the fold and before its append commits.
     Append,
 }
