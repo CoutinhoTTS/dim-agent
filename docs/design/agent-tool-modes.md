@@ -118,12 +118,14 @@ or block a goal. Everything below keys on the mode in force — the `effective` 
 `session.tool_mode.get` reports — never on the chosen mode. The one exception is an update, which
 hands Goal the pending mode and Goal checks that it would be effective.
 
-- **Update.** `session.tool_mode.update` calls Goal's settle operation with the pending mode before
-  the record write and waits for it. Goal settles only when that mode would be effective `shell` —
-  its entry tool is in the callable set — because a chosen `shell` without `execute` runs `normal`.
+- **Update.** The Session's tool-mode transition service (internal, in-process) carries the settle
+  handlers. Goal registers its handler in `apply`; `session.tool_mode.update` calls it with the
+  pending mode before the record write and waits. Goal settles only when that mode would be
+  effective `shell` — its entry tool is in the callable set — because a chosen `shell` without
+  `execute` runs `normal`.
 - **Registration.** When the entry tool registers and makes `shell` effective without an update,
-  `ToolRegistry` publishes the effective mode and takes the Session's mode gate around the
-  effective-mode change and Goal's settle. A held continuation released before Goal settles can
+  `ToolRegistry` takes the Session's mode gate and calls the transition service's settle before it
+  publishes the effective mode. A held continuation released before Goal settles can
   reach one turn under `shell`, and its `goal_update` call is refused as an unknown tool; that
   window is accepted. A withdrawal that removes the entry tool runs `normal` and does not resume a
   paused goal.
@@ -479,9 +481,10 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   registry that applies them, not to core infrastructure.
 - §4 rule 5: no batches.
 - §4 rule 6: the visible set is exactly what the request declares; no new context path.
-- §4 rule 7: parts coordinate through the Session configuration, the registry's read, the Goal
-  owner's settle operation (§2), and the Session's mode gate, which is a synchronization primitive,
-  not business state.
+- §4 rule 7: parts coordinate through the Session configuration, the registry's read, the Session's
+  mode gate (a synchronization primitive, not business state), and the internal tool-mode
+  transition service, where Goal registers its settle handler (§2). The service is in-process and
+  carries no public face; neither the App Server nor the registry depends on Goal.
 - §4 rule 8: no infrastructure change; the product profile's tool wiring changes (§6), while
   Timeline, Dispatcher, the event envelope, rutis assembly and the Session facades are untouched.
 - §4 rule 9: the mode is Session configuration, not a Timeline fact, and follows
@@ -491,9 +494,10 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   `get` and `update`. A cancellation before the record write leaves the mode pair unchanged; a Goal
   pause already committed stays. After the record write, the new value stays stored and in force.
   Both report the effective mode rather than refusing one.
-- §7.2: no object or resource handle crosses an owner; no new service, and the mode methods join
-  the existing Session method face; the parameters are data. The mode gate is a synchronization
-  primitive, not a service or a value.
+- §7.2: no object or resource handle crosses an owner; no new public service, and the mode methods
+  join the existing Session method face; the parameters are data. The mode gate is a
+  synchronization primitive, not a service or a value; the tool-mode transition service is an
+  internal in-process Session service, not a public face.
 - [ADR 002](../adr/002-plugin-scope.md) D1: the mode is Session configuration and the pinned mode is
   branch state. D2: no wiring module. D3: ToolRegistry keeps no hard dependency on Code Mode; an
   absent or excluded `codemode` falls back to `normal`. D4: business configuration, read at creation
@@ -503,9 +507,10 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
 Requirements go to other owners:
 
 - **Goal.** Read the mode in force, the value `session.tool_mode.get` reports in `effective`, never
-  the chosen mode. On an update, take the pending mode from the App Server and check its entry tool
-  in the callable set; the general lifecycle reads the effective mode. Take the Session's mode gate
-  around `set` and `resume` and re-check the effective mode at their commit boundary. Settle on
+  the chosen mode. Register the settle handler with the internal tool-mode transition service; on
+  an update, take the pending mode it passes and check its entry tool in the callable set; the
+  general lifecycle reads the effective mode. Take the Session's mode gate around `set` and
+  `resume` and re-check the effective mode at their commit boundary. Settle on
   every transition to an effective `shell`: on an update, before the record write; on a
   registration, on the registry's published effective mode. Fan out from the Goal Session part to
   every branch with an active goal: write `paused` (`mode`), a pause text with a `mode` phrase as an
@@ -515,8 +520,9 @@ Requirements go to other owners:
   resumption to the operator after `shell` leaves. Its owner carries this into
   [Goal](plugins/Goal.md).
 - **ToolRegistry.** Publish the effective mode to its readers so Goal settles on a registration
-  transition, and provide the Session's mode gate the update holds, the registration takes and
-  Goal's `set`/`resume` take; the one-turn window in §2 stands.
+  transition; provide the Session's mode gate the update holds, the registration takes and Goal's
+  `set`/`resume` take; call the transition service on a registration before publishing. The
+  one-turn window in §2 stands.
 - **PromptSources.** The environment block follows the surface: while `shell` is in force (the
   `effective` value) it drops the Windows file-encoding guidance about `read`/`edit`/`write`. Its
   owner carries this into [PromptSources](plugins/PromptSources.md).
