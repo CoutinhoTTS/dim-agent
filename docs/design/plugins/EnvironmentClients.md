@@ -121,9 +121,15 @@ A receipt belongs to the generation that registered it. A generation that
 unloads while the opening still collects receipts — a reload onto a loading
 branch — leaves its receipt in the opening; the receipt still reads the
 branch's opening fact, so a child line's identity input stays first, and it
-appends nothing once its part's generation is cancelled. The replacement
-generation registers its own receipt, and the line gets the snapshot from that
-generation's first pass after activation, after its identity input.
+checks that generation's cancellation token right before it appends. A
+cancellation that lands after that check can leave
+a second snapshot with the same source, as a reload does: both events stay in
+the branch's history, and the later `<dim-state>` block of the same source
+replaces the earlier one for the model ([Prompt](Prompt.md#4-the-built-in-entries-and-their-writers)).
+The replacement generation registers its own receipt, and the line gets the
+snapshot from that generation's first pass after activation, after its
+identity input. The loop after activation checks the same token right before
+its own append.
 
 A snapshot appended after activation — a child line's first pass, a reloaded
 part's first pass, or a `ClientsChanged` wake — is published before the branch
@@ -231,7 +237,9 @@ None to the runtime or rutis.
 | A temporary route adopted with no `session.idle` after create | Adopted; the opening left nothing undispatched |
 | A temporary route adopted while a snapshot the part appended after activation is still dispatched | Refused with `provider_route_conflict`; the same call is adopted once the branch dispatches the snapshot and its `input/applied`; the caller retries or waits for `session.idle` |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
-| The part is replaced while its line loads | The retired receipt writes nothing; the replacement appends the line's one presence snapshot after its identity input |
+| The part is replaced while its line loads | The retired receipt sees the line's opening fact and writes nothing; the replacement appends the line's one presence snapshot after its identity input |
+| A generation is cancelled before its receipt's append | The receipt checks the token right before it appends and appends nothing |
+| A generation is cancelled after its receipt's last check | It may append one more snapshot, as a reload does: both events stay in history, and the later `<dim-state>` block of the same source replaces the earlier one for the model |
 | A part mounts after the line's `branch/start` was dispatched | It decides from the line's opening fact: the receipt writes nothing ahead of the identity input, and the snapshot follows once the line activates |
 | Two TUI leaves | Two `tui` entries, not one count |
 | A TUI leaf and its protocol connection | One `tui` entry; no duplicate `cli` entry |

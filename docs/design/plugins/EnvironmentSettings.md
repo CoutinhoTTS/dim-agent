@@ -96,6 +96,14 @@ first loop pass after `BranchLifecycle::activated()` appends the snapshot
 there. A failed or timed-out opening read, and a failed opening append, keep
 `pending`, so that pass retries.
 
+A receipt and the loop after activation check their own generation's
+cancellation token right before `Timeline::append`; a child line never reaches
+that append, because its opening fact decides first. A cancellation that lands
+after the check can leave a second snapshot of the same source, as a reload
+does: both events stay in the branch's history, and the later `<dim-state>`
+block of the same source replaces the earlier one for the model
+([Prompt](Prompt.md#4-the-built-in-entries-and-their-writers)).
+
 A snapshot this part appends after the opening is published before the branch
 dispatches it, so until the branch consumes it the branch has an event its
 Dispatcher has not taken. A temporary route adoption on that branch is refused
@@ -144,8 +152,9 @@ A read failure is not a value. The design does not append `unknown` or a fabrica
 | --- | --- |
 | The setting module's read port | Read the effective values for the body |
 | The branch's input path | Append the snapshot |
-| `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes |
-| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, and `branch/start` with a parent tells a line whose identity input opens it after the opening |
+| `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes; its generation token is checked before an append |
+| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot |
+| `Timeline` | Append the snapshot; the branch's opening fact tells a child line whose identity input opens it after the opening |
 | Process bus (`SettingsChanged`) | Wake on a committed write |
 
 The execution source's process `executionSettingsHost` is a data face with asynchronous `read({})`; `timeline`, `branchLifecycle` and `dispatcher` are data faces. This Rust projection is not a leaf-ready foreign part.
@@ -187,6 +196,8 @@ None to the runtime or rutis.
 | A part mounts after the line's `branch/start` was dispatched | It decides from the line's opening fact: the receipt writes nothing ahead of the identity input, and the snapshot follows once the line activates |
 | The settings source does not answer during the opening | Log; the branch opens; the first loop pass after activation reads and appends one snapshot |
 | The branch's opening budget is shorter than the retry interval | The read is bounded by half that budget; the branch opens and the first loop pass appends one snapshot once the source answers |
+| A generation is cancelled before its receipt's append | The receipt checks the token right before it appends and appends nothing |
+| A generation is cancelled after its receipt's last check | It may append one more snapshot, as a reload does: both events stay in history, and the later `<dim-state>` block of the same source replaces the earlier one for the model |
 | A temporary route adopted with no `session.idle` after create or restore | The opening read answered: adopted; the opening left nothing undispatched |
 | A temporary route adopted while a missed opening read's snapshot is still being dispatched | Refused with `provider_route_conflict`; the same call is adopted once the branch dispatches the snapshot and its `input/applied`; the caller retries or waits for `session.idle` |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
