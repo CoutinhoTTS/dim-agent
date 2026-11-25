@@ -75,10 +75,11 @@ with both committed and dispatched. `session.create`, a child line's creation
 and a restore therefore return with the snapshot in the branch's published
 history, and the first request carries the value.
 
-A branch whose opening sealed before the part mounted, such as a `Settings`
-reload onto a live branch, registers nothing; the first loop pass after
-`BranchLifecycle::activated()` appends the snapshot there instead. A failed
-opening read or append keeps `pending`, so that pass retries.
+A branch whose opening sealed before the part mounted, such as an
+`ExecutionSettings` reload onto a live branch, registers nothing; the first
+loop pass after `BranchLifecycle::activated()` appends the snapshot there
+instead. A failed opening read or append keeps `pending`, so that pass
+retries.
 
 ### Settings change
 
