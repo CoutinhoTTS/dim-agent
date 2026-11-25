@@ -965,10 +965,14 @@ impl Owner {
 
     /// Writes the batch only while the branch's last assigned sequence is
     /// still `head` when it commits: a fact that committed behind it leaves
-    /// nothing written, and the caller decides again (D3, C4, C5). A record is
-    /// a batch — the model's state input, the recovery event when `business`
+    /// nothing written, and the caller decides again (D3, C4, C5). A batch
+    /// that carries a change's trigger answers a request from outside the
+    /// branch, so it also passes the branch's input admission: a line that has
+    /// ended, or is closing, takes no new input. A record without a trigger is
+    /// the branch's own fact, which its close may still write. A record is a
+    /// batch — the model's state input, the recovery event when `business`
     /// states a change (the evaluation request states none, A16), and the
-    /// trigger — and `input_if_head` takes one input, so the condition rides
+    /// trigger — and `input_if_head` takes one input, so both conditions ride
     /// the batch's own registration under the commit lock instead.
     fn append_business_if_head(
         &self,
@@ -977,6 +981,11 @@ impl Owner {
         trigger: Option<usize>,
         head: u64,
     ) -> Result<Option<Vec<Arc<AgentEvent>>>, AgentError> {
+        let admitted = if trigger.is_some() {
+            Some(self.tree.get(&self.branch_id)?)
+        } else {
+            None
+        };
         let mut drafts = Vec::with_capacity(inputs.len() + 1);
         for input in inputs {
             input
@@ -997,6 +1006,17 @@ impl Owner {
         // caller, which decides again from the fold that moved.
         let moved = std::cell::Cell::new(false);
         let events = self.timeline.append_batch_registered(drafts, |events| {
+            if let Some(admitted) = &admitted {
+                if let Some(error) = self.dispatcher.failure() {
+                    return Err(error);
+                }
+                if admitted.is_closing() {
+                    return Err(AgentError::Closed(self.branch_id.clone()));
+                }
+                if admitted.ended() {
+                    return Err(AgentError::BranchEnded(self.branch_id.clone()));
+                }
+            }
             if self.timeline.committed() != head {
                 moved.set(true);
                 return Err(AgentError::Cancelled("Goal record superseded".into()));
