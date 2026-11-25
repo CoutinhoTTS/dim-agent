@@ -1,19 +1,34 @@
 use crate::local_support;
 
+use dim_agent_capabilities::environment_clients::SessionClientsHost;
 use dim_agent_capabilities::environment_clients::{
     BRANCH_PART, CLIENTS, ClientChannel, ClientPresence, ClientsChanged, SessionPresences,
     clients_changes,
 };
+use dim_agent_capabilities::execution_settings::prompt::{
+    BRANCH_PART as SETTINGS_BRANCH_PART, SESSION_PART,
+};
 use dim_agent_capabilities::execution_settings::{
     ExecutionSettings, ExecutionSettingsHost, prompt::SNAPSHOT_SOURCE,
 };
-use dim_agent_runtime::{BranchOptions, Session, SessionConfig, testing::branch_events};
+use dim_agent_capabilities::host_platform::HostPlatform;
+use dim_agent_runtime::SessionConfig;
+use dim_agent_runtime::testing::MinimalHost;
+use dim_agent_runtime::{
+    AgentBuilder, AgentConfig, MemoryTimelineStore, Names, PartRegistry, PublishCallback,
+    QueryPage, QueryResult, QuerySpec, StoredBranch, StoredEvent, TimelineKey, TimelineReadScope,
+    TimelineStore, TimelineStoreBinding, TimelineTrace,
+};
+use dim_agent_runtime::{BranchOptions, Session, testing::branch_events};
 use dim_agent_types::{BranchSource, EventKind, InputBlock};
 use local_support::*;
+use rutis::Ctx;
+use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use rutis::host::{CtxHost, FiberState, InstanceId};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 /// A mutable presence source: the test changes the connections, as another
 /// client would, and announces the change on the process bus.
@@ -341,6 +356,201 @@ async fn a_part_mounted_after_the_opening_event_dispatched_writes_after_the_iden
     env.agent.close().await.unwrap();
 }
 
+/// The in-memory store that holds the publication of every environment
+/// snapshot it accepts until the test releases them: a line's opening can read
+/// its opening fact while a batch it just appended is committed and still
+/// unpublished.
+struct SnapshotHoldStore {
+    memory: MemoryTimelineStore,
+    /// `Some` while the hold is on: the batches whose publications wait.
+    /// `None` once the test released them.
+    held: Mutex<Option<Vec<PublishCallback>>>,
+    /// Notified when a snapshot batch is held.
+    entered: Notify,
+}
+impl Default for SnapshotHoldStore {
+    fn default() -> Self {
+        Self {
+            memory: MemoryTimelineStore::default(),
+            held: Mutex::new(Some(Vec::new())),
+            entered: Notify::new(),
+        }
+    }
+}
+
+/// Whether the batch is an environment snapshot input: one of the
+/// `<dim-state>` blocks the environment parts append at a line's opening.
+fn environment_snapshot(events: &[StoredEvent]) -> bool {
+    events.iter().any(|record| {
+        matches!(&record.event.kind, EventKind::InputMessage(data)
+            if data.user.is_none()
+                && data.blocks.first().is_some_and(|block| matches!(block,
+                    InputBlock::Raw { text, .. } if text.starts_with("<dim-state source=\""))))
+    })
+}
+
+impl SnapshotHoldStore {
+    /// Publishes the held snapshots in commit order, ends the hold and returns
+    /// how many batches it held.
+    fn release(&self) -> usize {
+        let held = self.held.lock().unwrap().take().unwrap_or_default();
+        let count = held.len();
+        for publish in held {
+            publish(Ok(()));
+        }
+        count
+    }
+}
+
+impl TimelineStore for SnapshotHoldStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a TimelineReadScope,
+        query: &'a QuerySpec,
+        page: Option<&'a QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<QueryResult>> {
+        self.memory.query(scope, query, page)
+    }
+
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
+        self.memory.head(key)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> dim_agent_runtime::Result<()> {
+        if !environment_snapshot(&events) {
+            return self.memory.append(key, events, publish);
+        }
+        let mut hold = self.held.lock().unwrap();
+        let Some(held) = hold.as_mut() else {
+            drop(hold);
+            return self.memory.append(key, events, publish);
+        };
+        self.memory.append(key, events, Box::new(|_| ()))?;
+        held.push(publish);
+        drop(hold);
+        self.entered.notify_one();
+        Ok(())
+    }
+    fn read_segments<'a>(
+        &'a self,
+        id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<Vec<Vec<StoredEvent>>>> {
+        self.memory.read_segments(id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+}
+
+/// Registers the two environment branches this flow opens with: client
+/// presence and execution settings.
+struct OpeningPartsPlugin {
+    parts: Key<PartRegistry>,
+}
+impl OpeningPartsPlugin {
+    fn new(names: &Names<'_>) -> rutis::Result<Self> {
+        Ok(Self {
+            parts: names.key()?,
+        })
+    }
+}
+impl DynPlugin for OpeningPartsPlugin {
+    fn name(&self) -> &str {
+        "OpeningParts"
+    }
+    fn injects(&self) -> Vec<TypeKey> {
+        vec![self.parts.erase()]
+    }
+    fn apply<'a>(&'a self, ctx: &'a Ctx) -> BoxFuture<'a, rutis::Result<Effect>> {
+        Box::pin(async move {
+            let parts = ctx.require_at(&self.parts)?;
+            dim_agent_capabilities::environment_clients::register_parts(ctx, &parts)?;
+            dim_agent_capabilities::execution_settings::prompt::register_parts(ctx, &parts)?;
+            Ok(Effect::Done)
+        })
+    }
+}
+
+/// The default profile plus the two environment branches the opening collects,
+/// with `store` as the Session's storage: the flow supplies a store of its own
+/// and leaves the shared fixture's alone.
+async fn env_with_snapshot_hold(
+    dirs: &Dirs,
+    store: Arc<SnapshotHoldStore>,
+    presence: SessionPresences,
+    execution: Arc<ExecutionSettingsHost>,
+) -> MinimalHost {
+    let platform = platform(&dirs.home).with_execution_settings((*execution).clone());
+    let mut builder = AgentBuilder::new(AgentConfig::default());
+    dim_agent_capabilities::defaults::mock_hosts(&mut builder);
+    dim_agent_capabilities::defaults::install(&mut builder);
+    builder
+        .timeline_store(TimelineStoreBinding::new(store))
+        .plugin(|names| Ok(Box::new(OpeningPartsPlugin::new(names)?)));
+    builder
+        .require_part(BRANCH_PART)
+        .require_part(SETTINGS_BRANCH_PART)
+        .require_part(SESSION_PART);
+    MinimalHost::start_with(&builder, move |root, _| {
+        root.provide_as::<HostPlatform>(Arc::new(platform))?;
+        root.provide_as::<SessionClientsHost>(Arc::new(SessionClientsHost::new(presence)))?;
+        root.provide_as::<ExecutionSettingsHost>(execution)?;
+        Ok(())
+    })
+    .await
+    .unwrap()
+}
+
 /// An opening receipt decides from its branch's opening fact at the published
 /// head: a later batch that the line committed and has not published yet does
 /// not fail the read, so both environment receipts append their snapshot while
@@ -357,37 +567,31 @@ async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
         ClientChannel::Tui,
         Some("eric@laptop"),
     )])));
-    let store = Arc::new(HoldingStore::default());
-    store.hold_opening_snapshots();
+    let store = Arc::new(SnapshotHoldStore::default());
     let execution = ExecutionSettingsHost::new(Arc::new(|_| {
         Box::pin(async { Ok(ExecutionSettings::default()) })
     }));
-    let env = env(
-        &dirs,
-        Options {
-            store: Some(store.clone()),
-            clients: Some(presence.host()),
-            execution: Some(Arc::new(execution)),
-            ..Options::default()
-        },
-    )
-    .await;
-    let opener = env.agent.agent().clone();
+    let host =
+        env_with_snapshot_hold(&dirs, store.clone(), presence.host(), Arc::new(execution)).await;
+    let opener = host.agent().clone();
     let creation = opener.create_session(SessionConfig {
         cwd: cwd.to_string_lossy().into_owned(),
-        tools: Some(vec!["skill".into(), "gate".into()]),
         ..SessionConfig::default()
     });
     tokio::pin!(creation);
+    let mut held = None;
     let session = tokio::select! {
         result = &mut creation => result.expect("the Session opens"),
-        () = async {
+        count = async {
             store.entered.notified().await;
-            store.release();
-        } => creation.await.unwrap(),
+            store.release()
+        } => {
+            held = Some(count);
+            creation.await.unwrap()
+        }
     };
     assert_eq!(
-        store.released_snapshots(),
+        held,
         Some(2),
         "both opening receipts append their snapshot before the opening seals"
     );
@@ -417,5 +621,5 @@ async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
         );
     }
 
-    env.agent.close().await.unwrap();
+    host.close().await.unwrap();
 }
