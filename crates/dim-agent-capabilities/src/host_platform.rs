@@ -252,7 +252,7 @@ pub struct HostPlatform {
     pub(crate) commands: Arc<std::sync::Mutex<std::collections::HashMap<String, Arc<TaskRecord>>>>,
     pub(crate) command_shutdown: CancellationToken,
     pub(crate) command_workers: tokio_util::task::TaskTracker,
-    observing: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    stopping: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
     shell: Arc<Mutex<ResolvedShell>>,
     shell_file: Option<(Arc<FileStorage>, usize, PathBuf)>,
     pub(crate) execution: Option<Arc<ExecutionSettingsHost>>,
@@ -755,7 +755,7 @@ impl HostPlatform {
             commands: Arc::default(),
             command_shutdown: CancellationToken::new(),
             command_workers: tokio_util::task::TaskTracker::new(),
-            observing: Arc::default(),
+            stopping: Arc::default(),
             execution: None,
             toolchain: None,
         })
@@ -1236,7 +1236,7 @@ impl HostPlatform {
         if !task.is_running() {
             return Err(HostPlatformError::TaskRunning);
         }
-        if self.observing.lock().unwrap().contains(&task.id) {
+        if !self.stopping.lock().unwrap().insert(task.id.clone()) {
             return Err(HostPlatformError::TaskRunning);
         }
         match &task.kind {
@@ -1285,31 +1285,34 @@ impl HostPlatform {
                     let job = job.clone();
                     let shutdown = self.command_shutdown.clone();
                     let workers = self.command_workers.clone();
-                    let observing = self.observing.clone();
+                    let stopping = self.stopping.clone();
                     self.command_workers.spawn(async move {
                         let mut pid = job.pid.subscribe();
                         let mut changed = record.changed.subscribe();
                         loop {
                             if record.is_terminal() {
+                                stopping.lock().unwrap().remove(&record.id);
                                 return;
                             }
                             let current = *pid.borrow_and_update();
                             if let Some(pid) = current {
                                 if record.is_terminal() {
+                                    stopping.lock().unwrap().remove(&record.id);
                                     return;
                                 }
                                 if kill_job(pid).await.is_err() {
                                     let shutdown = shutdown.clone();
                                     let id = record.id.clone();
-                                    if observing.lock().unwrap().insert(id.clone()) {
-                                        let observing = observing.clone();
+                                    if stopping.lock().unwrap().contains(&id) {
+                                        let stopping = stopping.clone();
                                         workers.spawn(async move {
                                             observe_job_release(record, job, pid, shutdown).await;
-                                            observing.lock().unwrap().remove(&id);
+                                            stopping.lock().unwrap().remove(&id);
                                         });
                                     }
                                     return;
                                 }
+                                stopping.lock().unwrap().remove(&record.id);
                                 record.finish(Terminal {
                                     status: TaskStatus::Cancelled,
                                     exit_code: None,
@@ -1340,20 +1343,18 @@ impl HostPlatform {
                     return Err(HostPlatformError::TaskRunning);
                 };
                 if let Err(error) = kill_job(pid).await {
-                    let observing = self.observing.lock().unwrap().insert(task.id.clone());
-                    if observing {
-                        let record = task.clone();
-                        let job = job.clone();
-                        let shutdown = self.command_shutdown.clone();
-                        let observing = self.observing.clone();
-                        let id = task.id.clone();
-                        self.command_workers.spawn(async move {
-                            observe_job_release(record, job, pid, shutdown).await;
-                            observing.lock().unwrap().remove(&id);
-                        });
-                    }
+                    let record = task.clone();
+                    let job = job.clone();
+                    let shutdown = self.command_shutdown.clone();
+                    let stopping = self.stopping.clone();
+                    let id = task.id.clone();
+                    self.command_workers.spawn(async move {
+                        observe_job_release(record, job, pid, shutdown).await;
+                        stopping.lock().unwrap().remove(&id);
+                    });
                     return Err(HostPlatformError::Failed(error.to_string()));
                 }
+                self.stopping.lock().unwrap().remove(&task.id);
                 task.finish(Terminal {
                     status: TaskStatus::Cancelled,
                     exit_code: None,
@@ -2883,6 +2884,40 @@ mod windows {
         }
     }
 
+    pub fn tree_alive(pid: u32) -> bool {
+        // SAFETY: snapshot handle is closed below; entries are sized.
+        let parents = unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                return process_alive(pid);
+            }
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut parents = Vec::new();
+            let mut more = Process32FirstW(snapshot, &mut entry) != 0;
+            while more {
+                parents.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                more = Process32NextW(snapshot, &mut entry) != 0;
+            }
+            CloseHandle(snapshot);
+            parents
+        };
+        let mut tree = vec![pid];
+        let mut index = 0;
+        while index < tree.len() {
+            let parent = tree[index];
+            tree.extend(
+                parents
+                    .iter()
+                    .filter(|(child, of)| *of == parent && !tree.contains(child))
+                    .map(|(child, _)| *child)
+                    .collect::<Vec<_>>(),
+            );
+            index += 1;
+        }
+        tree.into_iter().any(process_alive)
+    }
+
     const SHELL_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
     const SHELL_PROBE_CONCURRENCY: usize = 4;
     const TERMINATE_CONFIRM: Duration = Duration::from_secs(5);
@@ -3558,7 +3593,20 @@ pub fn terminate_job(pid: u32) -> io::Result<()> {
         Ok(())
     }
     #[cfg(windows)]
-    native::terminate_tree(pid)
+    {
+        native::terminate_tree(pid)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while native::tree_alive(pid) {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "job processes are still alive",
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok(())
+    }
 }
 
 async fn observe_job_release(
