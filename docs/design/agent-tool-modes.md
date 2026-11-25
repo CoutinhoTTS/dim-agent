@@ -122,15 +122,17 @@ hands Goal the pending mode and Goal checks that it would be effective.
   the record write and waits for it. Goal settles only when that mode would be effective `shell` —
   its entry tool is in the callable set — because a chosen `shell` without `execute` runs `normal`.
 - **Registration.** When the entry tool registers and makes `shell` effective without an update,
-  `ToolRegistry` publishes the effective mode; Goal settles on that signal. A held continuation
-  released before Goal settles can reach one turn under `shell`, and its `goal_update` call is
-  refused as an unknown tool; that window is accepted. A withdrawal that removes the entry tool
-  runs `normal` and does not resume a paused goal.
+  `ToolRegistry` publishes the effective mode and takes the Session's mode gate around the
+  effective-mode change and Goal's settle. A held continuation released before Goal settles can
+  reach one turn under `shell`, and its `goal_update` call is refused as an unknown tool; that
+  window is accepted. A withdrawal that removes the entry tool runs `normal` and does not resume a
+  paused goal.
 - **Settle.** The Goal Session part fans out to every branch with an active goal: it writes
-  `paused` with reason `mode`, a pause input text carrying that reason (Goal state alone does not
-  enter the model context), and withdraws the input it queued — the `set`/`resume` trigger and any
-  automatic continuation — when the InputQueue has not applied it. An applied input belongs to a
-  turn that started earlier, which pinned the old mode and finishes under it.
+  `paused` with reason `mode`, a pause input text with a `mode` phrase as an `Append` input, so it
+  precedes the next turn (Goal state alone does not enter the model context), and withdraws the
+  input it queued — the `set`/`resume` trigger and any automatic continuation — when the InputQueue
+  has not applied it. An applied input was already handed over; the settle does not withdraw it.
+  Its turn pins the mode in force when it starts (§4).
 - **Order.** The update runs under the Session's mode gate with Goal's settle first; its order and
   failure rule are §5's. A Goal failure stops the update before the mode changes.
 - **Activation.** `session.goal.set` and `resume` take the same mode gate and check the effective
@@ -140,7 +142,8 @@ hands Goal the pending mode and Goal checks that it would be effective.
   interleaving is safe.
 - **Guarantee.** A turn that starts in `shell` after the pause is committed carries the pause text
   in its history, and its requests declare no `goal_update`. A failed update leaves the old mode in
-  force, as above, so a `normal` turn still declares `goal_update` while the goal is paused.
+  force, as above, so a `normal` turn still declares `goal_update`, when it is mounted, while the
+  goal is paused.
 - While `shell` is in force, a new continuation pauses the goal instead of continuing.
 - `session.goal.set` and `session.goal.resume` are refused while `shell` is in force, with a named
   error; `pause`, `edit`, `clear` and `get` keep working.
@@ -211,8 +214,9 @@ owns this projection. Three terms:
   delegated, so a program cannot nest one.
 - The Loop holds the turn's mode: a turn pins it when it starts, before its first request is
   prepared, not when its input is applied. A turn deferred while compaction runs, or recovered
-  after a restart, therefore starts under the mode in force when it actually starts; the Goal pause
-  is written before the live mode, so a turn that starts in `shell` has it in history. Every request
+  after a restart, therefore starts under the mode in force when it actually starts. On an update,
+  the Goal pause is committed before the live mode, so a turn that starts in `shell` after the pause
+  has it in history; a registration-window turn may start before the settle (§2). Every request
   of the turn uses the pin, together with the callable set ToolBinding pins today. A switch takes
   effect with the next turn and needs no re-adoption: the branch's configuration, the version pins
   and the source sets stay as they are. A request retried through its own source (an in-process
@@ -445,8 +449,9 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
   the settle, which withdraws its unapplied trigger and continuation.
 - Flow: a goal with a queued continuation, switched to an effective `shell` before it is applied:
   the continuation is withdrawn, the goal pauses (`mode`) with its pause text, and no turn carrying
-  the `goal_update` instruction starts in `shell`. Switched after it is applied, that turn pinned
-  the old mode and finishes under it. The same settle runs when `execute` registers and makes
+  the `goal_update` instruction starts in `shell`. Switched after it is applied, a turn that already
+  started keeps the old pin and finishes under it; one that was applied but starts after the switch
+  pins `shell` and carries the pause text. The same settle runs when `execute` registers and makes
   `shell` effective without an update; a held continuation released in that window can reach one
   turn, whose `goal_update` call is refused. The pause is committed before the record write and the
   live mode, so a turn that starts in `shell` has the pause text in history; a cancelled update
@@ -503,14 +508,15 @@ Requirements go to other owners:
   around `set` and `resume` and re-check the effective mode at their commit boundary. Settle on
   every transition to an effective `shell`: on an update, before the record write; on a
   registration, on the registry's published effective mode. Fan out from the Goal Session part to
-  every branch with an active goal: write `paused` (`mode`), a pause text carrying the reason, and
-  withdraw the `set`/`resume` trigger and any continuation the InputQueue has not applied. While
+  every branch with an active goal: write `paused` (`mode`), a pause text with a `mode` phrase as an
+  `Append` input, and withdraw the `set`/`resume` trigger and any continuation the InputQueue has
+  not applied. While
   `shell` is in force, pause new continuations and refuse `session.goal.set` and `resume`; leave
   resumption to the operator after `shell` leaves. Its owner carries this into
   [Goal](plugins/Goal.md).
 - **ToolRegistry.** Publish the effective mode to its readers so Goal settles on a registration
-  transition, and provide the Session's mode gate the update holds and Goal's `set`/`resume` take;
-  the one-turn window in §2 stands.
+  transition, and provide the Session's mode gate the update holds, the registration takes and
+  Goal's `set`/`resume` take; the one-turn window in §2 stands.
 - **PromptSources.** The environment block follows the surface: while `shell` is in force (the
   `effective` value) it drops the Windows file-encoding guidance about `read`/`edit`/`write`. Its
   owner carries this into [PromptSources](plugins/PromptSources.md).
