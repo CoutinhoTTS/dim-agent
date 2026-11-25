@@ -548,6 +548,12 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
                 names, clients, execution,
             )?))
         });
+        if clients {
+            builder.require_part(dim_agent_capabilities::environment_clients::BRANCH_PART);
+        }
+        if execution {
+            builder.require_part(dim_agent_capabilities::execution_settings::prompt::BRANCH_PART);
+        }
     }
     if options.require_without_install {
         for part in ["Skills", "SkillsBranch"] {

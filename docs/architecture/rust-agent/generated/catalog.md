@@ -134,7 +134,7 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | CollaborationTimeline | branch | `dispatcher`, `timeline` |
 | ContextPreparation | branch | `dispatcher`, `timeline` |
 | ContextUsage | branch | `dispatcher`, `timeline` |
-| EnvironmentClientsBranch | branch | `timeline` |
+| EnvironmentClientsBranch | branch | `dispatcher`, `timeline` |
 | FileReads | branch | `timeline` |
 | GoalBranch | branch | `dispatcher`, `timeline` |
 | InputQueue | branch | `dispatcher`, `timeline` |
@@ -143,7 +143,7 @@ The parts that inject `dispatcher` or `timeline` ([plugin contract §6](../../..
 | Permission | branch | `dispatcher`, `timeline` |
 | Prompt | branch | `dispatcher`, `timeline` |
 | SessionBroadcast | branch | `dispatcher` |
-| SettingsSnapshotBranch | branch | `timeline` |
+| SettingsSnapshotBranch | branch | `dispatcher`, `timeline` |
 | ToolBinding | branch | `dispatcher`, `timeline` |
 | ToolExecutor | branch | `dispatcher`, `timeline` |
 | TreeTimeline | branch | `dispatcher`, `timeline` |

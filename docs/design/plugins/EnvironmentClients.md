@@ -7,6 +7,7 @@ EnvironmentClients tells the model which client connections are attached to its 
 ## 1. Decisions
 
 - One snapshot at branch open, and one snapshot per observed connection change.
+- The branch-open snapshot is a `BranchLifecycle::register_opening` receipt, not work the published branch still owes: the opening waits for the snapshot and for the `input/applied` the input queue writes for it.
 - The snapshot is an `input/message` event with an Append-mode Raw block and no key.
 - No `PromptRegistry`, `LoadPrompt`, `ConfigureControl`, version or replay.
 - The projection is Session-level. It does not say which branch a client views.
@@ -94,7 +95,17 @@ An ACP gateway is one connection. Several logical clients behind the gateway are
 
 ### Branch open
 
-The branch part appends the current snapshot once after publication. The first request may race that append; a model request sees the snapshot only after the input is consumed.
+The branch part registers an opening receipt in `apply` when the branch is
+`Loading`. The receipt reads the current presence list, appends the snapshot,
+and returns once the branch dispatched it: the input queue has written the
+snapshot's `input/applied` by then, so the branch's opening seals with both
+committed and dispatched. `session.create`, a child line's creation and a
+restore therefore return with the snapshot in the branch's published history,
+and the first request carries it.
+
+A branch whose opening sealed before the part mounted, such as a `Connection`
+reload onto a live branch, registers nothing; the first loop pass after
+`BranchLifecycle::activated()` appends the snapshot there instead.
 
 ### Connection change
 
@@ -120,6 +131,7 @@ A change that arrives during a turn is appended when it arrives. The input-order
 - `ConnectionPlugin` provides `SessionClientsHost`.
 - `ConnectionPlugin` emits `ClientsChanged` on attach, detach, UI attach/close/replace and connection finish.
 - `ConnectionPlugin` registers one branch part: `EnvironmentClientsBranch`.
+- The App Server profile requires `EnvironmentClientsBranch` (`AgentBuilder::require_part`), so a branch opening never seals before the part registered its opening receipt.
 - There is no Session part for this projection.
 - No new process plugin.
 
@@ -135,7 +147,8 @@ A change that arrives during a turn is appended when it arrives. The input-order
 | Situation | Result |
 | --- | --- |
 | No connection | One snapshot saying so |
-| Snapshot append fails | Log; do not mark the body as appended; a later wake can retry |
+| Snapshot append fails during the opening | Log; the published branch's first loop pass appends it after activation |
+| Snapshot append fails after activation | Log; do not mark the body as appended; a later wake can retry |
 | Body unchanged | Append nothing |
 | Branch closing | Append nothing |
 | Label missing | Channel only |
@@ -149,7 +162,8 @@ The in-memory presence read is infallible; it returns an empty list for an unkno
 | --- | --- |
 | `SessionClientsHost` | Read the current connections |
 | The branch's input path | Append the snapshot |
-| `BranchLifecycle` | Wait for publication before appending; stop when the branch closes |
+| `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes |
+| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, so its `input/applied` is inside the opening fence |
 | Process bus (`ClientsChanged`) | Wake on a connection change |
 
 The process `sessionClientsHost` is a data face with the request and reply defined in [service faces §4.9](../service-faces.md#49-旧主机端口credentialvariableshost-等六个). `sessionIdentity`, `timeline` and `branchLifecycle` are also data faces in the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services). This Rust projection still uses owner methods outside the dispatched operations and is not a leaf-ready foreign part.
@@ -167,12 +181,12 @@ None to the runtime or rutis.
 | §1 Parts bounded; Capability | The connection registries stay with the App Server; `EnvironmentClientsBranch` is a Capability because it writes snapshot input facts through its branch Timeline. No new process part is added. |
 | §4 rule 1 Command events | Presence changes no state. |
 | §4 rule 2 Handover | No handover. |
-| §4 rule 3 Before callbacks | The branch part appends in its own task; the event handler only wakes it. |
+| §4 rule 3 Before callbacks | The opening receipt appends before the branch is Active; later appends run in the part's own task and the event handler only wakes it. |
 | §4 rule 4 Core carries no business meaning | The body is the App Server projection; no core branch. |
 | §4 rule 5 Batch | A snapshot is one branch input. |
 | §4 rule 6 Context from consumed events | The snapshot is an input; no second context path. |
 | §4 rule 7 Public services | `SessionClientsHost` is the public read port. |
-| §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. |
+| §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade contract change; the part reads the existing `branchLifecycle` and `dispatcher` faces. |
 | §4 rule 9 Timeline holds decision facts | The delivered snapshot is an input fact; live presence remains in the App Server registries. |
 | ADR 002 D1 | Connections stay with the App Server; the branch part only projects them. |
 | ADR 002 D2 | No adapter plugin; the projection is the capability's own purpose. |
@@ -184,7 +198,9 @@ None to the runtime or rutis.
 
 | Scenario | Expected |
 | --- | --- |
-| Branch open with one TUI | One snapshot with one `tui` entry |
+| Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active; `session.create`, a child line's creation and a restore return with both |
+| A temporary route adopted with no `session.idle` after create | Adopted; the opening left nothing undispatched |
+| Opening sealed before the part mounted | The snapshot is appended after activation |
 | Two TUI leaves | Two `tui` entries, not one count |
 | A TUI leaf and its protocol connection | One `tui` entry; no duplicate `cli` entry |
 | Two distinct connections with the same label | Two entries; labels are not identities |

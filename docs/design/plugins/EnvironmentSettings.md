@@ -11,6 +11,7 @@ This document owns the settings snapshot contract. The settings tool is [AgentSe
 - Context injection is an `input/message` event with an Append-mode Raw block and no key. It is not a read and not a Prompt source.
 - No `PromptRegistry` registration, no `LoadPrompt`, no version, no keyed state, no compaction replay, no `ConfigureControl`.
 - One snapshot at branch open, and one snapshot per observed change.
+- The branch-open snapshot is a `BranchLifecycle::register_opening` receipt: the opening waits for the value and for the `input/applied` the input queue writes for it.
 - A snapshot is a normal history input. Compaction may remove it; it is not replayed. This is accepted for a one-time hint.
 - The snapshot does not expose source, session, revision, timestamps or visibility metadata. It states the effective value.
 - Settings values and validation stay with each setting module. This capability only projects them.
@@ -66,7 +67,18 @@ Rules:
 
 ### Branch open
 
-The branch part registers its listener during `apply` and appends the current snapshot once after `BranchLifecycle::activated()`. The first request may race that append; a later request carries the value.
+The branch part registers its listener and an opening receipt during `apply`
+when the branch is `Loading`. The receipt reads the current value, appends the
+snapshot, and returns once the branch dispatched it: the input queue has
+written the snapshot's `input/applied` by then, so the branch's opening seals
+with both committed and dispatched. `session.create`, a child line's creation
+and a restore therefore return with the snapshot in the branch's published
+history, and the first request carries the value.
+
+A branch whose opening sealed before the part mounted, such as a `Settings`
+reload onto a live branch, registers nothing; the first loop pass after
+`BranchLifecycle::activated()` appends the snapshot there instead. A failed
+opening read or append keeps `pending`, so that pass retries.
 
 ### Settings change
 
@@ -90,6 +102,7 @@ The snapshot uses the existing `input/message` event; no settings event type is 
 | --- | --- |
 | The setting module is absent | No snapshot; no error |
 | The value read fails | Keep earlier snapshots; log; append nothing |
+| The opening read or append fails | Log; keep `pending`; the published branch's first loop pass retries |
 | The value is unchanged | Append nothing |
 | A non-model field changes | Append nothing |
 | The branch is closing | Append nothing |
@@ -103,10 +116,13 @@ A read failure is not a value. The design does not append `unknown` or a fabrica
 | --- | --- |
 | The setting module's read port | Read the effective values for the body |
 | The branch's input path | Append the snapshot |
-| `BranchLifecycle` | Wait for publication before appending; stop when the branch closes |
+| `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes |
+| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, so its `input/applied` is inside the opening fence |
 | Process bus (`SettingsChanged`) | Wake on a committed write |
 
-Service faces follow the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services): the execution source's process `executionSettingsHost` is a data face with asynchronous `read({})`; `timeline` and `branchLifecycle` are data faces. This Rust projection is not a leaf-ready foreign part.
+Service faces follow the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services): the execution source's process `executionSettingsHost` is a data face with asynchronous `read({})`; `timeline`, `branchLifecycle` and `dispatcher` are data faces. This Rust projection is not a leaf-ready foreign part.
+
+The App Server profile requires `SettingsSnapshotBranch` (`AgentBuilder::require_part`) where it installs `ExecutionSettingsPlugin`, so a branch opening never seals before the part registered its opening receipt.
 
 No `PromptRegistry`, no `ConfigureControl`, no prompt source, no version.
 
@@ -121,12 +137,12 @@ None to the runtime or rutis.
 | §1 Parts bounded; Capability | The setting value stays with its module; `SettingsSnapshotBranch` is a Capability because it writes snapshot input facts through its branch Timeline. No new process part is added. |
 | §4 rule 1 Command events | The design changes no setting. The settings tool is [AgentSettings](AgentSettings.md). |
 | §4 rule 2 Handover | No handover. |
-| §4 rule 3 Before callbacks | The branch part appends in its own task; the event handler only marks work and returns. |
+| §4 rule 3 Before callbacks | The opening receipt appends before the branch is Active; later appends run in the part's own task and the event handler only marks work and returns. |
 | §4 rule 4 Core carries no business meaning | The body is the setting module's projection; no core branch. |
 | §4 rule 5 Batch | A snapshot append is one branch input. |
 | §4 rule 6 Context from consumed events | The snapshot is an input; no second context path. |
 | §4 rule 7 Public services | The setting module's read port is the only source. |
-| §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade change. |
+| §4 rule 8 Infrastructure unchanged | No Timeline, Dispatcher, envelope, assembly or facade contract change; the part reads the existing `branchLifecycle` and `dispatcher` faces. |
 | §4 rule 9 Timeline holds decision facts | Settings stay in their source; only the delivered snapshot is an input fact. |
 | ADR 002 D1 | The value belongs to the setting module; the branch part only appends. |
 | ADR 002 D2 | No adapter plugin; the capability projects its own fact. |
@@ -138,7 +154,9 @@ None to the runtime or rutis.
 
 | Scenario | Expected |
 | --- | --- |
-| Branch open | A current snapshot; the first request may race it |
+| Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active; `session.create`, a child line's creation and a restore return with both |
+| A temporary route adopted with no `session.idle` after create or restore | Adopted; the opening left nothing undispatched |
+| Opening sealed before the part mounted | The snapshot is appended after activation |
 | Another client changes sandbox | Every open branch appends the new snapshot; an idle branch gets no turn |
 | Same value written twice | One snapshot, no duplicate |
 | Non-model field changes | No snapshot |
