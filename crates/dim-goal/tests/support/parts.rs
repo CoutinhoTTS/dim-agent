@@ -21,9 +21,8 @@ use dim_agent_runtime::testing::MinimalHost;
 use dim_agent_runtime::{
     AgentBuilder, AgentConfig, AgentError, BoxFuture, BranchOptions, Dispatcher, Feature,
     LoopPhase, LoopSnapshot, LoopState, MemoryTimelineStore, Names, PublishCallback, Session,
-    SessionConfig,
-    StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey, TimelineQueryDirection,
-    TimelineStore, TimelineTrace,
+    SessionConfig, StoredBranch, StoredEvent, Timeline, TimelineIdentity, TimelineKey,
+    TimelineQueryDirection, TimelineStore, TimelineTrace,
 };
 use dim_agent_types::{
     AgentEvent, BranchSource, DeltaData, EventKind, InputBlock, InputMessageData, InputMode,

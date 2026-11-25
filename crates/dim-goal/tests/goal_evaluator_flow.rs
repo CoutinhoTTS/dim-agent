@@ -2712,7 +2712,11 @@ async fn an_evaluation_request_writes_one_adjacent_pair() {
         "the request writes its record and trigger and nothing else: {markers:#?}"
     );
     assert_eq!(written[0].sequence, head + 1, "the record comes first");
-    assert_eq!(written[1].sequence, head + 2, "the trigger follows the record");
+    assert_eq!(
+        written[1].sequence,
+        head + 2,
+        "the trigger follows the record"
+    );
     assert!(
         markers[0].contains(r#"kind="state""#) && markers[0].contains(r#"trigger="goal:"#),
         "the first input is the record that names the trigger: {markers:#?}"
