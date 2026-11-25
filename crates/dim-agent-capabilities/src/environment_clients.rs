@@ -268,15 +268,20 @@ impl DynPlugin for ClientsBranchPlugin {
                 let timeline = timeline.clone();
                 let dispatcher = dispatcher.clone();
                 let session = session.clone();
+                let lifecycle = lifecycle.clone();
                 let last = last.clone();
                 let identity_input = identity_input.clone();
                 let registered = phase.register_opening(Arc::new(move || {
                     let (clients, timeline, dispatcher) =
                         (clients.clone(), timeline.clone(), dispatcher.clone());
                     let (session, last) = (session.clone(), last.clone());
+                    let lifecycle = lifecycle.clone();
                     let identity_input = identity_input.clone();
                     Box::pin(async move {
-                        if identity_input.load(Ordering::Acquire) {
+                        // A retired part's receipt stays registered while its
+                        // listener is gone, so it can no longer learn that this
+                        // line began under a parent. Only the live part writes.
+                        if lifecycle.is_cancelled() || identity_input.load(Ordering::Acquire) {
                             return Ok(());
                         }
                         let current = snapshot(

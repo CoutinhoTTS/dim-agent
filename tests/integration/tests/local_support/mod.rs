@@ -236,6 +236,35 @@ impl rutis::Plugin for AssemblyHoldPlugin {
     }
 }
 
+/// Holds the next branch's assembly open until released, while its other
+/// capabilities load concurrently: a window between the branch instance and
+/// its opening event.
+#[derive(Default)]
+pub struct BranchHold {
+    armed: std::sync::atomic::AtomicBool,
+    pub entered: Notify,
+    pub release: Notify,
+}
+impl BranchHold {
+    pub fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+struct BranchHoldPlugin(Arc<BranchHold>);
+impl rutis::Plugin for BranchHoldPlugin {
+    type Deps = ();
+    fn name(&self) -> &str {
+        "BranchHold"
+    }
+    async fn apply(&self, _: &rutis::Ctx, (): ()) -> rutis::Result {
+        if self.0.armed.swap(false, Ordering::SeqCst) {
+            self.0.entered.notify_one();
+            self.0.release.notified().await;
+        }
+        Ok(())
+    }
+}
+
 /// Records what each Session's `SessionLifecycle` reports, and can hold one
 /// Session's unload to keep a close in progress.
 #[derive(Default)]
@@ -383,6 +412,10 @@ pub struct Options {
     pub today: Arc<Mutex<String>>,
     pub timezone: &'static str,
     pub hold: Option<Arc<AssemblyHold>>,
+    /// Holds the next branch's assembly open until released.
+    pub branch_hold: Option<Arc<BranchHold>>,
+    /// The inactivity budget of every Session and branch opening.
+    pub startup_timeout: Option<std::time::Duration>,
     pub probe: Option<Arc<LifecycleProbe>>,
     /// Skills' factory configuration: the text replacing the built-in
     /// instructions.
@@ -420,6 +453,8 @@ impl Default for Options {
             today: Arc::new(Mutex::new("2026-09-30".into())),
             timezone: "Asia/Shanghai",
             hold: None,
+            branch_hold: None,
+            startup_timeout: None,
             probe: None,
             instructions: None,
             require_without_install: false,
@@ -479,6 +514,9 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
     let model = Arc::new(ScriptedModel::default());
     let gate = Arc::new(Gate::default());
     let mut builder = AgentBuilder::new(AgentConfig::default());
+    if let Some(timeout) = options.startup_timeout {
+        builder.startup_timeout(timeout);
+    }
     if let Some(store) = options.store {
         builder.timeline_store(dim_agent_runtime::TimelineStoreBinding::new(store));
     }
@@ -575,6 +613,12 @@ pub async fn env(dirs: &Dirs, options: Options) -> Env {
                 Ok(Box::new(AssemblyHoldPlugin(hold.clone())))
             }),
         );
+    }
+    if let Some(hold) = options.branch_hold {
+        builder.require_feature(Feature::new("BranchHold").branch("BranchHold", move |_| {
+            Ok(Box::new(BranchHoldPlugin(hold.clone())))
+        }));
+        builder.require_part("BranchHold");
     }
     if let Some(probe) = options.probe {
         builder.require_feature(

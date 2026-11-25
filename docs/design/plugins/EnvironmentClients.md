@@ -115,6 +115,15 @@ A branch whose opening sealed before the part mounted, such as a `Connection`
 reload onto a live branch, registers nothing either; the first loop pass after
 `BranchLifecycle::activated()` appends the snapshot there.
 
+A receipt belongs to the generation that registered it. A generation that
+unloads while the opening still collects receipts — a reload onto a loading
+branch — leaves its receipt in the opening, and that receipt stopped observing
+`branch/start` with its listener, so it cannot learn that the line began under
+a parent. The receipt therefore writes nothing once its part's generation is
+cancelled: the replacement generation registers its own receipt and listener,
+and the line gets the snapshot from that generation's first pass after
+activation, after its identity input.
+
 A snapshot appended after activation — a child line's first pass, a reloaded
 part's first pass, or a `ClientsChanged` wake — is published before the branch
 dispatches it, so a temporary route adoption that arrives before the branch
@@ -220,6 +229,7 @@ None to the runtime or rutis.
 | A temporary route adopted with no `session.idle` after create | Adopted; the opening left nothing undispatched |
 | A temporary route adopted while a snapshot the part appended after activation is still dispatched | Refused with `provider_route_conflict`; the same call is adopted once the branch dispatches the snapshot and its `input/applied`; the caller retries or waits for `session.idle` |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
+| The part is replaced while its line loads | The retired receipt writes nothing; the replacement appends the line's one presence snapshot after its identity input |
 | Two TUI leaves | Two `tui` entries, not one count |
 | A TUI leaf and its protocol connection | One `tui` entry; no duplicate `cli` entry |
 | Two distinct connections with the same label | Two entries; labels are not identities |

@@ -73,10 +73,13 @@ snapshot, and returns once the branch dispatched it: the input queue has
 written the snapshot's `input/applied` by then, so the branch's opening seals
 with both committed and dispatched. `session.create` and a restore therefore
 return with the snapshot in the branch's published history, and the first
-request carries the value. The read is bounded by the part's own retry
-interval, so a source that does not answer leaves the snapshot to the published
-branch instead of holding the opening: the waiting ends, the part logs it, and
-`pending` stays set.
+request carries the value. The read is bounded by half the branch's own
+opening budget, and by the part's retry interval when that is shorter, so a
+source that does not answer cannot outlast the opening: the waiting ends, the
+part logs it, and `pending` stays set, leaving the snapshot to the published
+branch. The budget is the inactivity interval the branch's own `finish_opening`
+is given, so a branch configured with a shorter budget shortens the read with
+it.
 
 A child line's own history starts with TimelineTree's identity input, which the
 tree writes after the branch opening seals. The receipt therefore appends
@@ -180,6 +183,7 @@ None to the runtime or rutis.
 | Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active, so `session.create` and a restore return with both |
 | A child line opens | The identity input is the line's first input; the snapshot follows it once the line is published |
 | The settings source does not answer during the opening | Log; the branch opens; the first loop pass after activation reads and appends one snapshot |
+| The branch's opening budget is shorter than the retry interval | The read is bounded by half that budget; the branch opens and the first loop pass appends one snapshot once the source answers |
 | A temporary route adopted with no `session.idle` after create or restore | The opening read answered: adopted; the opening left nothing undispatched |
 | A temporary route adopted while a missed opening read's snapshot is still being dispatched | Refused with `provider_route_conflict`; the same call is adopted once the branch dispatches the snapshot and its `input/applied`; the caller retries or waits for `session.idle` |
 | Opening sealed before the part mounted | The snapshot is appended after activation |

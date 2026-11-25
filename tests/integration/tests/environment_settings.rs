@@ -269,3 +269,46 @@ async fn a_held_settings_read_never_holds_a_branch_open() {
     );
     second.agent.close().await.unwrap();
 }
+
+/// The opening read is bounded by the branch's own opening budget: with a
+/// budget shorter than the part's retry interval, a stalled source still lets
+/// the session open, and its snapshot is appended once the source answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_read_fits_a_budget_shorter_than_the_retry_interval() {
+    let dirs = Dirs::new();
+    let cwd = dirs.dir("work");
+    let held = Held::new(ExecutionSettings {
+        sandbox: true,
+        network: false,
+    });
+    let env = env(
+        &dirs,
+        Options {
+            execution: Some(Arc::new(held.host())),
+            startup_timeout: Some(Duration::from_millis(500)),
+            ..Options::default()
+        },
+    )
+    .await;
+    let session = env
+        .session(&cwd, "")
+        .await
+        .expect("the session opens inside its shorter opening budget");
+    assert_eq!(
+        settings_snapshots(&session, "main").await.len(),
+        0,
+        "the held read appends nothing during the opening"
+    );
+    held.release();
+    until_block(
+        &session,
+        "<dim-state source=\"dim/settings/execution\">Execution sandbox: on; network: off.",
+    )
+    .await;
+    assert_eq!(
+        settings_snapshots(&session, "main").await.len(),
+        1,
+        "the released read appends one snapshot after activation"
+    );
+    env.agent.close().await.unwrap();
+}

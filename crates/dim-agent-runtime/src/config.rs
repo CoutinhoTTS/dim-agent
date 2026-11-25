@@ -310,15 +310,18 @@ impl<P: Copy + Ord + Default + Send + Sync + 'static> Phases<P> {
 pub struct BranchLifecycle {
     phases: Phases<BranchPhase>,
     opening: Arc<Mutex<Option<Vec<OpeningReceipt>>>>,
+    /// The inactivity budget this branch's opening is given.
+    opening_budget: std::time::Duration,
 }
 type OpeningReceipt = rutis::host::BoxFuture<'static, crate::Result<()>>;
 
 #[service]
 impl BranchLifecycle {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(opening_budget: std::time::Duration) -> Self {
         Self {
             phases: Phases::new(),
             opening: Arc::new(Mutex::new(Some(Vec::new()))),
+            opening_budget,
         }
     }
     /// Registers a completion for the current branch opening. Once opening seals,
@@ -337,6 +340,13 @@ impl BranchLifecycle {
     #[service(skip)]
     pub fn phase(&self) -> BranchPhase {
         self.phases.get()
+    }
+    /// The inactivity budget of this branch's opening: a receipt that waits
+    /// for an outside source bounds that wait inside it, so the wait cannot
+    /// outlast the opening.
+    #[service(skip)]
+    pub fn opening_budget(&self) -> std::time::Duration {
+        self.opening_budget
     }
     #[service(skip)]
     pub fn watch(&self) -> tokio::sync::watch::Receiver<BranchPhase> {

@@ -27,10 +27,11 @@ use tokio_util::task::TaskTracker;
 
 /// The snapshot source name.
 pub const SNAPSHOT_SOURCE: &str = "dim/settings/execution";
-/// One retry interval of the snapshot: the opening waits this long for the
-/// source, and the published branch's loop waits this long before asking
-/// again. A source that misses it leaves `pending` set, so the loop appends
-/// the snapshot after activation instead of holding the opening.
+/// One retry interval of the snapshot: the published branch's loop waits this
+/// long before asking a source again. The opening read is bounded by this and
+/// by half the branch's own opening budget, so a source that misses it leaves
+/// `pending` set and the loop appends the snapshot after activation instead of
+/// holding the opening.
 const RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// The tool name.
 const TOOL: &str = "settings";
@@ -265,6 +266,7 @@ impl DynPlugin for SettingsSnapshotBranch {
             let shared = Arc::new(std::sync::Mutex::new((None, true)));
             let identity_input =
                 opens_with_identity_input(&dispatcher, ctx, "SettingsSnapshotOpening")?;
+            let opening_budget = phase.opening_budget();
             if phase.phase() == BranchPhase::Loading {
                 let host = host.clone();
                 let timeline = timeline.clone();
@@ -278,10 +280,14 @@ impl DynPlugin for SettingsSnapshotBranch {
                     let (lifecycle, shared) = (lifecycle.clone(), shared.clone());
                     let identity_input = identity_input.clone();
                     Box::pin(async move {
-                        if identity_input.load(Ordering::Acquire) {
+                        if lifecycle.is_cancelled() || identity_input.load(Ordering::Acquire) {
                             return Ok(());
                         }
-                        let read = tokio::time::timeout(RETRY, host.read(lifecycle)).await;
+                        // An opening fails after its inactivity budget passes
+                        // without progress; half of it leaves the receipt room
+                        // to append and dispatch what it read.
+                        let bound = RETRY.min(opening_budget / 2);
+                        let read = tokio::time::timeout(bound, host.read(lifecycle)).await;
                         match read {
                             Ok(Ok(settings)) => {
                                 let current = snapshot(settings);
