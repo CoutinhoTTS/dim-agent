@@ -1481,7 +1481,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.29.0",
  "tokio-util",
- "tungstenite 0.24.0",
  "url",
  "uuid",
 ]
