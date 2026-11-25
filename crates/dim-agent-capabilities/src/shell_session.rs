@@ -1950,12 +1950,6 @@ fn push_output(text: &mut String, output: &str) {
     }
 }
 
-fn file_tail(path: &Path, limit: usize) -> String {
-    std::fs::read(path)
-        .map(|bytes| tail_bytes(&String::from_utf8_lossy(&bytes), limit).to_owned())
-        .unwrap_or_default()
-}
-
 fn exit_status(code: &str) -> ExecStatus {
     match code {
         "0" => ExecStatus::Completed,
