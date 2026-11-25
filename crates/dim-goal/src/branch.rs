@@ -728,12 +728,12 @@ impl Owner {
         .await;
         match &result {
             Ok(_) => self.resume_settlement(),
-            // A change that failed states no state, so the interrupt the
-            // settlement deferred waits for a later settlement that succeeds
-            // instead of reaching an append of its own; the decisions that
-            // settlement cancelled decide nothing after this release, because
-            // the settlement waited for every one of them before it wrote
-            // (Pursuit §4.1, §13 E2, #2119).
+            // A change that failed states no state of its own, so the
+            // interrupt the settlement deferred waits for a later settlement
+            // that succeeds instead of reaching an append of its own; the
+            // decisions that settlement cancelled decide nothing after this
+            // release, because the settlement waited for every one of them
+            // before it wrote (Pursuit §4.1, §13 E2, #2119).
             Err(_) => {
                 self.release_settlement();
             }
