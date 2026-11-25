@@ -101,7 +101,13 @@ and returns once the branch dispatched it: the input queue has written the
 snapshot's `input/applied` by then, so the branch's opening seals with both
 committed and dispatched. `session.create`, a child line's creation and a
 restore therefore return with the snapshot in the branch's published history,
-and the first request carries it.
+and the first request carries it. The presence list comes from the App
+Server's in-memory registry, so the receipt awaits no I/O of its own.
+
+A child line's first input is TimelineTree's identity block, and both
+environment snapshots follow it: TimelineTree appends that input before the
+opening receipts run, so the line's own history keeps its identity first and
+the snapshots after it.
 
 A branch whose opening sealed before the part mounted, such as a `Connection`
 reload onto a live branch, registers nothing; the first loop pass after
@@ -199,6 +205,7 @@ None to the runtime or rutis.
 | Scenario | Expected |
 | --- | --- |
 | Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active; `session.create`, a child line's creation and a restore return with both |
+| A child line opens | The identity input is the line's first input; the snapshot and its `input/applied` follow it inside the opening |
 | A temporary route adopted with no `session.idle` after create | Adopted; the opening left nothing undispatched |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
 | Two TUI leaves | Two `tui` entries, not one count |

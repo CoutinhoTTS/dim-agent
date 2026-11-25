@@ -191,7 +191,7 @@
 ## 20. EnvironmentClientsBranch
 
 - **场景/状态**：当前客户端 presence 的字符串快照和本代 last；输入只是声称的客户端环境，不授予信任或权限。
-- **转换**：先注册 ClientsChanged listener，再在 `apply` 里登记 opening receipt：分支仍为 Loading 时读当前值、append 自己的 input/message，并等到分支派发完它（InputQueue 已写下 input/applied）才返回，于是快照和 input/applied 都落在 `finish_opening` 的封口里；开场已封口（例如 reload 到活跃分支）则不登记，退回 activation 后首轮读取。之后变化才 append，成功后更新 last；关闭/代取消结束任务。
+- **转换**：先注册 ClientsChanged listener，再在 `apply` 里登记 opening receipt：分支仍为 Loading 时读当前值、append 自己的 input/message，并等到分支派发完它（InputQueue 已写下 input/applied）才返回，于是快照和 input/applied 都落在 `finish_opening` 的封口里；开场已封口（例如 reload 到活跃分支）则不登记，退回 activation 后首轮读取。子线的开场输入是 TimelineTree 的 identity block，在 opening 回执之前写入，所以线的第一条输入是 identity，两条环境快照排在它之后。之后变化才 append，成功后更新 last；关闭/代取消结束任务。
 - **恢复**：重新读 SessionClientsHost 当前状态，不恢复已断开的客户端；last 清空允许本代再次报告当前值。
 - **性质/论证**：先监听再初读避免丢初值期间的改变，notify 合并后重读当前值而不是逐个回放连接通知。开场写入一定在分支 active 之前完成且已派发，所以 `session.create`、子线创建和 restore 返回时快照已在已发布历史里；失败 append 不更新 last，此时开场退化成 activation 后首轮写入，但没有定时 retry，直到下次唤醒才再试，不能承诺无新信号时必然重试成功。
 - **对应**：[environment_clients.rs](../../../crates/dim-agent-capabilities/src/environment_clients.rs)；environment_clients。它只写采用输入，按现有行为更接近输入发布部件，不为它增加恢复状态机。
@@ -199,7 +199,7 @@
 ## 21. SettingsSnapshotBranch
 
 - **场景/状态**：执行设置读入口、本代 last、pending retry；设置本体归其 owner。
-- **转换**：在 `apply` 里登记 opening receipt：分支仍为 Loading 时读当前值、append input/message 并等它派发完再返回，成功则把 last 和 pending=false 交给激活后的循环；读或写失败只告警并保留 pending，由激活后首轮重试。开场已封口则不登记，回到激活后首轮写入。之后 watch 变化唤醒读取，格式化后采用 input/message；读失败或 append 失败保留 pending，一秒后重试；成功才替换 last。
+- **转换**：在 `apply` 里登记 opening receipt：分支仍为 Loading 时读当前值、append input/message 并等它派发完再返回，成功则把 last 和 pending=false 交给激活后的循环；读或写失败只告警并保留 pending，由激活后首轮重试。开场读取限在这个部件自己的重试间隔内：超过就告警、保留 pending，交给激活后的首轮读取与写入，所以源不回应不会拖住 opening。开场已封口则不登记，回到激活后首轮写入。之后 watch 变化唤醒读取，格式化后采用 input/message；读失败或 append 失败保留 pending，一个重试间隔后重试；成功才替换 last。
 - **恢复**：激活后重读当前设置，不从旧输入推回用户配置。停止依赖 branch closing / generation token。
 - **性质/论证**：开场快照同样在分支 active 之前提交并派发，`session.create`、子线创建和 restore 返回时已在已发布历史里。last 只记成功采用值，pending 使临时失败不被当成“已经发布”；相同值不不断写相同输入。重试完成依赖服务和存储恢复，不是无条件活性保证。
 - **对应**：[execution_settings/prompt.rs](../../../crates/dim-agent-capabilities/src/execution_settings/prompt.rs)；environment_settings。与客户端环境发布相似，但不能把它的 retry 保证错误归给上一项。

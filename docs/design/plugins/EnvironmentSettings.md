@@ -73,13 +73,21 @@ snapshot, and returns once the branch dispatched it: the input queue has
 written the snapshot's `input/applied` by then, so the branch's opening seals
 with both committed and dispatched. `session.create`, a child line's creation
 and a restore therefore return with the snapshot in the branch's published
-history, and the first request carries the value.
+history, and the first request carries the value. The read is bounded by the
+part's own retry interval, so a source that does not answer leaves the
+snapshot to the published branch instead of holding the opening: the waiting
+ends, the part logs it, and `pending` stays set.
+
+A child line's first input is TimelineTree's identity block, and both
+environment snapshots follow it: TimelineTree appends that input before the
+opening receipts run, so the line's own history keeps its identity first and
+the snapshots after it.
 
 A branch whose opening sealed before the part mounted, such as an
 `ExecutionSettings` reload onto a live branch, registers nothing; the first
 loop pass after `BranchLifecycle::activated()` appends the snapshot there
-instead. A failed opening read or append keeps `pending`, so that pass
-retries.
+instead. A failed or timed-out opening read, and a failed opening append, keep
+`pending`, so that pass retries.
 
 ### Settings change
 
@@ -104,6 +112,7 @@ The snapshot uses the existing `input/message` event; no settings event type is 
 | The setting module is absent | No snapshot; no error |
 | The value read fails | Keep earlier snapshots; log; append nothing |
 | The opening read or append fails | Log; keep `pending`; the published branch's first loop pass retries |
+| The opening read does not answer within the part's retry interval | Log; keep `pending`; the published branch's first loop pass reads and appends it |
 | The value is unchanged | Append nothing |
 | A non-model field changes | Append nothing |
 | The branch is closing | Append nothing |
@@ -156,6 +165,8 @@ None to the runtime or rutis.
 | Scenario | Expected |
 | --- | --- |
 | Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active; `session.create`, a child line's creation and a restore return with both |
+| A child line opens | The identity input is the line's first input; the snapshot and its `input/applied` follow it inside the opening |
+| The settings source does not answer during the opening | Log; the branch opens; the first loop pass after activation reads and appends one snapshot |
 | A temporary route adopted with no `session.idle` after create or restore | Adopted; the opening left nothing undispatched |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
 | Another client changes sandbox | Every open branch appends the new snapshot; an idle branch gets no turn |

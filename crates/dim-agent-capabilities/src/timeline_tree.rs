@@ -1321,6 +1321,10 @@ impl TimelineTree {
                     }
                 }
                 let opened = context.timeline().append(opening.into())?;
+                let opening_input = first.is_some();
+                if let Some(first) = first {
+                    context.branch().input(first).await?;
+                }
                 tokio::select! {
                     result = context.finish_opening(
                         opened.sequence,
@@ -1329,10 +1333,7 @@ impl TimelineTree {
                     _ = owner.cancel.cancelled() =>
                         return Err(AgentError::Cancelled("branch creation".into())),
                 }
-                if let Some(first) = first {
-                    context.branch().input(first).await?;
-                    started = true;
-                }
+                started = opening_input;
                 if owner.cancel.is_cancelled() {
                     return Err(AgentError::Cancelled("branch creation".into()));
                 }

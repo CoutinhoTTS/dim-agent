@@ -26,6 +26,11 @@ use tokio_util::task::TaskTracker;
 
 /// The snapshot source name.
 pub const SNAPSHOT_SOURCE: &str = "dim/settings/execution";
+/// One retry interval of the snapshot: the opening waits this long for the
+/// source, and the published branch's loop waits this long before asking
+/// again. A source that misses it leaves `pending` set, so the loop appends
+/// the snapshot after activation instead of holding the opening.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 /// The tool name.
 const TOOL: &str = "settings";
 /// The Session plugin name.
@@ -268,8 +273,9 @@ impl DynPlugin for SettingsSnapshotBranch {
                         (host.clone(), timeline.clone(), dispatcher.clone());
                     let (lifecycle, shared) = (lifecycle.clone(), shared.clone());
                     Box::pin(async move {
-                        match host.read(lifecycle).await {
-                            Ok(settings) => {
+                        let read = tokio::time::timeout(RETRY, host.read(lifecycle)).await;
+                        match read {
+                            Ok(Ok(settings)) => {
                                 let current = snapshot(settings);
                                 match append_own_dispatched(
                                     &timeline,
@@ -287,8 +293,11 @@ impl DynPlugin for SettingsSnapshotBranch {
                                     }
                                 }
                             }
-                            Err(error) => {
+                            Ok(Err(error)) => {
                                 tracing::warn!(%error, "execution settings were not read");
+                            }
+                            Err(_) => {
+                                tracing::warn!("execution settings were not read in time");
                             }
                         }
                         Ok::<(), Error>(())
@@ -349,7 +358,7 @@ impl DynPlugin for SettingsSnapshotBranch {
                         _ = lifecycle.cancelled() => return,
                         _ = phase.closing() => return,
                         _ = wake.notified() => pending = true,
-                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if pending => {}
+                        _ = tokio::time::sleep(RETRY), if pending => {}
                     }
                 }
             });

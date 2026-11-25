@@ -1478,6 +1478,92 @@ async fn presence_snapshots(session: &dim_agent_runtime::Session) -> usize {
         .count()
 }
 
+/// A child line's own history starts with TimelineTree's identity input; the
+/// environment snapshots follow it, so a line cut from `main` keeps the cache
+/// prefix of its identity first and both snapshots inside the opening.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_child_line_opens_with_its_identity_input_before_its_environment_snapshots() {
+    use dim_agent_capabilities::environment_clients::CLIENTS;
+    use dim_agent_capabilities::execution_settings::prompt::SNAPSHOT_SOURCE;
+
+    let home = std::env::temp_dir().join(format!("dim-opening-line-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&home).unwrap();
+    let server = start(&home).await;
+    let mut client = Client::new_version(&server, false, 3).await;
+    let provider = uuid::Uuid::new_v4().to_string();
+    assert_ok(&client.rpc("provider.create", json!({
+        "providerId":provider,"displayName":"Line fixture","enabled":true,
+        "connection":{"driverKind":"openai-compatible","baseUrl":"http://127.0.0.1:1/v1","auth":{"type":"anonymous"}},
+        "models":[{"modelId":"line-model","displayName":"line","status":"active",
+            "capabilities":dim_agent_types::CatalogCapabilities::with_limits(64000,2048)}]
+    })).await);
+    let created = client
+        .rpc(
+            "session.create",
+            json!({"cwd":home,"model":{"provider":provider,"modelId":"line-model"}}),
+        )
+        .await;
+    assert_ok(&created);
+    let sid = created["result"]["sessionId"].as_str().unwrap().to_owned();
+    let session = server.agent().unwrap().get_session(&sid).unwrap();
+    let at = session.sequence("main").unwrap();
+    let opened = client
+        .rpc(
+            "session.branch_create",
+            json!({"sessionId":sid,"parentBranchId":"main","at":at,"prompt":"line work"}),
+        )
+        .await;
+    assert_ok(&opened);
+    let child = opened["result"]["branch"]["branchId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let events = branch_events(&session, &child, ..).await.unwrap();
+    let seen: Vec<_> = events.iter().map(|event| event.kind.key()).collect();
+    let inputs: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.kind, EventKind::InputMessage(_)))
+        .collect();
+    let identity = inputs.first().expect("the line's first input");
+    let identity_sequence = identity.sequence;
+    let EventKind::InputMessage(identity) = &identity.kind else {
+        unreachable!("filtered input messages")
+    };
+    let dim_agent_types::InputBlock::Raw { text, .. } = &identity.blocks[0];
+    assert!(
+        text.starts_with(&format!(
+            r#"<dim-branch-line branch="{child}" parent="main" source="user">"#
+        )),
+        "the identity input is the line's first input: {seen:?}"
+    );
+    for (source, label) in [
+        (CLIENTS, "the client presence snapshot"),
+        (SNAPSHOT_SOURCE, "the execution settings snapshot"),
+    ] {
+        let marker = format!("<dim-state source=\"{source}\">");
+        let snapshot = inputs
+            .iter()
+            .find(|event| {
+                matches!(&event.kind, EventKind::InputMessage(data)
+                    if data.blocks.iter().any(|block| matches!(block,
+                        dim_agent_types::InputBlock::Raw { text, .. } if text.starts_with(&marker))))
+            })
+            .unwrap_or_else(|| panic!("{label} opens with the line: {seen:?}"));
+        assert!(
+            snapshot.sequence > identity_sequence,
+            "{label} follows the identity input: {seen:?}"
+        );
+        assert!(
+            events.iter().any(|event| matches!(&event.kind,
+                EventKind::InputApplied(data) if data.input_id == snapshot.id)),
+            "the queue applies {label} during the line's opening: {seen:?}"
+        );
+    }
+    server.shutdown();
+    server.join().await.unwrap();
+    std::fs::remove_dir_all(home).unwrap();
+}
+
 /// The environment snapshots are facts of the branch opening: `session.create`
 /// and a restore return only after both snapshots and the `input/applied`
 /// events the queue writes for them are committed and dispatched, so a
