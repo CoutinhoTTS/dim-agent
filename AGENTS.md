@@ -1,6 +1,6 @@
 # AGENTS.md
 
-This repository is Dim: a Rust coding agent (Agent v4), its App Server and the native `dimcode` CLI. See [README](README.md) and the [documentation index](docs/INDEX.md).
+This repository is Dim: a Rust coding agent (Agent v4), its App Server and the native `dimcode` CLI. See [README](README.md) and the [documentation index](docs/INDEX.md). For product-level review of Issues and PRs, see [Product Architect Guidance](PRODUCT.md).
 
 ## Working conventions
 
