@@ -24,9 +24,9 @@ dim-agent-capabilities = { path = "crates/dim-agent-capabilities" }
 dim-agent-aimux = { path = "crates/dim-agent-aimux" }
 dim-agent-attachments = { path = "crates/dim-agent-attachments" }
 dim-agent-questions = { path = "crates/dim-agent-questions" }
-aimux-core = { version = "=0.6.1" }
-aimux-provider-utils = { version = "=0.6.1", features = ["ws"] }
-aimux-providers = { version = "=0.6.1", default-features = false }
+aimux-core = { version = "=0.7.0" }
+aimux-provider-utils = { version = "=0.7.0", features = ["ws"] }
+aimux-providers = { version = "=0.7.0", default-features = false }
 dim-app-server = { path = "crates/dim-app-server" }
 dim-session-title = { path = "crates/dim-session-title" }
 dim-event-hub = { path = "crates/dim-event-hub" }
