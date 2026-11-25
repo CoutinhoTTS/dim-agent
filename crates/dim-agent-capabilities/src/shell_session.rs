@@ -716,7 +716,7 @@ impl ShellSession {
     /// result only when the owner has no terminal), and mark the reset.
     async fn handle_shell_exit(self: &Arc<Self>, generation: u64, end: Option<WaitReply>) {
         let mut settled: Vec<Settlement> = Vec::new();
-        let mut orphans: Vec<BackgroundTask> = Vec::new();
+        let mut orphans: Vec<(String, PathBuf)> = Vec::new();
         let mut cleanup_unconfirmed = false;
         let occupying;
         #[allow(
@@ -745,7 +745,11 @@ impl ShellSession {
             inner.had_reset = true;
             occupying = inner.occupying.take();
             if inner.dialect == ShellDialect::Posix {
-                orphans = inner.background.drain().map(|(_, task)| task).collect();
+                orphans = inner
+                    .background
+                    .iter()
+                    .map(|(id, task)| (id.clone(), task.output_path.clone()))
+                    .collect();
             }
         }
         if let Some(occ) = occupying {
@@ -846,11 +850,11 @@ impl ShellSession {
                 });
             }
         }
-        for task in orphans {
+        for (task_id, output_path) in orphans {
             let killed = self
                 .host
                 .kill(TaskRequest {
-                    task_id: task.task_id.clone(),
+                    task_id: task_id.clone(),
                 })
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()));
@@ -858,7 +862,7 @@ impl ShellSession {
                 .host
                 .wait(
                     WaitRequest {
-                        task_id: task.task_id.clone(),
+                        task_id: task_id.clone(),
                         timeout_ms: Some(2_000),
                     },
                     never_cancelled(),
@@ -870,11 +874,16 @@ impl ShellSession {
                 .is_none_or(|reply| reply.status == WaitStatus::Running)
             {
                 cleanup_unconfirmed = true;
-                self.inner
-                    .lock()
-                    .await
-                    .background
-                    .insert(task.task_id.clone(), task);
+                continue;
+            }
+            let removed = self
+                .inner
+                .lock()
+                .await
+                .background
+                .remove(&task_id)
+                .is_some();
+            if !removed {
                 continue;
             }
             let reply = reply.expect("checked above");
@@ -882,11 +891,11 @@ impl ShellSession {
                 let _ = self
                     .host
                     .settle(TaskRequest {
-                        task_id: task.task_id.clone(),
+                        task_id: task_id.clone(),
                     })
                     .await;
             }
-            let mut data = ended_from_reply(&task.task_id, &reply, &task.output_path);
+            let mut data = ended_from_reply(&task_id, &reply, &output_path);
             if let Err(error) = killed {
                 cleanup_unconfirmed = true;
                 if let ToolContent::Text(text) = &mut data.result.content {

@@ -1291,21 +1291,15 @@ impl HostPlatform {
                                 if record.is_terminal() {
                                     return;
                                 }
-                                let failure = kill_job(pid).await.err().map(|error| {
-                                    TaskFailure::TerminateFailed {
-                                        message: error.to_string(),
-                                    }
-                                });
+                                if kill_job(pid).await.is_err() {
+                                    return;
+                                }
                                 record.finish(Terminal {
-                                    status: if failure.is_some() {
-                                        TaskStatus::Failed
-                                    } else {
-                                        TaskStatus::Cancelled
-                                    },
+                                    status: TaskStatus::Cancelled,
                                     exit_code: None,
                                     signal: None,
                                     duration_ms: record.started.elapsed().as_millis() as u64,
-                                    failure,
+                                    failure: None,
                                     output: job.output_record().0,
                                     note: None,
                                 });
@@ -1330,17 +1324,6 @@ impl HostPlatform {
                     return Err(HostPlatformError::TaskRunning);
                 };
                 if let Err(error) = kill_job(pid).await {
-                    task.finish(Terminal {
-                        status: TaskStatus::Failed,
-                        exit_code: None,
-                        signal: None,
-                        duration_ms: task.started.elapsed().as_millis() as u64,
-                        failure: Some(TaskFailure::TerminateFailed {
-                            message: error.to_string(),
-                        }),
-                        output: job.output_record().0,
-                        note: None,
-                    });
                     return Err(HostPlatformError::Failed(error.to_string()));
                 }
                 task.finish(Terminal {
