@@ -118,17 +118,21 @@ or block a goal. Everything below keys on the mode in force — the `effective` 
 `session.tool_mode.get` reports — never on the chosen mode. The one exception is an update, which
 hands Goal the pending mode and Goal checks that it would be effective.
 
-- **Update.** The Session's tool-mode transition service (internal, in-process) carries the settle
-  handlers. Goal registers its handler in `apply`; `session.tool_mode.update` calls it with the
-  pending mode before the record write and waits. Goal settles only when that mode would be
-  effective `shell` — its entry tool is in the callable set — because a chosen `shell` without
-  `execute` runs `normal`.
+- **Service.** `ToolRegistry` provides the internal Session `ToolModeTransition` service. Its one
+  operation is `settle(mode, cause)`, with cause `update` or `registration`. Goal registers one
+  handler in `apply`; the registry removes it with the part's registration when the part unloads or
+  reloads. With no handler the call succeeds and changes nothing (no active Goal). A failure blocks
+  the record write for an update and the publish for a registration, and the caller reports it.
+- **Update.** `session.tool_mode.update` calls `settle(pending, update)` before the record write and
+  waits. Goal settles only when that mode would be effective `shell` — its entry tool is in the
+  callable set — because a chosen `shell` without `execute` runs `normal`.
 - **Registration.** When the entry tool registers and makes `shell` effective without an update,
-  `ToolRegistry` takes the Session's mode gate and calls the transition service's settle before it
-  publishes the effective mode. A held continuation released before Goal settles can
-  reach one turn under `shell`, and its `goal_update` call is refused as an unknown tool; that
-  window is accepted. A withdrawal that removes the entry tool runs `normal` and does not resume a
-  paused goal.
+  `ToolRegistry` takes the Session's mode gate and calls `settle(shell, registration)` before it
+  publishes. The handler takes the mode and cause as data; it does not read the published value. A
+  failure leaves the projection at `normal` and records a fault. A held continuation released
+  before Goal settles can reach one turn under `shell`, and its `goal_update` call is refused as an
+  unknown tool; that window is accepted. A withdrawal that removes the entry tool runs `normal`
+  and does not resume a paused goal.
 - **Settle.** The Goal Session part fans out to every branch with an active goal: it writes
   `paused` with reason `mode`, a pause input text with a `mode` phrase as an `Append` input, so it
   precedes the next turn (Goal state alone does not enter the model context), and withdraws the
@@ -449,6 +453,9 @@ force. A client that offers Goal disables `set` and `resume` while `shell` is in
 - Flow: a `resume` arriving after the update's settle and before the live publish waits on the mode
   gate and is refused because `shell` is effective; one that commits before the settle is paused by
   the settle, which withdraws its unapplied trigger and continuation.
+- Flow: a registration that makes `shell` effective calls `settle(shell, registration)` before it
+  publishes; a `resume` that commits before that call is paused and withdrawn, and one that waits on
+  the gate is refused after the publish. A settle failure keeps the projection at `normal`.
 - Flow: a goal with a queued continuation, switched to an effective `shell` before it is applied:
   the continuation is withdrawn, the goal pauses (`mode`) with its pause text, and no turn carrying
   the `goal_update` instruction starts in `shell`. Switched after it is applied, a turn that already
@@ -519,10 +526,9 @@ Requirements go to other owners:
   `shell` is in force, pause new continuations and refuse `session.goal.set` and `resume`; leave
   resumption to the operator after `shell` leaves. Its owner carries this into
   [Goal](plugins/Goal.md).
-- **ToolRegistry.** Publish the effective mode to its readers so Goal settles on a registration
-  transition; provide the Session's mode gate the update holds, the registration takes and Goal's
-  `set`/`resume` take; call the transition service on a registration before publishing. The
-  one-turn window in §2 stands.
+- **ToolRegistry.** Provide the `ToolModeTransition` service and the Session's mode gate; on a
+  registration, call `settle(shell, registration)` under the gate before publishing, and keep the
+  projection at `normal` on a failure. The one-turn window in §2 stands.
 - **PromptSources.** The environment block follows the surface: while `shell` is in force (the
   `effective` value) it drops the Windows file-encoding guidance about `read`/`edit`/`write`. Its
   owner carries this into [PromptSources](plugins/PromptSources.md).
