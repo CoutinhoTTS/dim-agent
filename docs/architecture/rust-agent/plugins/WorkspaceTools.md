@@ -262,8 +262,11 @@ is written to.
 - `write` and `edit` declare `fileWritten` with the resolved path once the
   replacement is published, including the parent-sync failure whose result warns
   that the file may have been partially written: the file changed either way.
-  They declare nothing when the call fails before the publish or is cancelled
-  before it.
+  A new file is declared only when the requested path names the inode that was
+  published; a parent renamed during the call leaves the file in the directory
+  that was opened, and that call reports a failure with no declaration. They
+  declare nothing when the call fails before the publish or is cancelled before
+  it.
 - `exec` declares `commandRun` for every command whose process started:
   - the exit status the result observed, `exitCode` for a code and `signal` for a
     name, a non-zero exit included although its result is an error;
@@ -329,6 +332,103 @@ omitted because of the size limit. `path`, `bytesWritten` and `revision` remain
 available. No partial diff or misleading complete change count is returned.
 Consumers use the recorded diff rather than rereading the current file; null
 or missing diffs do not provide a comparison.
+
+### New-file creation
+
+`write` creates a missing file, `edit` never does, so this section covers
+`write` alone. A new file's final mode, extended ACL and group match a direct
+creation in the same directory under the same umask, the target is never
+replaced, and the staged content has no directory entry or stays 0600 until
+publication. The replacement path is unchanged: a 0600 sibling that restores the
+original owner, group, mode and extended attributes before the rename.
+
+- **Linux.** The new file starts as an anonymous `O_TMPFILE` inode created
+  `0o666` in the target's parent, is written and synced there, and is published
+  with `linkat("/proc/self/fd/<fd>", AT_SYMLINK_FOLLOW)`, which never replaces an
+  existing name. The kernel settles the mode, the parent's POSIX default ACL
+  and the `setgid` group at creation, and preparation has no directory entry to
+  clean up. The parent is opened once, before anything is created, and staging,
+  the default-ACL probe, publication and the directory sync all run relative to
+  that handle; a directory that is writable and searchable but not readable
+  still admits a new file, and a parent renamed during preparation cannot move
+  the file into a directory other than the one whose metadata it inherited.
+  A filesystem without `O_TMPFILE` (`EOPNOTSUPP`, `EISDIR`, `EINVAL`, `ENOENT`,
+  or an absent `/proc/self/fd`) falls back to the named 0600 sibling. A
+  filesystem or process that cannot link the anonymous inode through
+  `/proc/self/fd` (`EOPNOTSUPP`, `EXDEV`, `EINVAL`, `ENOENT`) takes the same
+  fallback; an existing target or an access failure is still reported as one.
+  On the named path, a parent without `system.posix_acl_default` gives the
+  sibling `0o666 & ~umask` through `fchmod` immediately before the link; a
+  parent with a default ACL keeps it at 0600, because an existing inode cannot
+  merge that ACL. The umask is read from `/proc/self/status`. Where a filesystem
+  has no POSIX ACL support, an anonymous inode gets the same mode before the
+  link, because kernels before 4.19 omitted the umask strip in `vfs_tmpfile`
+  (`ac6800e279a2`). When the umask or the parent's default ACL cannot be read,
+  the new file keeps at most the owner bits its inode already has, never more
+  than 0600, rather than publishing a mode that cannot be checked; an
+  unreadable parent reaches that case because the ACL probe needs read
+  permission, which a write-only parent does not grant.
+- **macOS.** The named 0600 sibling is created in the target's parent, so XNU
+  assigns the parent's group and the inheritable file ACL at creation; an
+  `fchmod(fd, 0o666 & ~umask)` immediately before the link sets the mode without
+  changing that ACL. Each product entry, [dimcode](../../../../crates/dimcode/src/main.rs)
+  and [dim-app-server](../../../../crates/dim-app-server/src/main.rs), calls
+  `install_process_umask()` from `main` before any thread starts, because the
+  supported baseline has no `getumask`. The mode a new file gets therefore
+  depends on the process having started through one of those entries: a library
+  or test caller that reaches `write` without capturing the umask publishes new
+  files as 0600 on macOS, unlike Linux, where `write` reads the umask from
+  `/proc/self/status` for every caller. That is the documented contract, and
+  `write` neither captures nor enforces a process umask itself.
+- **Windows.** Unchanged: the private handle is installed with a hard link.
+
+A new file's success belongs to a path that names the file actually written.
+Once the entry is published, the call syncs the directory that received it and
+keeps the sync result, except that on macOS a target without a held parent
+reopens the requested parent by path, so a parent renamed after publication
+makes that sync reach another directory or fail; the named path first removes
+its staging entry and keeps the published file open. Only then does the call
+re-stat the requested path and compare its inode with the published one
+([`Target::path`](../../../../crates/dim-agent-capabilities/src/workspace_tools/files.rs)
+through `owned_temporary`), so the inode number cannot be reused by the time it
+is checked. A parent renamed during the call, including while the directory
+sync runs, leaves the file in the directory that was opened, while the
+requested path names another entry or nothing; that call returns `write_error`,
+declares no `fileWritten` effect and records no text binding for the path,
+whether the sync succeeded or failed, so a later operation never starts from a
+revision the path does not hold. A parent-sync failure is reported with its
+effect only once the check passes.
+
+Known limits:
+
+- A parent whose inheritable ACL grants another user access gives the 0600
+  macOS sibling that ACE during preparation, as the replacement path and the
+  previous behavior do; the published file's ACL still matches a direct
+  creation.
+- The fallback and macOS paths apply the mode between the `fchmod` and the link,
+  and their cleanup is the parent-directory name check-then-unlink the
+  replacement path already uses. A failed publication puts back the mode the
+  sibling started with before that cleanup, and adds a `fchmod` that failed to
+  put it back to the result, so a removal the parent refuses leaves no wider
+  access than the entry began with.
+- The Linux fallback keeps 0600 when the parent carries a POSIX default ACL.
+- On Linux, a parent that is writable and searchable but not readable keeps
+  the new file private, at most the owner bits its inode already has and never
+  more than 0600, because the default-ACL probe needs read permission and an
+  unreadable directory counts as an unknown ACL; only the parent sync then
+  reports the unreadable directory, exactly as the staging path did before this
+  change.
+- On macOS, such a parent still admits creation and publication because no
+  probe touches it, so the file takes `0o666 & ~umask` from the umask captured
+  at startup, usually 0644; only the parent sync reports the unreadable
+  directory, and a library or test caller that does not capture the umask
+  keeps 0600.
+- macOS caches the umask the process had at startup; native code that changes
+  the process umask afterwards is not reflected.
+- A parent whose inheritable ACL denies delete refuses the macOS staging
+  entry's removal, so that entry stays behind after a successful publication.
+  After a failed publication the entry has the mode it started with back, so
+  the refused removal cannot leave unpublished content wider than it began.
 
 ### Rule check
 
@@ -436,6 +536,41 @@ tool that starts writing one into `content` moves that text into this section.
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs),
 [local_execution.rs](../../../../tests/integration/tests/local_execution.rs),
 [local_product.rs](../../../../tests/integration/tests/local_product.rs).
+
+[workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
+drives new-file creation: `a_new_file_takes_the_process_umask` runs a child
+process under umasks 022, 002, 300 and 700 on both Unix platforms and checks
+that a replacement keeps its original mode, `a_new_file_takes_the_creation_mode_on_the_named_fallback` repeats the mode check over the
+named staging path on Linux, `a_new_file_in_a_write_only_parent_is_created`
+checks that a write-only parent still admits a new file and leaves it private,
+`a_new_file_takes_the_parents_acl_on_macos` covers five inheritable ACL shapes
+under the same umasks, and `a_new_file_under_a_deny_delete_acl_keeps_its_staging_entry`
+fixes the residue limit. The in-crate Linux test
+`a_new_file_stays_on_its_opened_parent_through_publication` renames the opened
+parent after preparation and checks that the file follows the directory and
+that the call reports `write_error` for the path put back at the old name, with
+no `fileWritten` effect and no text binding. The in-crate Unix test
+`a_bounded_new_file_records_no_success_after_a_parent_rename` fixes the same
+record for a target below a boundary's held parent. The named and Linux tests
+`a_named_new_file_records_no_success_after_a_parent_moves_during_sync`,
+`an_anonymous_new_file_records_no_success_after_a_parent_moves_during_sync`
+and `a_fallback_new_file_records_no_success_after_a_parent_moves_during_sync`
+move the parent at the directory-sync boundary, once with the sync succeeding
+and once with it failing, and check that neither outcome records the old path.
+The Linux tests
+`an_unsupported_anonymous_publication_falls_back_to_named_staging`,
+`a_fallback_publication_does_not_replace_an_existing_entry`,
+`an_unknown_policy_clamps_an_anonymous_new_file_to_its_owner_bits`,
+`an_unread_umask_keeps_an_anonymous_new_file_private` and
+`an_anonymous_new_file_has_no_entry_and_does_not_overwrite` need a filesystem
+with `O_TMPFILE` and fail with that reason when the test directory has none, so
+they never pass on the named fallback. The in-crate macOS tests
+`a_failed_publication_does_not_leave_a_widened_staging_entry` and
+`a_failed_publication_restores_the_staging_entrys_starting_mode` fix the
+restored starting mode under a deny-delete ACL, the second under a umask that
+narrows the staging entry below 0600. The Linux tests that need
+`setfacl`, a foreign-group `setgid` directory or a filesystem without
+`O_TMPFILE` are `#[ignore]`d manual cases, named in their run instructions.
 
 [workspace_files.rs](../../../../crates/dim-agent-capabilities/tests/workspace_files.rs)
 drives `edit` over its replacement list:

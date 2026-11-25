@@ -69,6 +69,8 @@ const BUILD_ID: Option<&str> = match option_env!("DIM_BUILD_ID") {
 const RELEASE: bool = present(option_env!("DIM_RELEASE_BUILD")).is_some();
 
 fn main() {
+    #[cfg(target_os = "macos")]
+    dim_agent_capabilities::workspace_tools::files::install_process_umask();
     // Both roles this executable serves read one installed identity: the CLI's
     // `--version`, the daemon's report `Dim` line and its MCP client
     // declaration, so a log, a report and a screenshot name one commit. The
