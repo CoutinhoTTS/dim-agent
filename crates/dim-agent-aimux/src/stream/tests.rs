@@ -2053,6 +2053,12 @@ fn a_string_code_is_a_status_only_when_it_is_exactly_three_digits_in_range() {
         );
     }
 
+    // The extraction itself yields no status outside 400 to 599, in either
+    // form.
+    for code in [json!(399), json!(600), json!("399"), json!("600")] {
+        assert_eq!(stream_event_status(&code), None, "{code}");
+    }
+
     let (kind, facts) = classified(call_failure(
         Http,
         Some(200),
