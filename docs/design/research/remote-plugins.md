@@ -178,9 +178,6 @@ Channel 的认证在连接插件里：`dial` 支持 bearer token 或客户端证
 | `sessions`、`settings`、`pluginFiles`、`sessionMetadata`、`workflowFiles`、`partRegistry` | process | 是 | 有 dispatcher |
 | `partRegistry` 的部件副本 | session/branch | 否 | 见 §1.5 |
 
-补充三点：
-
-- [当时的服务目录](https://github.com/arcships/dim/blob/842ceb5f7f3e2d5807221673e2ce07fda6c8227e/docs/architecture/rust-agent/generated/catalog.md) 的 “Crosses languages” 列描述的是被 `#[rutis::service]` 标记的 Rust 类型，不等于“会跨 link”。实际导出看 `host_key(name)` 上有没有 dispatcher。
 - `P:HostPlatform`、`P:FileStorage` 是进程级类型依赖，嵌入在 WorkspaceTools、ShellSession、Hooks、Modality 等部件里。把它们改成可跨的 wire 服务，改的是这些消费者的调用面，不只是 HostPlatform 本身。
 - 类型键是 Dim 的写法选择，不是 rutis 的限制：在 `host_key(name)` 上提供 dispatcher 之后，进程级服务就能进导出名单。所以 `hostPlatform`/`fileStorage` 的“不能跨”是接口没按跨进程设计，不是位置不对；代价是接口要改成操作 + 数据，不能保留 `ProcessTree`、`FilePath` 这类对象。实例内的名字（`timeline`、`toolRegistry`）换写法解决不了。
 
@@ -369,7 +366,7 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 
 SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件注入 `SettingsService`、`SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）。这四个服务要的操作都已有数据面：`SettingsService` 的 `read_declared`/`register_declared` 是 `settings.read`/`settings.register`，`SessionStore` 的 `metadata`/`set_title` 是 `sessionMetadata.read`/`sessionMetadata.setTitle`，`AuxiliaryModelHost::complete` 是 `auxiliaryModel.complete`（`crates/dim-session-title/src/lib.rs:286`、`:297`、`:368`、`:441`–`:450`）；`PartRegistry::register` 对应跨语言的 `partRegistry.registerDefinition`，其余注入 `sessions`、`sessionIdentity`、`sessionConfig`、`sessionLifecycle`、`sessionMethods` 本来就跨语言。所以它不需要新 dispatcher，只要把这些类型键的调用换成数据面的名字——和 GoalBranch 的 `settingsService` → `settings` 是同一个动作。
 
-上面这份注入清单对应 main `842ceb5f`。[#1305](https://github.com/arcships/dim/pull/1305) 合并后 SessionTitle 不再注入 `sessions`，改用 `Key<TreeCommands>` 并调 `TreeCommands::query`；`treeCommands` 同样是跨语言的 session 数据面（[当时的服务目录第 98 行](https://github.com/arcships/dim/blob/9d7b0f59624dab3c76d79c83fcc30a5f919df463/docs/architecture/rust-agent/generated/catalog.md#L98)），所以换成它就是换名字，结论不变。
+上面这份注入清单对应 main `842ceb5f`。[#1305](https://github.com/arcships/dim/pull/1305) 合并后 SessionTitle 不再注入 `sessions`，改用 `Key<TreeCommands>` 并调 `TreeCommands::query`；`treeCommands` 同样是跨语言的 session 数据面，所以换成它就是换名字，结论不变。
 
 SessionBroadcastEnd 也不在第一档：它只注入 `SessionIdentity`（`crates/dim-agent-capabilities/src/session_broadcast.rs:192`–`:193`），但卸载 effect 读 `identity.unloading.is_cancelled()`（`:214`），用来区分“实例空闲释放”和“业务关闭”。`SessionIdentity.unloading` 是 `#[serde(skip)]`（`crates/dim-agent-runtime/src/config.rs:118`–`:119`），`sessionIdentity.get` 只回 `{sessionId, restored}`（`:128`–`:130`）。leaf 拿不到这个 token，只能在每次卸载都发 `Closed`（空闲释放也会被当成关闭）或从不发，事件契约随部件位置改变。所以在 `sessionIdentity` 或 `sessionLifecycle` 上加一个 idle release/close 的数据面之前，它留在宿主。
 
