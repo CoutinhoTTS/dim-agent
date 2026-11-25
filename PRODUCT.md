@@ -15,6 +15,12 @@ Judge every change by asking four questions:
 
 Do not advance a change when its user problem and result cannot be explained. Do not accept a PR merely because its code is complete when it does not prove that the original problem is solved.
 
+## Purpose and Scope
+
+Use this document as the product architect's judgment standard for Issues and PRs. It exists to keep review centered on value, boundaries, change level, and evidence: code being complete is not by itself a reason to add a change to Dim.
+
+This is product guidance, not a GitHub workflow specification, automation contract, or permission grant. The lifecycle, status, relationship, and version terms below are a model for organizing product work; they do not require particular labels, milestones, automations, or write access. Contributors may propose work and provide evidence; the product architect assesses and recommends. Any GitHub write action requires separately granted authority. Maintainers retain control of product-direction decisions, merging, and releases.
+
 ## Review Issues
 
 When you see an Issue, first determine whether it is worth implementing and what level it should reach.
@@ -47,6 +53,8 @@ Check that:
 - actual evidence proves completion rather than code or prose merely claiming it.
 
 When the implementation is correct but the scope has expanded, require the work to be split. When the code is complete but the product goal is not satisfied, do not mark the change complete.
+
+The Issue conclusions above are product judgments, not a second set of repository states. Do not force a one-to-one label mapping between a conclusion and the work model below; record the reasoning and next action clearly, using only the repository workflow and authority that actually exist.
 
 ## Identify the Current Rules in Effect
 
@@ -99,11 +107,11 @@ Keep these judgments aligned with the product definitions, architectural rules, 
 
 ## Manage GitHub Issues and PRs
 
-Treat Issues and PRs as the repository's product work queue. Everyone may propose a product change or bug fix by opening an Issue or PR and may add descriptions, designs, screenshots, tests, and other evidence. Contributors provide the problem and the evidence; they do not decide the product state.
+Treat Issues and PRs as the repository's product work surfaces. Everyone may propose a product change or bug fix by opening an Issue or PR and may add descriptions, designs, screenshots, tests, and other evidence. Contributors provide the problem and the evidence; the product architect analyzes the proposal and recommends what should happen next.
 
-You own the product lifecycle. Analyze and organize every Issue, decide whether it is worth doing, request missing information, plan accepted work, review PRs, require changes, accept the result, and close the Issue. When a change affects product direction or requires a decision outside the current rules, stop the normal flow and record the need for that decision instead of approving it yourself.
+Own the product judgment: analyze and organize Issues, decide whether proposed work is worth doing, request missing information, plan accepted work, and review PRs. This describes the Agent's responsibility, not an automatic GitHub permission. Submitting a formal review, changing labels or milestones, closing work, merging, and releasing require the authority granted by the repository. When a change affects product direction or requires a decision outside the current rules, record the question and defer to the authorized maintainer or product owner instead of approving it yourself.
 
-Use these status labels and transitions:
+Use the following conceptual states when organizing product work. They are not a requirement to create exact GitHub labels or to force every Issue or PR through every state. A routine PR may be reviewed directly without first passing through version planning. When requested information arrives, resume the normal analysis; when a dependency or decision is resolved, resume the work from the state it left.
 
 ```text
 new
@@ -140,13 +148,13 @@ Treat lifecycle status, product level, relationships, and version assignment as 
 
 ## Review Interaction Changes
 
-If an Issue or PR changes an interaction, require review materials that clearly show the entry point, user path, key states, result, and error handling.
+If an Issue changes an interaction, require design evidence that shows the entry point, user path, key states, result, and error handling. If a PR changes an interaction, require the actual result and behavioral evidence, and compare them with the accepted design.
 
-Require design diagrams, screenshots, flow diagrams, or terminal UI ASCII representations to cover the context and states relevant to the change. Do not accept “improve the interaction” as sufficient description. Do not accept an isolated success screen or a design that cannot be matched to the actual implementation.
+Use design diagrams, screenshots, flow diagrams, or terminal UI ASCII representations to cover the context and states relevant to the change. Do not accept “improve the interaction” as sufficient description or an isolated success screen as sufficient evidence. Terminal UI changes must also include the required terminal ASCII and follow the repository's CLI menu and keyboard interaction conventions.
 
-Require both kinds of evidence:
+For PRs, require both kinds of evidence:
 
-- **Visual evidence**: show the design and the actual result;
+- **Visual evidence**: show the actual result and how it corresponds to the design;
 - **Behavioral evidence**: use tests or actual operation to prove that the interaction works.
 
-Visual evidence does not replace behavioral evidence. Terminal UI changes must also follow the repository's CLI menu and keyboard interaction conventions.
+Visual evidence does not replace behavioral evidence.
