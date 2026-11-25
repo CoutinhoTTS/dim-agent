@@ -3625,13 +3625,12 @@ async fn observe_job_release(
     job: Arc<shell::ShellJob>,
     pid: u32,
     shutdown: CancellationToken,
-    mut tree: Option<Vec<u32>>,
+    tree: Option<Vec<u32>>,
 ) {
     loop {
         if record.is_terminal() {
             return;
         }
-        tree = tree.or_else(|| job_tree(pid));
         if job_released(pid, tree.as_deref()).await {
             record.finish(Terminal {
                 status: TaskStatus::Cancelled,
