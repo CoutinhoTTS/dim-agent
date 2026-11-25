@@ -657,20 +657,16 @@ fn classify(failure: &AiMuxError, locally_refused: bool) -> (HostErrorKind, Mode
                 (!value.is_empty()).then(|| value.to_ascii_lowercase())
             };
             let origin = detail.origin;
-            let (code, code_status) = match field("code") {
-                Some(code) => (normalize(code), None),
-                // A stream event may report the failing status as a JSON
-                // integer. Only this value is a status: a numeric `type` or
-                // provider code is an opaque label.
-                None if origin == ApiCallErrorOrigin::StreamEvent => {
-                    let status = view
-                        .and_then(|value| value.get("code"))
-                        .and_then(Value::as_u64)
-                        .filter(|code| (400..=599).contains(code))
-                        .and_then(|code| u16::try_from(code).ok());
-                    (status.map(|code| code.to_string()), status)
-                }
-                None => (None, None),
+            let raw_code = view.and_then(|value| value.get("code"));
+            // A stream event may report the failing status as a JSON integer
+            // or as an exactly three-digit decimal string. Only this value is
+            // a status: a numeric `type` or provider code is an opaque label.
+            let code_status = (origin == ApiCallErrorOrigin::StreamEvent)
+                .then(|| raw_code.and_then(stream_event_status))
+                .flatten();
+            let code = match raw_code {
+                Some(Value::String(text)) => normalize(text),
+                _ => code_status.map(|code| code.to_string()),
             };
             let error_type = field("type").and_then(normalize);
             let provider_code = detail
@@ -772,6 +768,21 @@ fn classify(failure: &AiMuxError, locally_refused: bool) -> (HostErrorKind, Mode
             (classification, facts)
         }
     }
+}
+
+/// The status a stream event reports as its own `code`: a JSON integer or an
+/// exactly three-digit decimal string, inside 400 to 599.
+fn stream_event_status(code: &Value) -> Option<u16> {
+    let status = match code {
+        Value::Number(_) => code.as_u64().and_then(|code| u16::try_from(code).ok()),
+        Value::String(text)
+            if text.len() == 3 && text.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            text.parse::<u16>().ok()
+        }
+        _ => None,
+    }?;
+    (400..=599).contains(&status).then_some(status)
 }
 
 /// The reason of a failure with no provider boundary. A JSON parse error
