@@ -2906,7 +2906,8 @@ mod windows {
             if Process32FirstW(snapshot, &mut entry) == 0 {
                 let error = GetLastError();
                 CloseHandle(snapshot);
-                return (error == ERROR_NO_MORE_FILES).then(Vec::new);
+                let _ = error;
+                return None;
             }
             loop {
                 parents.push((entry.th32ProcessID, entry.th32ParentProcessID));
