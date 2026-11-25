@@ -106,10 +106,12 @@ receipt awaits no I/O of its own.
 
 A child line's own history starts with TimelineTree's identity input, which the
 tree writes after the branch opening seals. The receipt therefore appends
-nothing for such a line, whose `branch/start` names the parent it was cut
-from: the input that opens it stays its first input, and the first loop pass
-after `BranchLifecycle::activated()` appends the snapshot, so it follows that
-input.
+nothing for such a line, whose opening fact names the parent it was cut from:
+the receipt reads the branch's last `branch/start` or `branch/resume`, so it
+decides the same way whether or not it mounted before that event was
+dispatched. The input that opens the line stays its first input, and the first
+loop pass after `BranchLifecycle::activated()` appends the snapshot, so it
+follows that input.
 
 A branch whose opening sealed before the part mounted, such as a `Connection`
 reload onto a live branch, registers nothing either; the first loop pass after
@@ -117,12 +119,11 @@ reload onto a live branch, registers nothing either; the first loop pass after
 
 A receipt belongs to the generation that registered it. A generation that
 unloads while the opening still collects receipts — a reload onto a loading
-branch — leaves its receipt in the opening, and that receipt stopped observing
-`branch/start` with its listener, so it cannot learn that the line began under
-a parent. The receipt therefore writes nothing once its part's generation is
-cancelled: the replacement generation registers its own receipt and listener,
-and the line gets the snapshot from that generation's first pass after
-activation, after its identity input.
+branch — leaves its receipt in the opening; the receipt still reads the
+branch's opening fact, so a child line's identity input stays first, and it
+appends nothing once its part's generation is cancelled. The replacement
+generation registers its own receipt, and the line gets the snapshot from that
+generation's first pass after activation, after its identity input.
 
 A snapshot appended after activation — a child line's first pass, a reloaded
 part's first pass, or a `ClientsChanged` wake — is published before the branch
@@ -189,7 +190,8 @@ The in-memory presence read is infallible; it returns an empty list for an unkno
 | `SessionClientsHost` | Read the current connections |
 | The branch's input path | Append the snapshot |
 | `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes |
-| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, and `branch/start` with a parent tells a line whose identity input opens it after the opening |
+| `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot |
+| `Timeline` | Append the snapshot; the branch's opening fact tells a child line whose identity input opens it after the opening |
 | Process bus (`ClientsChanged`) | Wake on a connection change |
 
 The process `sessionClientsHost` is a data face with the request and reply defined in [service faces §4.9](../service-faces.md#49-旧主机端口credentialvariableshost-等六个). `sessionIdentity`, `timeline` and `branchLifecycle` are also data faces. This Rust projection still uses owner methods outside the dispatched operations and is not a leaf-ready foreign part.
@@ -230,6 +232,7 @@ None to the runtime or rutis.
 | A temporary route adopted while a snapshot the part appended after activation is still dispatched | Refused with `provider_route_conflict`; the same call is adopted once the branch dispatches the snapshot and its `input/applied`; the caller retries or waits for `session.idle` |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
 | The part is replaced while its line loads | The retired receipt writes nothing; the replacement appends the line's one presence snapshot after its identity input |
+| A part mounts after the line's `branch/start` was dispatched | It decides from the line's opening fact: the receipt writes nothing ahead of the identity input, and the snapshot follows once the line activates |
 | Two TUI leaves | Two `tui` entries, not one count |
 | A TUI leaf and its protocol connection | One `tui` entry; no duplicate `cli` entry |
 | Two distinct connections with the same label | Two entries; labels are not identities |

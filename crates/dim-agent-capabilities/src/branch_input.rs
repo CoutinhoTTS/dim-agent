@@ -1,11 +1,13 @@
 //! Automatic input a branch capability appends to its own branch. The
 //! producer guarantees the input is valid; whether it starts a turn is
 //! Loop's decision at dispatch.
-use dim_agent_runtime::{AgentError, Dispatcher, Result, Timeline};
+use dim_agent_runtime::{
+    AgentError, Dispatcher, QueryFilter, QueryOperand, QueryOutput, QueryPage, QueryPick,
+    QuerySelect, QuerySpec, QueryValue, Result, Timeline, TimelineQuery, TimelineQueryScope,
+};
 use dim_agent_types::{AgentEvent, EventDraft, EventKind, InputMessageData};
-use rutis::Ctx;
+use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Appends `data` with `tags` to the capability's own Timeline, at load or
 /// from its tasks afterwards.
@@ -52,18 +54,61 @@ pub(crate) async fn append_own_dispatched(
 /// line's identity input after the opening seals, so it is the line's first
 /// input and a capability's opening receipt appends nothing ahead of it. The
 /// published branch's first pass appends there instead.
-pub(crate) fn opens_with_identity_input(
-    dispatcher: &Dispatcher,
-    ctx: &Ctx,
-    name: &str,
-) -> Result<Arc<AtomicBool>> {
-    let opened = Arc::new(AtomicBool::new(false));
-    let seen = opened.clone();
-    dispatcher.subscribe(ctx, name, &["branch/start"], move |event| {
-        if matches!(&event.kind, EventKind::BranchStart(data) if data.parent.is_some()) {
-            seen.store(true, Ordering::Release);
+///
+/// The answer is this branch's own opening fact, the last `branch/start` or
+/// `branch/resume` in its Timeline, so a receipt reads it when it writes and
+/// does not depend on subscribing before the event was dispatched. A resumed
+/// line has no identity input to wait for; only a start that names a parent
+/// opens with one. A read that fails is logged and answered with `true`: the
+/// receipt leaves its input to the published branch rather than failing the
+/// opening on a fact it cannot read.
+pub(crate) async fn opens_with_identity_input(timeline: &Timeline) -> bool {
+    match last_opening(timeline).await {
+        Ok(opens) => opens,
+        Err(error) => {
+            tracing::warn!(%error, "the line's opening was not read");
+            true
         }
-        Box::pin(async { Ok(()) })
-    })?;
-    Ok(opened)
+    }
+}
+
+async fn last_opening(timeline: &Timeline) -> Result<bool> {
+    let reply = timeline
+        .query(TimelineQuery {
+            scope: TimelineQueryScope::Branch,
+            from: None,
+            through: Some(timeline.committed()),
+            include_publishing: false,
+            query: QuerySpec {
+                filter: Some(QueryFilter::In {
+                    value: QueryOperand::Field {
+                        path: "kind".into(),
+                    },
+                    values: vec!["branch/start".into(), "branch/resume".into()],
+                }),
+                select: QuerySelect::Fields {
+                    fields: vec!["kind".into(), "data.parent".into()],
+                },
+                group_by: Vec::new(),
+                pick: Some(QueryPick::Last),
+                order_by: Vec::new(),
+            },
+            page: Some(QueryPage {
+                limit: NonZeroU64::MIN,
+                after: None,
+            }),
+        })
+        .await?;
+    let QueryOutput::Rows { rows } = reply.result else {
+        unreachable!("the opening event selects fields")
+    };
+    Ok(rows.first().is_some_and(|row| {
+        matches!(row.values.as_slice(),
+            [
+                QueryValue::Value {
+                    value: serde_json::Value::String(kind),
+                },
+                parent,
+            ] if kind == "branch/start" && !matches!(parent, QueryValue::Missing))
+    }))
 }

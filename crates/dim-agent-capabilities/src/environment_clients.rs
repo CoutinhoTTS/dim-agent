@@ -15,7 +15,6 @@ use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
 use rutis::{Ctx, Error};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use tokio::sync::Notify;
 use tokio_util::task::TaskTracker;
 
@@ -261,8 +260,6 @@ impl DynPlugin for ClientsBranchPlugin {
             let lifecycle = ctx.cancellation_token();
             let tasks = TaskTracker::new();
             let last = Arc::new(std::sync::Mutex::new(None));
-            let identity_input =
-                opens_with_identity_input(&dispatcher, ctx, "EnvironmentClientsOpening")?;
             if phase.phase() == BranchPhase::Loading {
                 let clients = clients.clone();
                 let timeline = timeline.clone();
@@ -270,18 +267,16 @@ impl DynPlugin for ClientsBranchPlugin {
                 let session = session.clone();
                 let lifecycle = lifecycle.clone();
                 let last = last.clone();
-                let identity_input = identity_input.clone();
                 let registered = phase.register_opening(Arc::new(move || {
                     let (clients, timeline, dispatcher) =
                         (clients.clone(), timeline.clone(), dispatcher.clone());
                     let (session, last) = (session.clone(), last.clone());
                     let lifecycle = lifecycle.clone();
-                    let identity_input = identity_input.clone();
                     Box::pin(async move {
-                        // A retired part's receipt stays registered while its
-                        // listener is gone, so it can no longer learn that this
-                        // line began under a parent. Only the live part writes.
-                        if lifecycle.is_cancelled() || identity_input.load(Ordering::Acquire) {
+                        // A retired part's receipt stays registered while the
+                        // opening still collects receipts: only the live part
+                        // writes.
+                        if lifecycle.is_cancelled() || opens_with_identity_input(&timeline).await {
                             return Ok(());
                         }
                         let current = snapshot(

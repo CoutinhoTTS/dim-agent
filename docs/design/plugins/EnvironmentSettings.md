@@ -83,10 +83,12 @@ it.
 
 A child line's own history starts with TimelineTree's identity input, which the
 tree writes after the branch opening seals. The receipt therefore appends
-nothing for such a line, whose `branch/start` names the parent it was cut
-from: the input that opens it stays its first input, and the first loop pass
-after `BranchLifecycle::activated()` reads the value and appends the snapshot,
-so it follows that input.
+nothing for such a line, whose opening fact names the parent it was cut from:
+the receipt reads the branch's last `branch/start` or `branch/resume`, so it
+decides the same way whether or not it mounted before that event was
+dispatched. The input that opens the line stays its first input, and the first
+loop pass after `BranchLifecycle::activated()` reads the value and appends the
+snapshot, so it follows that input.
 
 A branch whose opening sealed before the part mounted, such as an
 `ExecutionSettings` reload onto a live branch, registers nothing either; the
@@ -128,7 +130,7 @@ The snapshot uses the existing `input/message` event; no settings event type is 
 | The setting module is absent | No snapshot; no error |
 | The value read fails | Keep earlier snapshots; log; append nothing |
 | The opening read or append fails | Log; keep `pending`; the published branch's first loop pass retries |
-| The opening read does not answer within the part's retry interval | Log; keep `pending`; the published branch's first loop pass reads and appends it |
+| The opening read does not answer within half the branch's opening budget, or within the part's retry interval when that is shorter | Log; keep `pending`; the published branch's first loop pass reads and appends it |
 | The value is unchanged | Append nothing |
 | A non-model field changes | Append nothing |
 | The branch is closing | Append nothing |
@@ -182,6 +184,7 @@ None to the runtime or rutis.
 | --- | --- |
 | Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active, so `session.create` and a restore return with both |
 | A child line opens | The identity input is the line's first input; the snapshot follows it once the line is published |
+| A part mounts after the line's `branch/start` was dispatched | It decides from the line's opening fact: the receipt writes nothing ahead of the identity input, and the snapshot follows once the line activates |
 | The settings source does not answer during the opening | Log; the branch opens; the first loop pass after activation reads and appends one snapshot |
 | The branch's opening budget is shorter than the retry interval | The read is bounded by half that budget; the branch opens and the first loop pass appends one snapshot once the source answers |
 | A temporary route adopted with no `session.idle` after create or restore | The opening read answered: adopted; the opening left nothing undispatched |
