@@ -711,9 +711,9 @@ impl ShellSession {
         }
     }
 
-    /// The shell of `generation` died: note the exit, settle the occupying
-    /// task and the POSIX background jobs as failed, and mark the reset for
-    /// the next call.
+    /// The shell of `generation` died: note the exit, settle each child from
+    /// the owner terminal when it is available (falling back to the reset
+    /// result only when the owner has no terminal), and mark the reset.
     async fn handle_shell_exit(self: &Arc<Self>, generation: u64, end: Option<WaitReply>) {
         let mut settled: Vec<Settlement> = Vec::new();
         let mut orphans: Vec<BackgroundTask> = Vec::new();
@@ -758,11 +758,25 @@ impl ShellSession {
                 .await
                 .ok();
             let preview = page.map(|page| page.text).unwrap_or_default();
-            let data = ExecEndedData {
-                task_id: occ.task_id.clone(),
-                status: ExecStatus::Failed,
-                result: reset_result(&occ.task_id, &occ.output_path, &preview),
-            };
+            let reply = self
+                .host
+                .wait(
+                    WaitRequest {
+                        task_id: occ.task_id.clone(),
+                        timeout_ms: Some(2_000),
+                    },
+                    never_cancelled(),
+                )
+                .await
+                .ok();
+            let data = reply.map_or_else(
+                || ExecEndedData {
+                    task_id: occ.task_id.clone(),
+                    status: ExecStatus::Failed,
+                    result: reset_result(&occ.task_id, &occ.output_path, &preview),
+                },
+                |reply| ended_from_reply(&occ.task_id, &reply, &occ.output_path),
+            );
             {
                 let mut inner = self.inner.lock().await;
                 inner.occupy_tail = Some(preview);
@@ -787,30 +801,43 @@ impl ShellSession {
                 })
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()));
-            let _ = self
+            let reply = self
                 .host
-                .settle(TaskRequest {
-                    task_id: task.task_id.clone(),
-                })
-                .await;
+                .wait(
+                    WaitRequest {
+                        task_id: task.task_id.clone(),
+                        timeout_ms: Some(2_000),
+                    },
+                    never_cancelled(),
+                )
+                .await
+                .ok();
+            if killed.is_ok() {
+                let _ = self
+                    .host
+                    .settle(TaskRequest {
+                        task_id: task.task_id.clone(),
+                    })
+                    .await;
+            }
             let preview = file_tail(&task.output_path, OUTPUT_LIMIT);
-            let mut result = reset_result(&task.task_id, &task.output_path, &preview);
+            let mut data = reply.map_or_else(
+                || ExecEndedData {
+                    task_id: task.task_id.clone(),
+                    status: ExecStatus::Failed,
+                    result: reset_result(&task.task_id, &task.output_path, &preview),
+                },
+                |reply| ended_from_reply(&task.task_id, &reply, &task.output_path),
+            );
             if let Err(error) = killed {
-                if let ToolContent::Text(text) = &mut result.content {
+                if let ToolContent::Text(text) = &mut data.result.content {
                     text.push_str(&format!("\nJob could not be terminated: {error}"));
                 }
-                if let Some(fields) = result.structured_content.as_mut() {
+                if let Some(fields) = data.result.structured_content.as_mut() {
                     fields.insert("code".into(), "exec_terminate_failed".into());
                 }
             }
-            settled.push(Settlement {
-                data: ExecEndedData {
-                    task_id: task.task_id.clone(),
-                    status: ExecStatus::Failed,
-                    result,
-                },
-                ended: None,
-            });
+            settled.push(Settlement { data, ended: None });
         }
         if let Some(task_id) = shell_task {
             self.stop_shell(&task_id).await;
