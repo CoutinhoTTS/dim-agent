@@ -3625,12 +3625,14 @@ async fn observe_job_release(
     job: Arc<shell::ShellJob>,
     pid: u32,
     shutdown: CancellationToken,
-    tree: Option<Vec<u32>>,
+    mut tree: Option<Vec<u32>>,
 ) {
+    let started = tokio::time::Instant::now();
     loop {
         if record.is_terminal() {
             return;
         }
+        tree = tree.or_else(|| job_tree(pid));
         if job_released(pid, tree.as_deref()).await {
             record.finish(Terminal {
                 status: TaskStatus::Cancelled,
@@ -3639,6 +3641,20 @@ async fn observe_job_release(
                 duration_ms: record.started.elapsed().as_millis() as u64,
                 failure: Some(TaskFailure::TerminateFailed {
                     message: "job release was not confirmed at stop; it ended later".into(),
+                }),
+                output: job.output_record().0,
+                note: None,
+            });
+            return;
+        }
+        if tree.is_none() && started.elapsed() >= Duration::from_secs(30) {
+            record.finish(Terminal {
+                status: TaskStatus::Failed,
+                exit_code: None,
+                signal: None,
+                duration_ms: record.started.elapsed().as_millis() as u64,
+                failure: Some(TaskFailure::TerminateFailed {
+                    message: "job release could not be confirmed".into(),
                 }),
                 output: job.output_record().0,
                 note: None,
