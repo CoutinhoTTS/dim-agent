@@ -107,6 +107,9 @@ pub enum Stage {
     /// After the closing pause read the fold it states and before it composes
     /// and appends that record.
     Closing,
+    /// After a state record reached its writer and before it took the write
+    /// guard.
+    Writer,
     /// After the state record writer took the write guard and settled the
     /// decisions, before it composes the record it answers `after` with.
     Record,

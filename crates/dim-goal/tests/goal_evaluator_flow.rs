@@ -991,6 +991,76 @@ async fn an_evaluated_pause_does_not_answer_a_later_interrupt() {
     env.close().await;
 }
 
+/// An ordinary Append that commits between the conclusion's decision and its
+/// record leaves the pause unwritten, and the conclusion the caller still owns
+/// states its continuation (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_appended_note_before_the_evaluated_pause_returns_the_conclusion_to_its_continuation() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let (evaluation, create) = completion_requested_with(&env, Some(1)).await;
+
+    // The limit is reached, so the conclusion decides a pause. Its record waits
+    // for the writer before it takes the write guard.
+    let mut writer = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Writer,
+        evaluation,
+        None,
+    );
+    let conclusion = write_conclusion(
+        &env,
+        &create.branch,
+        evaluation,
+        "continue",
+        "CONTINUE:\n- one test fails: <output>",
+    );
+    let written = tokio::time::timeout(Duration::from_secs(15), writer.arrived())
+        .await
+        .expect("the conclusion writes its record");
+    assert_eq!(
+        written, conclusion,
+        "the conclusion at {conclusion} writes its record"
+    );
+
+    // An ordinary Append commits before the record takes the guard: the fold
+    // resets the continuation count, so no limit pause is due.
+    let note = env.emit("main", user("a note", InputMode::Append));
+    env.dispatched("main", note.sequence).await;
+    let mut pause = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Append,
+        conclusion,
+        Some(conclusion),
+    );
+    writer.release();
+
+    let recorded = tokio::time::timeout(Duration::from_millis(750), pause.arrived())
+        .await
+        .is_ok();
+    assert!(
+        !recorded,
+        "the Append at {} takes the limit pause back, but the record at {conclusion} reached its append",
+        note.sequence
+    );
+    let continuation = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="continuation" count="1" limit="1" after="{evaluation}" evaluation="{evaluation}""#
+            ),
+        )
+        .await;
+    assert_eq!(
+        continuation.text,
+        texts::evaluated_continuation("main", 1, Some(1), 0, evaluation, evaluation),
+        "the conclusion at {conclusion} continues the goal the Append left running"
+    );
+    env.close().await;
+}
+
 #[tokio::test]
 async fn pursuit_13_e3_an_outside_end_before_the_conclusion_fails_the_evaluation() {
     let env = Env::start().await;

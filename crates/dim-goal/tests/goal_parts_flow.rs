@@ -1244,6 +1244,178 @@ async fn a_failed_change_takes_up_no_interrupt_it_deferred() {
     env.close().await;
 }
 
+/// A state record queued behind a change whose append fails returns before the
+/// settlement that change took, so it takes up no interrupt: nothing new moved
+/// the fold after the failed write, and the pause the interrupt states waits
+/// for a later settlement (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_queued_record_takes_up_no_interrupt_a_failed_change_deferred() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    // The second turn end decides the limit pause, and its record waits for the
+    // writer before it takes the write guard: the change below writes first and
+    // the record queues behind it.
+    let mut writer = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Writer,
+        0,
+        None,
+    );
+    let end = env.tool_turn("main", &[&first]);
+    let written = tokio::time::timeout(std::time::Duration::from_secs(15), writer.arrived())
+        .await
+        .expect("the turn end writes its record");
+    assert_eq!(
+        written, end.sequence,
+        "the turn end at {} writes its record",
+        end.sequence
+    );
+
+    // The pause's writer holds the guard where it settled the decisions, and an
+    // operator interrupt commits in that window: it supersedes the pause the
+    // turn end decided and waits in the fold, because the settlement holds task
+    // admission.
+    let mut change = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Change,
+        0,
+        None,
+    );
+    let (pause, taken) = tokio::join!(env.goal("pause", json!({})), async {
+        tokio::time::timeout(std::time::Duration::from_secs(15), change.arrived())
+            .await
+            .expect("the change takes the guard and settles the decisions");
+        let interrupt = env.interrupt("main");
+        env.dispatched("main", interrupt.sequence).await;
+        let mut again = dim_goal::testing::hold_stage(
+            env.session_id(),
+            "main",
+            dim_goal::testing::Stage::Record,
+            interrupt.sequence,
+            Some(interrupt.sequence),
+        );
+
+        // The change's append fails, so it states nothing and leaves the
+        // interrupt its settlement deferred with the fold.
+        let failure = env.probe.fail_next_state();
+        change.release();
+        failure.await.expect("the writer refuses the pause");
+
+        // The queued record now takes the guard it waited for. The bound only
+        // keeps the case from waiting forever: reaching the hold is what it must
+        // not do.
+        writer.release();
+        tokio::time::timeout(std::time::Duration::from_millis(750), again.arrived())
+            .await
+            .ok()
+    });
+    assert!(
+        pause.is_err(),
+        "the change whose state record was refused reports the failure: {pause:?}"
+    );
+    assert_eq!(
+        env.probe.failed_states(),
+        1,
+        "the writer's own check refuses the pause"
+    );
+    assert!(
+        taken.is_none(),
+        "a queued record takes up the interrupt a failed change deferred, yet it answered {taken:?}"
+    );
+    let pauses: Vec<String> = env
+        .writes("main")
+        .await
+        .iter()
+        .filter(|block| block.marker.contains(r#"status="paused""#))
+        .map(|block| format!("{} at {}", block.marker, block.sequence))
+        .collect();
+    assert!(
+        pauses.is_empty(),
+        "a failed change and the record queued behind it state no pause, yet they wrote {pauses:?}"
+    );
+    env.close().await;
+}
+
+/// An ordinary Append that commits between the turn-end decision and the
+/// record's own cutoff leaves the pause unwritten, and the turn end the caller
+/// still owns states its continuation (#2119).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_appended_note_before_the_pause_record_returns_the_turn_end_to_its_continuation() {
+    let env = Env::start().await;
+    env.set_limit(1);
+    let set = env.set("make the tests pass").await;
+    env.turn("main", &[&set]);
+    let first = env
+        .wait_for("main", r#"kind="continuation" count="1""#)
+        .await;
+
+    // The second turn end decides the limit pause, and its record waits for the
+    // writer before it takes the write guard.
+    let mut writer = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Writer,
+        0,
+        None,
+    );
+    let end = env.tool_turn("main", &[&first]);
+    let written = tokio::time::timeout(std::time::Duration::from_secs(15), writer.arrived())
+        .await
+        .expect("the turn end writes its record");
+    assert_eq!(
+        written, end.sequence,
+        "the turn end at {} writes its record",
+        end.sequence
+    );
+
+    // An ordinary Append commits before the record takes the guard: the fold
+    // resets the continuation count without a driving input, so no limit pause
+    // is due.
+    let note = env.emit("main", user("a note", InputMode::Append));
+    env.dispatched("main", note.sequence).await;
+    let mut pause = dim_goal::testing::hold_stage(
+        env.session_id(),
+        "main",
+        dim_goal::testing::Stage::Append,
+        end.sequence,
+        Some(end.sequence),
+    );
+    writer.release();
+
+    let recorded = tokio::time::timeout(std::time::Duration::from_millis(750), pause.arrived())
+        .await
+        .is_ok();
+    assert!(
+        !recorded,
+        "the Append at {} takes the limit pause back, but the record at {} reached its append",
+        note.sequence, end.sequence
+    );
+    let continuation = env
+        .wait_for(
+            "main",
+            &format!(
+                r#"kind="continuation" count="1" limit="1" after="{}""#,
+                end.sequence
+            ),
+        )
+        .await;
+    assert_eq!(
+        continuation.text,
+        texts::continuation("main", 1, Some(1), 0, end.sequence),
+        "the turn end at {} continues the goal the Append left running",
+        end.sequence
+    );
+    env.close().await;
+}
+
 /// The pause a turn end decides is stated with the reason the fold gives at
 /// the record's own cutoff: an ordinary Append resets the continuation count
 /// without opening a turn, so the limit pause is no longer the answer (#2119).

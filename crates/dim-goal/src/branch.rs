@@ -423,10 +423,16 @@ struct State {
 }
 
 impl State {
+    /// Whether a newer state statement already answered `after`: a change that
+    /// folded after it, a newer record, or this record's own earlier pass.
+    fn answered(&self, after: u64) -> bool {
+        self.fold.last_change > after || after < self.recorded || self.written.contains(&after)
+    }
+
     /// Whether the record answering `after` with `answers` must not be written:
     /// the fold has moved past it.
     fn stale(&self, after: u64, answers: Answers) -> bool {
-        if self.fold.last_change > after || after < self.recorded || self.written.contains(&after) {
+        if self.answered(after) {
             return true;
         }
         match answers {
@@ -599,20 +605,16 @@ impl Owner {
     async fn change_inner(self: &Arc<Self>, change: Change) -> Result<u64, AgentError> {
         self.await_ready().await?;
         let _write = self.write_guard().await?;
-        let settled = self.settle_decisions().await;
-        if let Err(error) = settled {
-            self.resume_settlement();
-            return Err(error);
-        }
-        #[cfg(feature = "testing")]
-        crate::testing::stage_held(
-            &self.session_id,
-            &self.branch_id,
-            crate::testing::Stage::Change,
-            self.timeline.committed(),
-        )
-        .await;
         let result = async {
+            self.settle_decisions().await?;
+            #[cfg(feature = "testing")]
+            crate::testing::stage_held(
+                &self.session_id,
+                &self.branch_id,
+                crate::testing::Stage::Change,
+                self.timeline.committed(),
+            )
+            .await;
             if matches!(change, Change::Set { .. } | Change::Resume) {
                 self.load_current_work().await?;
             }
@@ -1446,40 +1448,26 @@ impl Owner {
                         Answers::Fact,
                     )
                     .await
+                    .map(|_| ())
             })
         });
     }
 
+    /// States the record and answers whether it ends the decision the caller
+    /// holds: `false` means the fold no longer asked for it and the caller still
+    /// decides the fact it named, and `true` means the record wrote the state, a
+    /// newer state statement already answered the fact, or the branch took the
+    /// decision the superseding fact wants (#2119).
     async fn record(
         self: &Arc<Self>,
         after: u64,
         status: Option<text::State>,
         answers: Answers,
-    ) -> Result<(), AgentError> {
+    ) -> Result<bool, AgentError> {
         let (reply, result) = tokio::sync::oneshot::channel();
         let owner = self.clone();
         self.tasks.spawn(async move {
             let result = owner.record_inner(after, status, answers).await;
-            match &result {
-                Ok(answered) => {
-                    owner.resume_settlement();
-                    // A record the fold no longer asked for leaves the goal running
-                    // with a decision still due: a fact that committed while the
-                    // settlement held the decisions asked for one, and nothing else
-                    // takes it again.
-                    if !answered && owner.write_status.borrow().is_ok() {
-                        owner.resume_decisions();
-                    }
-                }
-                // A write that failed states nothing, so it leaves the interrupt
-                // its settlement deferred with the fold for a later settlement;
-                // the decisions that settlement cancelled decide nothing after
-                // this release, because that settlement waited for every one of
-                // them before it wrote (Pursuit §4.1, §13 E2, #2119).
-                Err(_) => {
-                    owner.release_settlement();
-                }
-            }
             #[cfg(feature = "testing")]
             crate::testing::stage_held(
                 &owner.session_id,
@@ -1488,7 +1476,7 @@ impl Owner {
                 after,
             )
             .await;
-            if let Err(Err(error)) = reply.send(result.map(|_| ())) {
+            if let Err(Err(error)) = reply.send(result) {
                 tracing::warn!(%error, "Goal terminal state could not be saved");
                 let _ = owner.write_status.send_replace(Err(error));
             }
@@ -1499,21 +1487,85 @@ impl Owner {
     }
 
     /// States `status` — or the pause the fold still decides for `answers` —
-    /// as the answer to the fact at `after`, and answers whether it did. The
-    /// record is composed only from a fold that has caught up to the branch's
-    /// committed cutoff, and only while that fact still decides it: a driving
-    /// input or a newer turn that folds while the decisions settle leaves the
-    /// state to that turn (C4, C5, D3).
+    /// as the answer to the fact at `after`, and answers whether its writer
+    /// took that fact's decision. The record is composed only from a fold that
+    /// has caught up to the branch's committed cutoff, and only while that fact
+    /// still decides it: a driving input or a newer turn that folds while the
+    /// decisions settle leaves the state to that turn (C4, C5, D3).
+    ///
+    /// A record the fold no longer asked for before the writer took the
+    /// settlement answers `false` and touches nothing: it held no settlement,
+    /// so it wakes no decision and takes up no interrupt a failed write left
+    /// with the fold. A record the fold superseded after the writer took the
+    /// settlement answers `true`: it released that settlement here, under the
+    /// write guard, and asks for the decision the superseding fact still wants
+    /// (#2119). A fact a newer state statement already answered answers `true`
+    /// without waking anything.
     async fn record_inner(
         self: &Arc<Self>,
         after: u64,
         status: Option<text::State>,
         answers: Answers,
     ) -> Result<bool, AgentError> {
+        #[cfg(feature = "testing")]
+        crate::testing::stage_held(
+            &self.session_id,
+            &self.branch_id,
+            crate::testing::Stage::Writer,
+            after,
+        )
+        .await;
         let _write = self.write_guard().await?;
-        if self.state.lock().unwrap().stale(after, answers) {
-            return Ok(false);
+        {
+            let state = self.state.lock().unwrap();
+            // A newer state statement already answered the fact: the caller has
+            // nothing left to decide, and this writer holds no settlement to
+            // wake for it (#2119).
+            if state.answered(after) {
+                return Ok(true);
+            }
+            if state.stale(after, answers) {
+                return Ok(false);
+            }
         }
+        let result = self.write_record(after, status, answers).await;
+        match &result {
+            // The settlement this record held is released here, under the
+            // write guard that covered it, so no change can take a settlement
+            // of its own between the release and the guard it waits for.
+            Ok(true) => self.resume_settlement(),
+            // A record the fold no longer asked for leaves the goal running
+            // with a decision still due: a fact that committed while the
+            // settlement held the decisions asked for one, and nothing else
+            // takes it again.
+            Ok(false) => {
+                self.resume_settlement();
+                if self.write_status.borrow().is_ok() {
+                    self.resume_decisions();
+                }
+            }
+            // A write that failed states nothing, so it leaves the interrupt
+            // its settlement deferred with the fold for a later settlement;
+            // the decisions that settlement cancelled decide nothing after
+            // this release, because that settlement waited for every one of
+            // them before it wrote (Pursuit §4.1, §13 E2, #2119).
+            Err(_) => {
+                self.release_settlement();
+            }
+        }
+        result?;
+        Ok(true)
+    }
+
+    /// States the record of the fact at `after` once the writer took the
+    /// settlement: `Ok(true)` answered the fact, and `Ok(false)` met a fold
+    /// that superseded it after the settlement and wrote nothing (C4, C5).
+    async fn write_record(
+        self: &Arc<Self>,
+        after: u64,
+        status: Option<text::State>,
+        answers: Answers,
+    ) -> Result<bool, AgentError> {
         self.settle_decisions().await?;
         self.write_status.borrow().clone()?;
         #[cfg(feature = "testing")]
@@ -1644,7 +1696,7 @@ impl Owner {
             return;
         };
         self.task(format!("state:{last}"), None, move |owner| {
-            Box::pin(async move { owner.record(last, None, Answers::Change).await })
+            Box::pin(async move { owner.record(last, None, Answers::Change).await.map(|_| ()) })
         });
     }
 
@@ -1843,112 +1895,119 @@ impl Owner {
     }
 
     async fn do_turn_end_inner(self: &Arc<Self>, after: u64) -> Result<(), AgentError> {
-        #[cfg(feature = "testing")]
-        crate::testing::stage_held(
-            &self.session_id,
-            &self.branch_id,
-            crate::testing::Stage::Decision,
-            after,
-        )
-        .await;
-        let evaluation = {
-            let state = self.state.lock().unwrap();
-            if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
-                return Ok(());
-            }
-            fold::decide_evaluation(&state.fold, after)
-        };
-        if evaluation && self.evaluate_turn_end(after).await? {
-            return Ok(());
-        }
-        let Ok(limit) = self.limit().await else {
-            return Ok(());
-        };
-        if self.stopped() {
-            return Ok(());
-        }
-        // C7's answer comes from the ending turn, read at decision time and
-        // only when a continuation drove it; `step/tool-call` is not a fold
-        // kind (A.6, #1113). An open background task defers the decision, so
-        // it needs no answer now.
-        let progress = {
-            let (end, open) = {
+        loop {
+            #[cfg(feature = "testing")]
+            crate::testing::stage_held(
+                &self.session_id,
+                &self.branch_id,
+                crate::testing::Stage::Decision,
+                after,
+            )
+            .await;
+            let evaluation = {
                 let state = self.state.lock().unwrap();
-                if !state.fold.turn_end_stands(after) {
+                if state.fold.turn_end.as_ref().map(|end| end.sequence) != Some(after) {
                     return Ok(());
                 }
-                (state.fold.turn_end.clone(), state.fold.open_tasks())
+                fold::decide_evaluation(&state.fold, after)
             };
-            let Some(end) = end else {
+            if evaluation && self.evaluate_turn_end(after).await? {
+                return Ok(());
+            }
+            let Ok(limit) = self.limit().await else {
                 return Ok(());
             };
-            if open || !end.continuation_driven {
-                None
-            } else if self
-                .turn_had_tool_call(end.turn_start, &end.turn_id)
-                .await?
-            {
-                Some(fold::Progress::ToolCall)
-            } else {
-                Some(fold::Progress::NoToolCall)
+            if self.stopped() {
+                return Ok(());
             }
-        };
-        if self.stopped() {
-            return Ok(());
-        }
-        let write = self.write_guard().await?;
-        let decision = {
-            let state = self.state.lock().unwrap();
-            state.fold.turn_end_decision(after, limit, progress)
-        };
-        let Some(decision) = decision else {
-            return Ok(());
-        };
-        #[cfg(feature = "testing")]
-        crate::testing::write_held(&self.session_id, &self.branch_id, after).await;
-        // C4, C5, #1989: a report input or a new turn that commits behind the
-        // decision makes this continuation stale. The recheck reads the fold at
-        // the latest committed cutoff, and the append refuses a head that moved
-        // after that read. The recheck also returns the turn end to the
-        // evaluator-first decision when a Queue that held it back was
-        // withdrawn. A pause was decided above, at the writer's cutoff.
-        match decision {
-            Decision::Pause { .. } => {
-                drop(write);
-                self.record(after, None, Answers::TurnEnd { limit, progress })
-                    .await?;
-            }
-            Decision::Continuation { .. } => loop {
-                let through = self.await_dispatched().await?;
-                let (evaluation, decision) = {
+            // C7's answer comes from the ending turn, read at decision time and
+            // only when a continuation drove it; `step/tool-call` is not a fold
+            // kind (A.6, #1113). An open background task defers the decision, so
+            // it needs no answer now.
+            let progress = {
+                let (end, open) = {
                     let state = self.state.lock().unwrap();
-                    if self.timeline.committed() != through {
-                        continue;
+                    if !state.fold.turn_end_stands(after) {
+                        return Ok(());
                     }
-                    (
-                        fold::decide_evaluation(&state.fold, after),
-                        state.fold.turn_end_decision(after, limit, progress),
-                    )
+                    (state.fold.turn_end.clone(), state.fold.open_tasks())
                 };
-                if evaluation {
-                    // A Queue that held the evaluator-first decision back was
-                    // withdrawn: the turn end belongs to that decision again
-                    // (Pursuit §4.1), not to this continuation.
+                let Some(end) = end else {
+                    return Ok(());
+                };
+                if open || !end.continuation_driven {
+                    None
+                } else if self
+                    .turn_had_tool_call(end.turn_start, &end.turn_id)
+                    .await?
+                {
+                    Some(fold::Progress::ToolCall)
+                } else {
+                    Some(fold::Progress::NoToolCall)
+                }
+            };
+            if self.stopped() {
+                return Ok(());
+            }
+            let write = self.write_guard().await?;
+            let decision = {
+                let state = self.state.lock().unwrap();
+                state.fold.turn_end_decision(after, limit, progress)
+            };
+            let Some(decision) = decision else {
+                return Ok(());
+            };
+            #[cfg(feature = "testing")]
+            crate::testing::write_held(&self.session_id, &self.branch_id, after).await;
+            // C4, C5, #1989: a report input or a new turn that commits behind the
+            // decision makes this continuation stale. The recheck reads the fold at
+            // the latest committed cutoff, and the append refuses a head that moved
+            // after that read. The recheck also returns the turn end to the
+            // evaluator-first decision when a Queue that held it back was
+            // withdrawn. A pause was decided above, at the writer's cutoff.
+            match decision {
+                Decision::Pause { .. } => {
                     drop(write);
-                    self.evaluate_turn_end(after).await?;
-                    return Ok(());
+                    // A record the fold no longer asked for settled nothing: the
+                    // turn end the caller still owns decides again (#2119).
+                    if self
+                        .record(after, None, Answers::TurnEnd { limit, progress })
+                        .await?
+                    {
+                        return Ok(());
+                    }
                 }
-                let Some(Decision::Continuation { count, idle }) = decision else {
-                    return Ok(());
-                };
-                let input =
-                    text::continuation(&self.branch_id, count, limit, idle, after, &self.texts);
-                if self.write_if_head(input, through).await?.is_some() {
-                    return Ok(());
-                }
-            },
+                Decision::Continuation { .. } => loop {
+                    let through = self.await_dispatched().await?;
+                    let (evaluation, decision) = {
+                        let state = self.state.lock().unwrap();
+                        if self.timeline.committed() != through {
+                            continue;
+                        }
+                        (
+                            fold::decide_evaluation(&state.fold, after),
+                            state.fold.turn_end_decision(after, limit, progress),
+                        )
+                    };
+                    if evaluation {
+                        // A Queue that held the evaluator-first decision back was
+                        // withdrawn: the turn end belongs to that decision again
+                        // (Pursuit §4.1), not to this continuation.
+                        drop(write);
+                        self.evaluate_turn_end(after).await?;
+                        return Ok(());
+                    }
+                    let Some(Decision::Continuation { count, idle }) = decision else {
+                        return Ok(());
+                    };
+                    let input =
+                        text::continuation(&self.branch_id, count, limit, idle, after, &self.texts);
+                    if self.write_if_head(input, through).await?.is_some() {
+                        return Ok(());
+                    }
+                },
+            }
         }
-        Ok(())
     }
 
     /// The latest `turn/end` without a live decision: an open decision the
@@ -2196,6 +2255,7 @@ impl Owner {
                         Answers::EvaluationFailed(evaluation),
                     )
                     .await
+                    .map(|_| ())
             })
         });
     }
@@ -2290,64 +2350,77 @@ impl Owner {
                 // pauses the goal, and the append refuses a head that moved
                 // after the recheck. A pause is decided once, at the writer's
                 // cutoff, and does not claim a Queue that commits after it.
-                let write = self.write_guard().await?;
-                let decision = {
-                    let state = self.state.lock().unwrap();
-                    if state.written.contains(&sequence) {
-                        return Ok(());
-                    }
-                    state
-                        .fold
-                        .evaluated_continuation(sequence, evaluation, limit)
-                };
-                match decision {
-                    None => {}
-                    Some(Decision::Pause { .. }) => {
-                        drop(write);
-                        self.record(
-                            sequence,
-                            None,
-                            Answers::EvaluatedContinuation { evaluation, limit },
-                        )
-                        .await?;
-                    }
-                    Some(Decision::Continuation { .. }) => {
-                        #[cfg(feature = "testing")]
-                        crate::testing::write_held(&self.session_id, &self.branch_id, evaluation)
-                            .await;
-                        loop {
-                            let through = self.await_dispatched().await?;
-                            let decision = {
-                                let state = self.state.lock().unwrap();
-                                if self.timeline.committed() != through {
-                                    continue;
-                                }
-                                if state.written.contains(&sequence) {
-                                    return Ok(());
-                                }
-                                state
-                                    .fold
-                                    .evaluated_continuation(sequence, evaluation, limit)
-                            };
-                            let Some(Decision::Continuation { count, idle }) = decision else {
-                                return Ok(());
-                            };
-                            let input = text::evaluated_continuation(
-                                &self.branch_id,
-                                count,
-                                limit,
-                                idle,
-                                evaluation,
-                                &named,
-                            );
-                            // The input is committed before the fold consumes it; a
-                            // retry in between must not answer it again.
-                            if self.state.lock().unwrap().written.contains(&sequence) {
+                loop {
+                    let write = self.write_guard().await?;
+                    let decision = {
+                        let state = self.state.lock().unwrap();
+                        if state.written.contains(&sequence) {
+                            return Ok(());
+                        }
+                        state
+                            .fold
+                            .evaluated_continuation(sequence, evaluation, limit)
+                    };
+                    match decision {
+                        None => return Ok(()),
+                        Some(Decision::Pause { .. }) => {
+                            drop(write);
+                            // A record the fold no longer asked for settled
+                            // nothing: the conclusion the caller still owns
+                            // decides again (#2119).
+                            if self
+                                .record(
+                                    sequence,
+                                    None,
+                                    Answers::EvaluatedContinuation { evaluation, limit },
+                                )
+                                .await?
+                            {
                                 return Ok(());
                             }
-                            if self.write_if_head(input, through).await?.is_some() {
-                                self.state.lock().unwrap().written.insert(sequence);
-                                return Ok(());
+                        }
+                        Some(Decision::Continuation { .. }) => {
+                            #[cfg(feature = "testing")]
+                            crate::testing::write_held(
+                                &self.session_id,
+                                &self.branch_id,
+                                evaluation,
+                            )
+                            .await;
+                            loop {
+                                let through = self.await_dispatched().await?;
+                                let decision = {
+                                    let state = self.state.lock().unwrap();
+                                    if self.timeline.committed() != through {
+                                        continue;
+                                    }
+                                    if state.written.contains(&sequence) {
+                                        return Ok(());
+                                    }
+                                    state
+                                        .fold
+                                        .evaluated_continuation(sequence, evaluation, limit)
+                                };
+                                let Some(Decision::Continuation { count, idle }) = decision else {
+                                    return Ok(());
+                                };
+                                let input = text::evaluated_continuation(
+                                    &self.branch_id,
+                                    count,
+                                    limit,
+                                    idle,
+                                    evaluation,
+                                    &named,
+                                );
+                                // The input is committed before the fold consumes it; a
+                                // retry in between must not answer it again.
+                                if self.state.lock().unwrap().written.contains(&sequence) {
+                                    return Ok(());
+                                }
+                                if self.write_if_head(input, through).await?.is_some() {
+                                    self.state.lock().unwrap().written.insert(sequence);
+                                    return Ok(());
+                                }
                             }
                         }
                     }
