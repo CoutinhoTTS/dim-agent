@@ -638,84 +638,97 @@ impl Owner {
                 self.timeline.committed(),
             )
             .await;
-            // The settlement refused the decisions that folded into it: this
-            // record answers a trigger newer than their facts, so it states
-            // them first (#2158).
-            self.write_deferred().await?;
-            if matches!(change, Change::Set { .. } | Change::Resume) {
-                self.load_current_work().await?;
-            }
-            let trigger = change.trigger(&self.branch_id);
-            let (objective, state, judge, live, decisions) = {
-                let lock = self.state.lock().unwrap();
-                let (attrs, op) = fold::change_of(&trigger.blocks)
-                    .expect("a change carries its own trigger marker");
-                let (objective, mut state, mut judge) = lock.fold.after_change(op, &attrs);
-                if objective.is_none() {
-                    state = text::State::None;
-                    judge = text::Judge::Model;
+            // A Set or Resume loads the branch's current work before it
+            // writes: that wait holds task admission while it waits for
+            // publication and queries the Timeline, so a decision that folds
+            // there is refused admission after the settlement's own drain. The
+            // record below answers a trigger newer than their facts, so the
+            // change states them first, and it writes only while the head its
+            // last drain reached still stands (#2158).
+            let events = loop {
+                if matches!(change, Change::Set { .. } | Change::Resume) {
+                    self.load_current_work().await?;
                 }
-                (
-                    objective,
+                let head = self.write_deferred().await?;
+                let trigger = change.trigger(&self.branch_id);
+                let (objective, state, judge, live, decisions) = {
+                    let lock = self.state.lock().unwrap();
+                    if self.timeline.committed() != head {
+                        continue;
+                    }
+                    let (attrs, op) = fold::change_of(&trigger.blocks)
+                        .expect("a change carries its own trigger marker");
+                    let (objective, mut state, mut judge) = lock.fold.after_change(op, &attrs);
+                    if objective.is_none() {
+                        state = text::State::None;
+                        judge = text::Judge::Model;
+                    }
+                    (
+                        objective,
+                        state,
+                        judge,
+                        lock.fold.live,
+                        lock.decisions.clone(),
+                    )
+                };
+                let trigger_id = trigger
+                    .submission_id
+                    .clone()
+                    .expect("Goal inputs carry a submission id");
+                let operation = match &change {
+                    Change::Set { .. } => "set",
+                    Change::Edit { .. } => "edit",
+                    Change::Pause => "pause",
+                    Change::Resume => "resume",
+                    Change::Clear => "clear",
+                    Change::Report {
+                        completed: true, ..
+                    } => "completed",
+                    Change::Report {
+                        completed: false, ..
+                    } => "blocked",
+                };
+                let business = recovery::BusinessState::new(
+                    operation,
+                    objective.clone(),
+                    state.clone(),
+                    judge,
+                    None,
+                );
+                let record = text::state(
+                    &self.branch_id,
+                    objective.as_deref(),
                     state,
                     judge,
-                    lock.fold.live,
-                    lock.decisions.clone(),
-                )
-            };
-            let trigger_id = trigger
-                .submission_id
-                .clone()
-                .expect("Goal inputs carry a submission id");
-            let operation = match &change {
-                Change::Set { .. } => "set",
-                Change::Edit { .. } => "edit",
-                Change::Pause => "pause",
-                Change::Resume => "resume",
-                Change::Clear => "clear",
-                Change::Report {
-                    completed: true, ..
-                } => "completed",
-                Change::Report {
-                    completed: false, ..
-                } => "blocked",
-            };
-            let business = recovery::BusinessState::new(
-                operation,
-                objective.clone(),
-                state.clone(),
-                judge,
-                None,
-            );
-            let record = text::state(
-                &self.branch_id,
-                objective.as_deref(),
-                state,
-                judge,
-                text::Answered::Trigger(&trigger_id),
-                live,
-                &self.texts,
-            );
-            if decisions.is_cancelled() {
-                return Err(AgentError::Cancelled("Goal command superseded".into()));
-            }
-            let events = if matches!(
-                &change,
-                Change::Report {
-                    completed: true,
-                    ..
+                    text::Answered::Trigger(&trigger_id),
+                    live,
+                    &self.texts,
+                );
+                if decisions.is_cancelled() {
+                    return Err(AgentError::Cancelled("Goal command superseded".into()));
                 }
-            ) && judge == text::Judge::Evaluator
-            {
-                let events = self
-                    .tree
-                    .inputs(self.branch_id.clone(), vec![record, trigger])
-                    .await?;
-                self.state.lock().unwrap().last_write =
-                    events.last().expect("evaluation request").sequence;
-                events
-            } else {
-                self.append_business(vec![record, trigger], business, Some(1))?
+                if matches!(
+                    &change,
+                    Change::Report {
+                        completed: true,
+                        ..
+                    }
+                ) && judge == text::Judge::Evaluator
+                {
+                    let events = self
+                        .tree
+                        .inputs(self.branch_id.clone(), vec![record, trigger])
+                        .await?;
+                    self.state.lock().unwrap().last_write =
+                        events.last().expect("evaluation request").sequence;
+                    break events;
+                }
+                let Some(events) =
+                    self.append_business_if_head(vec![record, trigger], business, Some(1), head)?
+                else {
+                    continue;
+                };
+                break events;
             };
             let sequence = events[1].sequence;
             let mut lock = self.state.lock().unwrap();
@@ -947,18 +960,8 @@ impl Owner {
         }
     }
 
-    fn append_business(
-        &self,
-        inputs: Vec<InputMessageData>,
-        business: recovery::BusinessState,
-        trigger: Option<usize>,
-    ) -> Result<Vec<Arc<AgentEvent>>, AgentError> {
-        let events = self.append_business_if_head(inputs, business, trigger, None)?;
-        Ok(events.expect("an unconditional batch is written"))
-    }
-
-    /// [`Self::append_business`] only while the branch's last assigned
-    /// sequence is still `head`: a fact that committed behind it leaves
+    /// Writes the batch only while the branch's last assigned sequence is
+    /// still `head` when it commits: a fact that committed behind it leaves
     /// nothing written, and the caller decides again (D3, C4, C5). A record is
     /// a batch — the model's state input and the recovery event — and
     /// `input_if_head` takes one input, so the condition rides the batch's own
@@ -968,7 +971,7 @@ impl Owner {
         inputs: Vec<InputMessageData>,
         mut business: recovery::BusinessState,
         trigger: Option<usize>,
-        head: Option<u64>,
+        head: u64,
     ) -> Result<Option<Vec<Arc<AgentEvent>>>, AgentError> {
         let mut drafts = Vec::with_capacity(inputs.len() + 1);
         for input in inputs {
@@ -988,7 +991,7 @@ impl Owner {
         // caller, which decides again from the fold that moved.
         let moved = std::cell::Cell::new(false);
         let events = self.timeline.append_batch_registered(drafts, |events| {
-            if head.is_some_and(|head| self.timeline.committed() != head) {
+            if self.timeline.committed() != head {
                 moved.set(true);
                 return Err(AgentError::Cancelled("Goal record superseded".into()));
             }
@@ -1115,7 +1118,7 @@ impl Owner {
             vec![input],
             recovery::BusinessState::new("pause", objective, status.clone(), judge, None),
             None,
-            Some(head),
+            head,
         )?
         else {
             return Ok(());
@@ -1656,7 +1659,7 @@ impl Owner {
             )
             .await;
             if self
-                .append_business_if_head(vec![input], business, None, Some(through))?
+                .append_business_if_head(vec![input], business, None, through)?
                 .is_none()
             {
                 continue;
@@ -1722,13 +1725,15 @@ impl Owner {
     /// States the decisions a settlement refused to admit while it held task
     /// admission, before the record of a change that supersedes their facts:
     /// each names a fact older than that record, so the fold takes it only if
-    /// its own record lands first (#2158).
-    async fn write_deferred(self: &Arc<Self>) -> Result<(), AgentError> {
+    /// its own record lands first (#2158). Answers the committed cutoff the
+    /// last drain found the queue empty at, which the record that follows is
+    /// conditioned on.
+    async fn write_deferred(self: &Arc<Self>) -> Result<u64, AgentError> {
         loop {
-            self.await_dispatched().await?;
+            let through = self.await_dispatched().await?;
             let deferred = std::mem::take(&mut self.state.lock().unwrap().deferred);
             if deferred.is_empty() {
-                return Ok(());
+                return Ok(through);
             }
             for record in deferred {
                 self.write_record(record.after, Some(record.status), record.answers)
