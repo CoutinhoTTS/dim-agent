@@ -152,6 +152,9 @@ impl Branch {
     pub fn service<T: ?Sized + PublicService>(&self) -> Result<Arc<T>> {
         self.0.public::<T>()
     }
+    pub fn service_opt<T: ?Sized + PublicService>(&self) -> Result<Option<Arc<T>>> {
+        self.0.public_opt::<T>()
+    }
     /// The branch scope and the capabilities it installed.
     pub fn diagnostics(&self) -> rutis::host::diagnostics::RuntimeDiagnostics {
         self.0.diagnostics()
