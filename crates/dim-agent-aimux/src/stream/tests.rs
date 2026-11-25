@@ -1695,3 +1695,177 @@ async fn an_idle_deadline_outranks_a_part_that_is_ready_at_the_same_time() {
     tokio::time::advance(IDLE_ALLOWANCE).await;
     idle_failure(waiting.as_mut().poll(&mut context));
 }
+
+/// One provider call failure: the origin and status aimux reports, the error
+/// data the provider sent and the code aimux normalizes separately.
+fn call_failure(
+    origin: aimux_core::ApiCallErrorOrigin,
+    status: Option<u16>,
+    data: serde_json::Value,
+    provider_code: Option<&str>,
+) -> AiMuxError {
+    let mut detail = aimux_core::ApiCallError::new(
+        "request failed",
+        "https://test.invalid",
+        serde_json::json!({}),
+    )
+    .with_origin(origin);
+    detail.status_code = status;
+    detail.data = Some(data);
+    detail.provider_code = provider_code.map(str::to_owned);
+    AiMuxError::ApiCall(Box::new(detail))
+}
+
+/// The classified facts of one failure.
+fn classified(failure: AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
+    let HostError::Failed {
+        kind,
+        model: Some(model),
+        ..
+    } = error(failure, &CancellationToken::new())
+    else {
+        panic!("a classified failure carries facts");
+    };
+    (kind, *model)
+}
+
+/// A three-digit status a stream event writes as a code names a class, the
+/// same way a response status does. It decides after a condition, after a
+/// transport failure and after a response's own status, and before the
+/// unknown kind.
+#[test]
+fn a_status_code_in_a_stream_event_is_a_class_label() {
+    use aimux_core::ApiCallErrorOrigin::{HttpResponse as Http, StreamEvent as Event, Transport};
+
+    let cases: [(ApiCallErrorOrigin, Option<u16>, &[&str], ModelFailureKind); 14] = [
+        // The event's own code decides, not the status aimux guessed for it.
+        (Event, Some(500), &["502"], ModelFailureKind::ServerError),
+        (Event, Some(500), &["504"], ModelFailureKind::ServerError),
+        (Event, Some(500), &["408"], ModelFailureKind::ServerError),
+        (Event, Some(500), &["429"], ModelFailureKind::RateLimited),
+        (Event, Some(500), &["401"], ModelFailureKind::AuthRejected),
+        (Event, Some(500), &["403"], ModelFailureKind::AuthRejected),
+        // A condition beside the code still decides.
+        (
+            Event,
+            Some(500),
+            &["429", "insufficient_quota"],
+            ModelFailureKind::QuotaExhausted,
+        ),
+        // A number outside the status classes is not one.
+        (Event, Some(500), &["399"], ModelFailureKind::Unknown),
+        (Event, Some(500), &["600"], ModelFailureKind::Unknown),
+        // A transport failure stays a network failure, and a response's own
+        // status outranks the code its body carries.
+        (Transport, None, &["502"], ModelFailureKind::Network),
+        (Http, Some(422), &["500"], ModelFailureKind::InvalidRequest),
+        (
+            Http,
+            Some(429),
+            &["429", "insufficient_quota"],
+            ModelFailureKind::QuotaExhausted,
+        ),
+        (Http, Some(200), &["502"], ModelFailureKind::ServerError),
+        (Http, Some(503), &["429"], ModelFailureKind::ServerError),
+    ];
+    let mismatched: Vec<String> = cases
+        .iter()
+        .filter_map(|(origin, status, codes, want)| {
+            let codes: Vec<Option<&str>> = codes.iter().copied().map(Some).collect();
+            let got = classify_kind(*origin, *status, &codes);
+            (got != *want)
+                .then(|| format!("{origin:?} {status:?} {codes:?}: got {got:?}, want {want:?}"))
+        })
+        .collect();
+    assert!(mismatched.is_empty(), "{mismatched:#?}");
+}
+
+/// A stream event that writes its status as a JSON integer is read through
+/// the same three digits, in its own shape or one level down in the response
+/// envelope, and one outside the status classes leaves the kind unknown.
+#[test]
+fn a_stream_event_status_written_as_a_number_is_a_class_label() {
+    use aimux_core::ApiCallErrorOrigin::StreamEvent as Event;
+
+    let (kind, facts) = classified(call_failure(
+        Event,
+        Some(502),
+        json!({"error": {"code": 502, "message": "Network connection lost."}}),
+        None,
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::ServerError);
+    assert_eq!(
+        kind,
+        HostErrorKind::Http {
+            status: Some(502),
+            code: Some("502".into()),
+        }
+    );
+
+    // A provider that writes the status as a number and names its own status
+    // word as the provider code is read from the number.
+    let (_, facts) = classified(call_failure(
+        Event,
+        Some(503),
+        json!({"error": {"code": 503, "message": "The model is overloaded.", "status": "UNAVAILABLE"}}),
+        Some("unavailable"),
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::ServerError);
+    assert_eq!(facts.provider_code.as_deref(), Some("unavailable"));
+
+    let (_, facts) = classified(call_failure(
+        Event,
+        Some(429),
+        json!({"error": {"code": 429, "message": "Rate limit exceeded."}}),
+        None,
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::RateLimited);
+
+    // The response envelope carries the number one level down, and a status
+    // aimux guessed for the event does not decide the kind.
+    let (_, facts) = classified(call_failure(
+        Event,
+        Some(500),
+        json!({"type": "response.failed", "response": {"error": {"code": 504, "message": "Gateway timeout."}}}),
+        None,
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::ServerError);
+
+    let (_, facts) = classified(call_failure(
+        Event,
+        Some(500),
+        json!({"error": {"code": 1000, "message": "Unrecognized."}}),
+        None,
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::Unknown);
+}
+
+/// Only a stream event writes its status as a number: a response's own status
+/// decides, and a number its body carries is not read.
+#[test]
+fn a_response_status_outranks_the_status_code_in_its_body() {
+    use aimux_core::ApiCallErrorOrigin::HttpResponse as Http;
+
+    let (kind, facts) = classified(call_failure(
+        Http,
+        Some(422),
+        json!({"error": {"code": "500", "message": "the upstream refused the request's shape"}}),
+        None,
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::InvalidRequest);
+    assert_eq!(
+        kind,
+        HostErrorKind::Http {
+            status: Some(422),
+            code: Some("500".into()),
+        }
+    );
+
+    let (_, facts) = classified(call_failure(
+        Http,
+        Some(200),
+        json!({"error": {"code": 500, "message": "refused"}}),
+        None,
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::Unknown);
+}

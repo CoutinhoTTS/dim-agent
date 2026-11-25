@@ -656,14 +656,24 @@ fn classify(failure: &AiMuxError, locally_refused: bool) -> (HostErrorKind, Mode
                 let value = value.trim();
                 (!value.is_empty()).then(|| value.to_ascii_lowercase())
             };
-            let code = field("code").and_then(normalize);
+            let origin = detail.origin;
+            let code = match field("code") {
+                Some(code) => normalize(code),
+                // A stream event may report the failing status as a JSON
+                // integer; it names the same class as its three digits.
+                None if origin == ApiCallErrorOrigin::StreamEvent => view
+                    .and_then(|value| value.get("code"))
+                    .and_then(Value::as_u64)
+                    .filter(|code| (400..=599).contains(code))
+                    .map(|code| code.to_string()),
+                None => None,
+            };
             let error_type = field("type").and_then(normalize);
             let provider_code = detail
                 .provider_code
                 .as_deref()
                 .and_then(normalize)
                 .and_then(|code| one_line(&code, FAILURE_CAUSE_CHARS));
-            let origin = detail.origin;
             let codes = [
                 code.as_deref(),
                 error_type.as_deref(),
@@ -842,6 +852,11 @@ enum CodeRole {
 }
 
 fn code_role(code: &str) -> Option<CodeRole> {
+    if code.len() == 3
+        && let Some(kind) = code.parse::<u16>().ok().and_then(status_kind)
+    {
+        return Some(CodeRole::ClassLabel(kind));
+    }
     Some(match code {
         "insufficient_quota"
         | "quota_exceeded"

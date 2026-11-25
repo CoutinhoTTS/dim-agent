@@ -2043,6 +2043,83 @@ async fn a_stream_event_failure_with_an_unknown_code_is_not_retried() {
     root.shutdown().await.unwrap();
 }
 
+/// A stream event that reports its status as a JSON integer cuts a reply that
+/// showed only private thought, so the attempt committed nothing and the
+/// request is retried in place: the 504 that the replacing attempt reports is
+/// retried the same way, and the third attempt's answer finishes the turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_status_code_mid_thinking_is_retried_in_place() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("stream-code-thinking".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "after the retries")),
+        "{events:?}"
+    );
+    assert!(
+        matches!(
+            events
+                .iter()
+                .rfind(|event| matches!(event.kind, EventKind::TurnEnd(_)))
+                .unwrap()
+                .kind,
+            EventKind::TurnEnd(TurnEndData {
+                outcome: TurnOutcome::Completed { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    assert_eq!(requests, 3, "the 502 and the 504 are each retried in place");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
+/// A stream event that reports a rejected credential is `auth_rejected`, which
+/// the retry policy never retries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_auth_code_is_rejected_once() {
+    for code in ["401", "403"] {
+        let chat = NativeServer::start("openai-chat").await;
+        let agent = model_agent(chat.models(), None).await;
+        let session = agent.create_session(chat.session_config()).await.unwrap();
+        session
+            .submit(format!("stream-code-{code}"), InputMode::Queue, "main")
+            .await
+            .unwrap();
+        session.idle("main").await.unwrap();
+        let events = chain_events(&session, "main", ..).await.unwrap();
+        let failure = events
+            .iter()
+            .find_map(|event| match &event.kind {
+                EventKind::ModelOutputEnd(data) => match &data.outcome {
+                    ModelOutputOutcome::Failed {
+                        failure: Some(failure),
+                        ..
+                    } => Some(failure.clone()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("a failed model output");
+        assert_eq!(failure.kind, ModelFailureKind::AuthRejected, "{code}");
+        assert_eq!(failure.attempts, 1, "{code}");
+        let requests = chat.endpoint.requests.lock().unwrap().len();
+        assert_eq!(requests, 1, "{code} is not retried");
+        agent.close().await.unwrap();
+        chat.close().await;
+    }
+}
+
 /// A gateway's generic `api_error` label beside a 422 does not make the
 /// failure retryable: the status decides, and the request is tried once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2768,6 +2845,36 @@ async fn respond_native(
                         json!("unexpected_finish"),
                     )
                     + "data: [DONE]\n\n"
+            } else if request_text.contains("stream-code-thinking") {
+                // The cut arrives after the reply showed private thought, so
+                // the attempt committed nothing and the next one replaces it.
+                let cut = |code: u16, message: &str| {
+                    frame(
+                        json!({"reasoning_content":"thinking before the cut"}),
+                        Value::Null,
+                    ) + &sse(vec![json!({"error":{"code":code,"message":message}})])
+                };
+                match endpoint.requests.lock().unwrap().len() {
+                    1 => cut(502, "Network connection lost."),
+                    2 => cut(504, "Gateway timeout."),
+                    _ => {
+                        frame(json!({"content":"after the retries"}), json!("stop"))
+                            + "data: [DONE]\n\n"
+                    }
+                }
+            } else if let Some(code) = request_text.split("stream-code-").nth(1).and_then(|rest| {
+                rest.chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect::<String>()
+                    .parse::<u16>()
+                    .ok()
+            }) {
+                frame(
+                    json!({"reasoning_content":"thinking before the cut"}),
+                    Value::Null,
+                ) + &sse(vec![
+                    json!({"error":{"code":code,"message":"the provider rejected the request"}}),
+                ])
             } else {
                 frame(json!({"content":"before"}), Value::Null)
                     + &frame(
