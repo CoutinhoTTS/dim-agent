@@ -2160,6 +2160,49 @@ async fn a_stream_event_numeric_type_is_not_a_status_and_is_not_retried() {
     chat.close().await;
 }
 
+/// A retryable status still cannot replay an attempt that published visible
+/// answer text: a numeric 5xx after the text fails the turn after one
+/// request. The second attempt would answer if it were retried.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stream_event_status_code_after_visible_output_is_not_retried() {
+    let chat = NativeServer::start("openai-chat").await;
+    let agent = model_agent(chat.models(), None).await;
+    let session = agent.create_session(chat.session_config()).await.unwrap();
+    session
+        .submit("stream-code-visible-502".into(), InputMode::Queue, "main")
+        .await
+        .unwrap();
+    session.idle("main").await.unwrap();
+    let requests = chat.endpoint.requests.lock().unwrap().len();
+    let events = chain_events(&session, "main", ..).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(&event.kind, EventKind::Text(data) if data.delta == "visible before the cut")),
+        "{events:?}"
+    );
+    let failure = events.iter().find_map(|event| match &event.kind {
+        EventKind::ModelOutputEnd(data) => match &data.outcome {
+            ModelOutputOutcome::Failed {
+                failure: Some(failure),
+                ..
+            } => Some(failure.clone()),
+            _ => None,
+        },
+        _ => None,
+    });
+    assert!(
+        failure.is_some(),
+        "the turn completed over {requests} requests: {events:?}"
+    );
+    let failure = failure.unwrap();
+    assert_eq!(failure.kind, ModelFailureKind::ServerError);
+    assert_eq!(failure.attempts, 1);
+    assert_eq!(requests, 1, "published answer text is not replayed");
+    agent.close().await.unwrap();
+    chat.close().await;
+}
+
 /// A gateway's generic `api_error` label beside a 422 does not make the
 /// failure retryable: the status decides, and the request is tried once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2901,6 +2944,15 @@ async fn respond_native(
                         frame(json!({"content":"after the retries"}), json!("stop"))
                             + "data: [DONE]\n\n"
                     }
+                }
+            } else if request_text.contains("stream-code-visible-502") {
+                if endpoint.requests.lock().unwrap().len() == 1 {
+                    frame(json!({"content":"visible before the cut"}), Value::Null)
+                        + &sse(vec![
+                            json!({"error":{"code":502,"message":"Network connection lost."}}),
+                        ])
+                } else {
+                    frame(json!({"content":"after the retry"}), json!("stop")) + "data: [DONE]\n\n"
                 }
             } else if request_text.contains("stream-type-502") {
                 if endpoint.requests.lock().unwrap().len() == 1 {
