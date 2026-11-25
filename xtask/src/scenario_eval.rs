@@ -11475,6 +11475,356 @@ mod tests {
         );
     }
 
+    /// The outcome a run's record takes from its note check and its incomplete
+    /// reason, in the order the runner reads them (model-prompts §8.1): a note
+    /// check that finds an unseen request fails the run before the judge, and
+    /// only a run without one is an incomplete fixture.
+    fn scored_switch_run(driven: &Driven, export: &str) -> (NotesCheck, Option<String>, Metrics) {
+        let scenario = scenario(Vec::new());
+        let check = switch_note_check(driven, export);
+        let mut stop = driven.stop;
+        let mut error = driven.error.clone();
+        let mut incomplete = None;
+        let judge = if let NotesCheck::Unseen(message) = &check {
+            stop = "switch_note_missing";
+            error = Some(message.clone());
+            JudgeOutcome::NotAsked
+        } else {
+            incomplete = incomplete_reason(driven, &scenario, export, &check);
+            if incomplete.is_some() {
+                JudgeOutcome::NotAsked
+            } else {
+                JudgeOutcome::Judged
+            }
+        };
+        let mut record = record("current", &scenario, &[], judge);
+        record.stop = stop;
+        record.failed = failed(stop, error.as_deref(), judge);
+        record.incomplete = incomplete.clone();
+        let mut metrics = Metrics::default();
+        metrics.add(&scenario, &record);
+        (check, incomplete, metrics)
+    }
+
+    /// A run whose receipt the turn cap left unobserved still fails on every
+    /// confirmed failure it shows, and enters gate 1's failed runs rather than
+    /// the report's incomplete fixtures (model-prompts §8.1).
+    fn assert_confirmed_failure(
+        case: &str,
+        check: &NotesCheck,
+        incomplete: &Option<String>,
+        metrics: &Metrics,
+        needle: &str,
+    ) {
+        match check {
+            NotesCheck::Unseen(error) => {
+                assert!(error.contains(needle), "{case}: {error}");
+            }
+            NotesCheck::Observed | NotesCheck::CapCut => {
+                panic!(
+                    "{case}: the receipt the cap cut hid the failure this run confirms: {check:?}"
+                )
+            }
+        }
+        assert_eq!(
+            incomplete, &None,
+            "{case}: a confirmed failure is not an incomplete fixture"
+        );
+        assert_eq!(
+            (
+                metrics.attempted,
+                metrics.runs,
+                metrics.failed,
+                metrics.incomplete
+            ),
+            (1, 1, 1, 0),
+            "{case}: a confirmed failure enters gate 1's failed runs, not its incomplete fixtures"
+        );
+    }
+
+    /// A receipt the run's turn cap left unobserved does not hide another
+    /// receipt that reached the model without its note, whether the missing
+    /// note came before or after the cap-cut one (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_receipt_does_not_hide_a_request_that_reached_the_model_without_its_note() {
+        let note = "<dim-branch-line branch=\"2\" parent=\"main\" source=\"tool\" default=\"true\">\nswitched from line main.\n</dim-branch-line>";
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let missing_note = || -> Vec<Value> {
+            vec![
+                event(
+                    "2",
+                    1,
+                    "n2",
+                    ["input", "message"],
+                    json!({"blocks": [{"type": "raw", "key": "branch:line", "text": note}]}),
+                ),
+                event("2", 2, "f2", ["input", "message"], json!({})),
+                event(
+                    "2",
+                    3,
+                    "c2",
+                    ["input", "consumed"],
+                    json!({"input_id": "f2"}),
+                ),
+                event(
+                    "2",
+                    4,
+                    "s2",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t2", "request_id": "r2"}),
+                ),
+                event(
+                    "2",
+                    5,
+                    "m2",
+                    ["model", "call"],
+                    json!({"request_id": "r2",
+                           "request": {"messages": [{"role": "user",
+                                                      "content": "the follow-up was answered"}]}}),
+                ),
+            ]
+        };
+        let cap_cut = || -> Vec<Value> {
+            vec![
+                event("3", 1, "f3", ["input", "message"], json!({})),
+                event(
+                    "3",
+                    2,
+                    "c3",
+                    ["input", "consumed"],
+                    json!({"input_id": "f3"}),
+                ),
+                event(
+                    "3",
+                    3,
+                    "s3",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t3", "request_id": "r3"}),
+                ),
+                event(
+                    "3",
+                    4,
+                    "i3",
+                    ["stop", "interrupt"],
+                    json!({"reason": "budget: turns", "scope": "turn"}),
+                ),
+                event(
+                    "3",
+                    5,
+                    "o3",
+                    ["step", "model-output-end"],
+                    json!({"turn_id": "t3", "request_id": "r3", "status": "cancelled",
+                           "reason": "budget: turns"}),
+                ),
+            ]
+        };
+        let unconsumed = || -> Vec<Value> {
+            vec![
+                event("3", 1, "f3", ["input", "message"], json!({})),
+                event(
+                    "3",
+                    2,
+                    "s3",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t3", "request_id": "r3"}),
+                ),
+            ]
+        };
+        let receipt = |line: &str, input: &str| FixtureInput {
+            what: SWITCH_INPUT,
+            line: line.into(),
+            input: Some(input.into()),
+        };
+        let driven = |inputs: Vec<FixtureInput>| Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: vec![SwitchNote {
+                    line: "2".into(),
+                    input: "f2".into(),
+                    default: true,
+                    other: "main".into(),
+                }],
+                inputs,
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let cases = [
+            (
+                "the missing note's receipt first",
+                vec![receipt("2", "f2"), receipt("3", "f3")],
+                [missing_note(), cap_cut()].concat(),
+            ),
+            (
+                "the cap-cut receipt first",
+                vec![receipt("3", "f3"), receipt("2", "f2")],
+                [cap_cut(), missing_note()].concat(),
+            ),
+            (
+                "the cap left the other receipt unconsumed",
+                vec![receipt("2", "f2"), receipt("3", "f3")],
+                [missing_note(), unconsumed()].concat(),
+            ),
+        ];
+        for (case, inputs, export) in cases {
+            let export = export
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (check, incomplete, metrics) = scored_switch_run(&driven(inputs), &export);
+            assert_confirmed_failure(
+                case,
+                &check,
+                &incomplete,
+                &metrics,
+                "does not carry the note",
+            );
+        }
+    }
+
+    /// A receipt the run's turn cap left unobserved does not hide a later
+    /// receipt whose request never reached the model, whether that later
+    /// receipt is on another line or on the root (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_cap_cut_receipt_does_not_hide_a_later_request_that_never_reached_the_model() {
+        let event = |branch: &str, sequence: u64, id: &str, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": branch,
+                   "event": {"id": id, "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+        };
+        let cap_cut = || -> Vec<Value> {
+            vec![
+                event("2", 1, "f2", ["input", "message"], json!({})),
+                event(
+                    "2",
+                    2,
+                    "c2",
+                    ["input", "consumed"],
+                    json!({"input_id": "f2"}),
+                ),
+                event(
+                    "2",
+                    3,
+                    "s2",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t2", "request_id": "r2"}),
+                ),
+                event(
+                    "2",
+                    4,
+                    "i2",
+                    ["stop", "interrupt"],
+                    json!({"reason": "budget: turns", "scope": "turn"}),
+                ),
+                event(
+                    "2",
+                    5,
+                    "o2",
+                    ["step", "model-output-end"],
+                    json!({"turn_id": "t2", "request_id": "r2", "status": "cancelled",
+                           "reason": "budget: turns"}),
+                ),
+            ]
+        };
+        let unconsumed =
+            || -> Vec<Value> { vec![event("2", 1, "f2", ["input", "message"], json!({}))] };
+        let unreached = |branch: &str| -> Vec<Value> {
+            vec![
+                event(branch, 1, "u1", ["input", "message"], json!({})),
+                event(
+                    branch,
+                    2,
+                    "u2",
+                    ["input", "consumed"],
+                    json!({"input_id": "u1"}),
+                ),
+                event(
+                    branch,
+                    3,
+                    "u3",
+                    ["turn", "end"],
+                    json!({"turn_id": "tu", "status": "cancelled", "reason": "end_turn"}),
+                ),
+                event(
+                    branch,
+                    4,
+                    "u4",
+                    ["step", "model-start"],
+                    json!({"turn_id": "t4", "request_id": "r4"}),
+                ),
+            ]
+        };
+        let receipt = |line: &str, input: &str| FixtureInput {
+            what: SWITCH_INPUT,
+            line: line.into(),
+            input: Some(input.into()),
+        };
+        let driven = |inputs: Vec<FixtureInput>| Driven {
+            session: "s".into(),
+            stop: "turns",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs,
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let cases = [
+            (
+                "a later request on another line never reached the model",
+                vec![receipt("2", "f2"), receipt("3", "u1")],
+                [cap_cut(), unreached("3")].concat(),
+            ),
+            (
+                "a later request on the root never reached the model",
+                vec![receipt("2", "f2"), receipt("main", "u1")],
+                [cap_cut(), unreached("main")].concat(),
+            ),
+            (
+                "the cap left the first receipt unconsumed",
+                vec![receipt("2", "f2"), receipt("3", "u1")],
+                [unconsumed(), unreached("3")].concat(),
+            ),
+        ];
+        for (case, inputs, export) in cases {
+            let export = export
+                .iter()
+                .map(|event| serde_json::to_string(event).unwrap())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let (check, incomplete, metrics) = scored_switch_run(&driven(inputs), &export);
+            assert_confirmed_failure(
+                case,
+                &check,
+                &incomplete,
+                &metrics,
+                "never reached the model",
+            );
+        }
+    }
+
     /// A run that ended idle is scored as it was before the incomplete class
     /// existed: the stop is the product's state, not the harness's turn cap,
     /// so an input it left unrun is the candidate's outcome, not a fixture
