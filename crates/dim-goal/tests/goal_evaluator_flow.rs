@@ -2243,8 +2243,8 @@ async fn a_decision_folded_in_the_settlement_window_is_taken() {
                     "blocked",
                     "BLOCKED: a deploy key",
                 ),
-                _ => env
-                    .emit(
+                _ => {
+                    env.emit(
                         "main",
                         EventKind::BranchEnded(BranchEndedData {
                             branch: create.branch.clone(),
@@ -2255,7 +2255,8 @@ async fn a_decision_folded_in_the_settlement_window_is_taken() {
                             ancestor: None,
                         }),
                     )
-                    .sequence,
+                    .sequence
+                }
             };
             env.dispatched("main", fact).await;
             change.release();
