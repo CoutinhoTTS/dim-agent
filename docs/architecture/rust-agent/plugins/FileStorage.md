@@ -335,15 +335,6 @@ test `lock_keys_stay_exclusive_across_concurrent_directory_removal` in the
 owner module drives the lock, removal and temporary-file interleavings that the
 public API cannot produce reliably.
 
-<!-- generated:plugin FileStorage — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 进程 |
-| 注入 | — |
-| 提供 | `P:FileStorage`、`P:FsHost`、`P:dyn HostDispatch#fsHost` |
-| 被注入于 | `HostPlatform` |
-<!-- /generated -->
-
 ## Native streaming reads
 
 `resolve(absolute)` identifies an existing authorized root without adding one;

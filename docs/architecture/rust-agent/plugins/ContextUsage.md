@@ -54,12 +54,3 @@ receive the ordinary final full-request check.
 `persisted_usage_reads_and_restores_without_projecting_history`,
 `unconfigured_usage_does_not_project_legacy_messages`,
 `provider_usage_baseline_counts_new_history_and_ignores_unusable_measurements`.
-
-<!-- generated:plugin ContextUsage — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:Dispatcher`、`B:Timeline`、`S:ContextModelHost`、`S:ToolRegistry` |
-| 提供 | `B:ContextUsage` |
-| 被注入于 | `ContextPreparation` |
-<!-- /generated -->

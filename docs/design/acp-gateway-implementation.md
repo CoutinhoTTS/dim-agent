@@ -494,7 +494,7 @@ live `session.submit` 仅将[原生保证集合](../../crates/dim-app-server/REA
 | D. 有依据的 Lody 子集 | 已完成接线：history/forkAtTurn/compaction、startup model/mode、后台 task、最小 subagent snapshots | 公开 stdio flows 覆盖固定头历史、真实终态锚点、task 与父工具独立、压缩取消、同 member 多次委派的 run 身份、startup model 优先级、三种 permission mode 与非 new 覆盖拒绝，以及断线 unknown/恢复新 activation。Lody GUI 基本聊天通过；不能据协议流测试声明所有 GUI 扩展已验收 |
 | E. 连接恢复、宿主退出与实机 | 已完成：RPC recovery、dimcode 原生入口、文档和验收记录 | 本轮 CLI 回归 123 passed、11 ignored、1 个恢复截止用例 filtered；Node MCP stdio 流程单独通过。覆盖不重发不确定变更、请求取消、输出预算、卸载结算。macOS acpx 基本聊天通过；Lody GUI MCP 工具验收受登录页阻塞，真实 OAuth、Windows/Linux 和发布包待验收。证据见验收记录 |
 
-这是串行交付范围，不为每个字段建立独立任务或 agent。实际实现路径引入 crate/依赖时运行 xtask check；装配变化按项目规则生成 graph，禁止手写 generated 输出。
+这是串行交付范围，不为每个字段建立独立任务或 agent。实际实现路径引入 crate/依赖时运行 xtask check。
 
 A 的消融复核：传输只保留一份，CLI 继续拥有 daemon 启动策略；删除了可由 hello features 直接判断的重复 shutdown flag。ConnectionConfig 是连接身份、profile 校验和重连所需的实际边界输入；callback 模块只拥有 I/O，没有账户业务。未发现可进一步删除且不损害既有行为的结构。
 

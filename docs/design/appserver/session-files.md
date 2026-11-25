@@ -727,7 +727,7 @@ refusal cases in [storage_flow.rs](../../../crates/dim-app-server/tests/storage_
 [file_storage_flow.rs](../../../crates/dim-agent-capabilities/tests/file_storage_flow.rs).
 
 Verification: `./dev check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`,
-`cargo test --workspace --locked`, and `cargo run --locked -p xtask -- graph` then `check`,
+`cargo test --workspace --locked`, and `cargo run --locked -p xtask -- check`,
 because SessionStore provides a new service.
 
 ## 17. Design changes in implementation

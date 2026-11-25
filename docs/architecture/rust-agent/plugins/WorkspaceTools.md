@@ -61,15 +61,6 @@ registration, and the local-only admission.
 drives `the_mention_index_drops_roots_whose_walk_is_past_its_ttl` with a
 shortened test TTL.
 
-<!-- generated:plugin WorkspaceToolsOwner — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 进程 |
-| 注入 | `P:PartRegistry` |
-| 提供 | `P:MentionIndex` |
-| 被注入于 | `WorkspaceTools` |
-<!-- /generated -->
-
 ## WorkspaceTools
 
 Owner: [workspace_tools/mod.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/mod.rs),
@@ -604,15 +595,6 @@ bounds and branch/Session ownership, then verifies replay and close behavior.
 The existing idle-unload/recovery flow in `local_execution.rs` also checks an
 empty live preview and unavailable historical captures.
 
-<!-- generated:plugin WorkspaceTools — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:HostPlatform`、`P:MentionIndex`、`S:SessionConfig`、`S:SessionIdentity`、`S:SessionMethods`、`S:TreeCommands` |
-| 提供 | `S:ToolHost`、`S:dyn HostDispatch#toolHost` |
-| 被注入于 | `ToolRegistry` |
-<!-- /generated -->
-
 ## FileReads
 
 Owner: [workspace_tools/file_reads.rs](../../../../crates/dim-agent-capabilities/src/workspace_tools/file_reads.rs).
@@ -655,15 +637,6 @@ a filesystem lock, permission grant or cross-process compare-and-swap.
 `a_compaction_that_keeps_the_read_leaves_the_write_admitted`,
 `an_edit_after_a_compaction_that_cut_its_read_succeeds`,
 `a_compaction_that_cuts_a_written_binding_refuses_the_next_write`.
-
-<!-- generated:plugin FileReads — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Timeline` |
-| 提供 | `B:FileReads` |
-| 被注入于 | — |
-<!-- /generated -->
 
 ## BackgroundExec
 
@@ -771,12 +744,3 @@ The `transport_flow/shell_input.rs` flow
 `node_object_faces_use_session_and_branch_owners_across_the_bridge` resolves
 `backgroundExec` through the real Node loader and verifies owner operations
 and Session isolation.
-
-<!-- generated:plugin BackgroundExec — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`S:GuideEntries`、`S:SessionLifecycle` |
-| 提供 | `B:BackgroundExec`、`B:dyn HostDispatch#backgroundExec` |
-| 被注入于 | — |
-<!-- /generated -->

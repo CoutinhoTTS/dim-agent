@@ -68,12 +68,3 @@ including a search term split across durable output deltas and fallback terms.
 [transport_flow/recall.rs](../../../../crates/dim-app-server/tests/transport_flow/recall.rs)
 finds `recall` in the tool table of both the product and the `--models`
 profile.
-
-<!-- generated:plugin Recall — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:ToolRegistry`、`S:TreeCommands` |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->

@@ -363,12 +363,3 @@ declaration's boundary line.
 methods, checks the backend report against the platform, covers an unreadable source failing
 preparation, then runs a sandboxed command with Network off and on that cannot write outside the
 workspace, and the same command with the sandbox off.
-
-<!-- generated:plugin HostPlatform — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 进程 |
-| 注入 | `P:ExecutionSettingsHost`、`P:FileStorage`、`P:ToolchainSourceHost` |
-| 提供 | `P:HostPlatform` |
-| 被注入于 | `HooksSession`、`PromptSources`、`ShellInput`、`SkillsCatalog`、`WorkspaceTools` |
-<!-- /generated -->

@@ -140,15 +140,6 @@ cover the failed-step settlements this page states, the continuation for calls
 that were never executed, the retry chain it shares, turn progression,
 interruption, pending-input restore and the manual compaction step.
 
-<!-- generated:plugin Loop — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:ContextPreparation`、`B:Dispatcher`、`B:Timeline`、`B:TimelineIdentity`、`B:ToolBinding`、`S:CompactionStrategyHost`、`S:ContextModelHost`、`S:GuideEntries`、`S:HistoryRenderer`、`S:PrepareModelHost` |
-| 提供 | `B:AgentLoop`、`B:StateCell<LoopSnapshot>`、`B:dyn LoopState` |
-| 被注入于 | — |
-<!-- /generated -->
-
 ## Request Session identity
 
 When Loop constructs `ContextPrepareData.request`, it writes the owning Timeline's

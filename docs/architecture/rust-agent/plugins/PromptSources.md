@@ -76,15 +76,6 @@ callback, and isolation between two Sessions.
 injection; [prompt_sources.rs](../../../../tests/integration/tests/prompt_sources.rs)
 checks `system_is_static_and_instructions_and_environment_arrive_as_inputs`.
 
-<!-- generated:plugin PromptRegistry — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `S:SessionConfig` |
-| 提供 | `S:InitialPromptConfiguration`、`S:PromptHost`、`S:PromptRegistry`、`S:dyn HostDispatch#initialPromptConfiguration`、`S:dyn HostDispatch#promptHost`、`S:dyn HostDispatch#promptRegistry` |
-| 被注入于 | `Prompt`、`PromptSources`、`PromptSourcesBranch`、`Skills` |
-<!-- /generated -->
-
 ## PromptSources
 
 Owner: [prompt_sources.rs](../../../../crates/dim-agent-capabilities/src/prompt_sources.rs).
@@ -161,15 +152,6 @@ None (§4 rule 8). Existing source refresh and adoption cover shell changes.
 covers the reply language end to end, including a branch opened after the value
 was applied (`a_branch_opened_after_the_value_was_applied_holds_one_block`).
 
-<!-- generated:plugin PromptSources — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:HostPlatform`、`S:PromptRegistry`、`S:SessionConfig` |
-| 提供 | `S:SessionLanguage`、`S:dyn HostDispatch#sessionLanguage` |
-| 被注入于 | `PromptSourcesBranch` |
-<!-- /generated -->
-
 ## PromptSourcesBranch
 
 Owner: [prompt_sources.rs](../../../../crates/dim-agent-capabilities/src/prompt_sources.rs).
@@ -202,12 +184,3 @@ configured checked set, not automatic adoption of every possible source.
 `agents_md_changes_arrive_as_rules_from_the_periodic_check`,
 `unreadable_project_instructions_keep_the_adopted_version`,
 `a_loaded_branch_appends_a_date_reminder_when_the_day_changes`.
-
-<!-- generated:plugin PromptSourcesBranch — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:Prompt`、`B:StateCell<PromptSnapshot>`、`S:PromptHost`、`S:SessionLanguage` |
-| 提供 | `B:PromptSourcesBranch` |
-| 被注入于 | — |
-<!-- /generated -->

@@ -146,7 +146,7 @@ A read failure is not a value. The design does not append `unknown` or a fabrica
 | `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot, and `branch/start` with a parent tells a line whose identity input opens it after the opening |
 | Process bus (`SettingsChanged`) | Wake on a committed write |
 
-Service faces follow the [owner catalog](../../architecture/rust-agent/generated/catalog.md#services): the execution source's process `executionSettingsHost` is a data face with asynchronous `read({})`; `timeline`, `branchLifecycle` and `dispatcher` are data faces. This Rust projection is not a leaf-ready foreign part.
+The execution source's process `executionSettingsHost` is a data face with asynchronous `read({})`; `timeline`, `branchLifecycle` and `dispatcher` are data faces. This Rust projection is not a leaf-ready foreign part.
 
 The App Server profile requires `SettingsSnapshotBranch` (`AgentBuilder::require_part`) where it installs `ExecutionSettingsPlugin`, so a branch opening never seals before the part registered its opening receipt.
 

@@ -137,15 +137,6 @@ settings mutation was durably saved.
 `skills_replies_and_the_user_document_stay_safe`,
 `skills_startup_removes_a_staging_root_an_abnormal_end_left`.
 
-<!-- generated:plugin SkillsCatalog — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 进程 |
-| 注入 | `P:HostPlatform`、`P:PartRegistry`、`P:SkillSettingsHost` |
-| 提供 | `P:SkillsCatalog`、`P:SkillsCatalog#dim/skills/catalog-owner`、`P:dyn HostDispatch#skillsCatalog` |
-| 被注入于 | `Skills` |
-<!-- /generated -->
-
 ## Skills
 
 Owner: [skills/session.rs](../../../../crates/dim-agent-capabilities/src/skills/session.rs).
@@ -260,15 +251,6 @@ The `skills` check is covered by `crates/dim-app-server/tests/transport_flow/ski
 `a_restored_session_keeps_the_block_in_its_recorded_input`) and
 `hooks_flow::a_prompt_submit_hook_precedes_a_referenced_skill`.
 
-<!-- generated:plugin Skills — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | `P:SkillsCatalog#dim/skills/catalog-owner`、`S:PromptRegistry`、`S:SessionConfig`、`S:SessionLifecycle`、`S:SessionLoader`、`S:SkillsConfig`、`S:SubmitChecks`、`S:ToolRegistry` |
-| 提供 | `S:SessionSkills` |
-| 被注入于 | `SkillsBranch` |
-<!-- /generated -->
-
 ## SkillsBranch
 
 Owner: [skills/session.rs](../../../../crates/dim-agent-capabilities/src/skills/session.rs).
@@ -318,15 +300,6 @@ Failed adoption is logged; a later view change can retry.
 `a_view_change_inside_a_turn_reaches_the_next_request` and
 `enablement_changes_the_list_and_loading`.
 
-<!-- generated:plugin SkillsBranch — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | 分支 |
-| 注入 | `B:BranchLifecycle`、`B:dyn ConfigureControl`、`S:SessionSkills` |
-| 提供 | `B:SkillsBranch`、`B:dyn HostDispatch#skillsBranch` |
-| 被注入于 | — |
-<!-- /generated -->
-
 ## SkillContentInstances
 
 Owner: [skills/mod.rs](../../../../crates/dim-agent-capabilities/src/skills/mod.rs).
@@ -348,15 +321,6 @@ carries mutable per-Session definitions. See [Skills](Skills.md) for selection.
 [skills.rs](../../../../tests/integration/tests/skills.rs) covers independent
 instances and selective replacement through public Session flows.
 
-<!-- generated:plugin SkillContentInstances — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | — |
-| 提供 | — |
-| 被注入于 | — |
-<!-- /generated -->
-
 ## SkillContent
 
 Owner: [skills/content.rs](../../../../crates/dim-agent-capabilities/src/skills/content.rs).
@@ -375,12 +339,3 @@ The leaf publishes its immutable definition under the private key derived from
 
 [skills.rs](../../../../tests/integration/tests/skills.rs) covers loading actual
 content, selective replacement, disabled content and independent Session closure.
-
-<!-- generated:plugin SkillContent — 由 `cargo run -p xtask -- graph` 从真实装配生成，勿手改 -->
-| 项 | 值 |
-| --- | --- |
-| 作用域 | Session |
-| 注入 | — |
-| 提供 | `S:Contribution#user:graph` |
-| 被注入于 | — |
-<!-- /generated -->

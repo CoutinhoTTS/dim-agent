@@ -135,7 +135,7 @@ rutis-bridge 的 `Session::new(channel)` 把一条 `Channel` 的对端接进本�
 
 ### 1.2 什么能过去
 
-判据在 rutis-bridge 的导出实现里，不在 `xtask graph` 的 “Crosses languages” 列：
+rutis-bridge 按以下条件导出服务。
 
 | 条件 | 说明 |
 | --- | --- |
@@ -178,9 +178,6 @@ Channel 的认证在连接插件里：`dial` 支持 bearer token 或客户端证
 | `sessions`、`settings`、`pluginFiles`、`sessionMetadata`、`workflowFiles`、`partRegistry` | process | 是 | 有 dispatcher |
 | `partRegistry` 的部件副本 | session/branch | 否 | 见 §1.5 |
 
-补充三点：
-
-- `docs/architecture/rust-agent/generated/catalog.md` 的 “Crosses languages” 列描述的是被 `#[rutis::service]` 标记的 Rust 类型，不等于“会跨 link”。实际导出看 `host_key(name)` 上有没有 dispatcher。
 - `P:HostPlatform`、`P:FileStorage` 是进程级类型依赖，嵌入在 WorkspaceTools、ShellSession、Hooks、Modality 等部件里。把它们改成可跨的 wire 服务，改的是这些消费者的调用面，不只是 HostPlatform 本身。
 - 类型键是 Dim 的写法选择，不是 rutis 的限制：在 `host_key(name)` 上提供 dispatcher 之后，进程级服务就能进导出名单。所以 `hostPlatform`/`fileStorage` 的“不能跨”是接口没按跨进程设计，不是位置不对；代价是接口要改成操作 + 数据，不能保留 `ProcessTree`、`FilePath` 这类对象。实例内的名字（`timeline`、`toolRegistry`）换写法解决不了。
 
@@ -369,7 +366,7 @@ leaf 是 rutis 里对端的一种角色，不是实例：
 
 SessionTitle 不在第一档：它的根部件注入 `SettingsService` 和 `PartRegistry`，Session 部件注入 `SettingsService`、`SessionStore`、`AuxiliaryModelHost`（`crates/dim-session-title/src/lib.rs:79`、`:134`–`:143`）。这四个服务要的操作都已有数据面：`SettingsService` 的 `read_declared`/`register_declared` 是 `settings.read`/`settings.register`，`SessionStore` 的 `metadata`/`set_title` 是 `sessionMetadata.read`/`sessionMetadata.setTitle`，`AuxiliaryModelHost::complete` 是 `auxiliaryModel.complete`（`crates/dim-session-title/src/lib.rs:286`、`:297`、`:368`、`:441`–`:450`）；`PartRegistry::register` 对应跨语言的 `partRegistry.registerDefinition`，其余注入 `sessions`、`sessionIdentity`、`sessionConfig`、`sessionLifecycle`、`sessionMethods` 本来就跨语言。所以它不需要新 dispatcher，只要把这些类型键的调用换成数据面的名字——和 GoalBranch 的 `settingsService` → `settings` 是同一个动作。
 
-上面这份注入清单对应 main `842ceb5f`。[#1305](https://github.com/arcships/dim/pull/1305) 合并后 SessionTitle 不再注入 `sessions`，改用 `Key<TreeCommands>` 并调 `TreeCommands::query`；`treeCommands` 同样是跨语言的 session 数据面（`docs/architecture/rust-agent/generated/catalog.md:98`），所以换成它就是换名字，结论不变。
+上面这份注入清单对应 main `842ceb5f`。[#1305](https://github.com/arcships/dim/pull/1305) 合并后 SessionTitle 不再注入 `sessions`，改用 `Key<TreeCommands>` 并调 `TreeCommands::query`；`treeCommands` 同样是跨语言的 session 数据面，所以换成它就是换名字，结论不变。
 
 SessionBroadcastEnd 也不在第一档：它只注入 `SessionIdentity`（`crates/dim-agent-capabilities/src/session_broadcast.rs:192`–`:193`），但卸载 effect 读 `identity.unloading.is_cancelled()`（`:214`），用来区分“实例空闲释放”和“业务关闭”。`SessionIdentity.unloading` 是 `#[serde(skip)]`（`crates/dim-agent-runtime/src/config.rs:118`–`:119`），`sessionIdentity.get` 只回 `{sessionId, restored}`（`:128`–`:130`）。leaf 拿不到这个 token，只能在每次卸载都发 `Closed`（空闲释放也会被当成关闭）或从不发，事件契约随部件位置改变。所以在 `sessionIdentity` 或 `sessionLifecycle` 上加一个 idle release/close 的数据面之前，它留在宿主。
 
@@ -571,7 +568,6 @@ flowchart TB
 落地：
 
 - 新服务必须标 `#[rutis::service]`；标 `internal` 的要写原因。`xtask check` 拒绝没有标记的进程/Session/branch 服务名。
-- `xtask graph` 的 catalog 把 `Crosses languages` 换成 `face: data | internal(reason)`，让例外可见。
 - 模板和评审清单加一条：“公开服务的方法只有数据；句柄留在哪一层内部？”
 - `HostPlatform`、`FileStorage`、`SqliteStorage` 作为第一批参照：内部保留对象，公开面换成 id 加操作。
 
@@ -677,7 +673,7 @@ flowchart TB
 
 远程 PG 是 [#1298](https://github.com/arcships/dim/issues/1298) 的独立里程碑；本路线不包含存储后端、租约或接管。
 
-每个阶段都要跑 `./dev check`、相关 crate 的测试，以及改动作用域的 flow 测试（`host_platform_flow.rs`、`local_execution.rs`、`minimal_execution.rs`、`tests/integration` 里的执行与工具流程）；改装配后跑 `xtask check` / `graph`。
+每个阶段都要跑 `./dev check`、相关 crate 的测试，以及改动作用域的 flow 测试（`host_platform_flow.rs`、`local_execution.rs`、`minimal_execution.rs`、`tests/integration` 里的执行与工具流程）；改装配后跑 `xtask check`。
 
 如果选择 §4.1（搬实例子树），阶段 0 之后直接做“Session 门面 + 依赖闭包装配”的尖刀验证，不经过阶段 1–3 的 exec/FS 数据接口；存储不在本路线，见 #1298。两条路不要同时做。
 
@@ -718,4 +714,3 @@ flowchart TB
 | 文件工具直接用本机 fs | `crates/dim-agent-capabilities/src/workspace_tools/files/*` |
 | Timeline 的写入与发布 | `docs/architecture/rust-agent/timeline-storage.md`；`crates/dim-agent-runtime/src/timeline_store.rs:71` |
 | 多节点与 `resourceNode` 的既有约定 | `docs/design/overview.md:344`–`:356` |
-| 各部件的服务作用域 | `docs/architecture/rust-agent/generated/catalog.md` |

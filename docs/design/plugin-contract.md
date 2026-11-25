@@ -97,11 +97,7 @@ Which scope that is, is a Dim decision:
 
 ## 4. Dim's services
 
-The names Dim defines, each following the identity and shape rules of
-[rutis usage §3](rutis-usage.md#3-services-by-name). The authoritative table is the
-[generated catalog](../architecture/rust-agent/generated/catalog.md): `xtask graph` writes it from the
-real assembly with each name's group, provider, methods and whether it crosses languages (rutis usage
-R4). This table says what each name Dim defines is for.
+Dim service names follow the identity and shape rules in [rutis usage §3](rutis-usage.md#3-services-by-name).
 
 | Name | Scope | Provider | Crosses languages today | Notes |
 | --- | --- | --- | --- | --- |
@@ -124,9 +120,7 @@ R4). This table says what each name Dim defines is for.
 | `branchLifecycle` | `branch` | BranchScope | yes | `activated`, `closing`. `registerOpening` registers work that branch opening waits for. |
 | `timelineIdentity` | `branch` | BranchScope | yes | `{sessionId, branchId}` |
 
-The Rust host ports and registries (ToolRegistry, PromptRegistry, ToolHost, ModelHost,
-PrepareModelHost and the others in the [generated services](../architecture/rust-agent/generated/services.md))
-get names and scopes in phase 2. Their public contract follows
+Rust host ports and registries get names and scopes in phase 2. Their public contract follows
 [service faces §2](service-faces.md), including opening receipts and state observations.
 Language bindings preserve the owning service's operations and lifecycle; a private implementation
 mechanism is not a public service merely because a Rust type has a key.
@@ -321,7 +315,7 @@ The rules a design answers (§6) are conventions. Three things check them:
 
 | Check | What it covers |
 | --- | --- |
-| `xtask graph` / `check` | Crate boundaries, generated assembly graphs, plugin pages against the code, and the [catalog table](../architecture/rust-agent/generated/catalog.md), which also marks which parts are Capabilities (they inject `dispatcher` or `timeline`) |
+| `xtask check` | Crate and module boundaries, service faces and plugin dependencies in the actual assembly |
 | Review and the pull request template | The Rule check: principles §4 rules 1–9, §1, ADR 002 D1–D5 |
 | Flow tests | Observable behaviour: ordering, rebuild, reload settlement, close |
 

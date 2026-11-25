@@ -1313,8 +1313,8 @@ predicate or catalog construction. The contract therefore serves any native reco
 without a migration-specific owner API, callback or RPC.
 
 **Compatibility.** The contract is a Rust module boundary over an already-admitted type,
-not a rutis service, RPC or management method. It adds no service name, generated graph
-entry, crate dependency, persistence or `PROTOCOL_VERSION` change. Legacy import outcomes
+not a rutis service, RPC or management method. It adds no service name, crate
+dependency, persistence or `PROTOCOL_VERSION` change. Legacy import outcomes
 and rejection text are unchanged because the selection conversion maps any refusal to its
 existing reason, and an accepted selection writes the same provider and model IDs. The
 reply carries no credential, header, proxy or secret reference; the record input is the
