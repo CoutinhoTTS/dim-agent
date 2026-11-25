@@ -2138,9 +2138,9 @@ mod tests {
     }
 
     /// A live creation failure the parent's page has not projected yet, or a
-    /// page that records the creation and its failure in either order, leaves
-    /// the child terminal: `/lines` refuses it, and the parent's finished
-    /// window neither resets nor queues it.
+    /// page that records the creation and its failure together, leaves the
+    /// child terminal: `/lines` refuses it, and the parent's finished window
+    /// neither resets nor queues it.
     #[tokio::test]
     async fn a_create_failure_is_terminal_whatever_the_page_order() {
         let create = json!({
