@@ -346,6 +346,9 @@ async fn a_part_mounted_after_the_opening_event_dispatched_writes_after_the_iden
 /// not fail the read, so both environment receipts append their snapshot while
 /// the opening still collects them. Otherwise the receipt that reads after the
 /// other part's append leaves its snapshot to the first pass after activation.
+/// The flow runs on a current-thread runtime, so the release below runs only
+/// once the Session's build task yielded, i.e. after both receipts read; on a
+/// multi-threaded runtime it could overtake the second read.
 #[tokio::test]
 async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
     let dirs = Dirs::new();
