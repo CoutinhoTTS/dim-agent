@@ -845,10 +845,10 @@ pub struct HoldingStore {
     selected: Mutex<Option<String>>,
     held: Mutex<Vec<PublishCallback>>,
     /// Holds every environment snapshot batch appended from now on until
-    /// [`Self::release`], and counts them.
+    /// [`Self::release`].
     hold_snapshots: std::sync::atomic::AtomicBool,
-    snapshot_batches: AtomicUsize,
-    /// The snapshots appended while the hold was armed.
+    /// The batches the snapshot hold held: the snapshots a line's opening
+    /// receipts appended before the test released them.
     released_snapshots: Mutex<Option<usize>>,
     /// The branch whose read is held, and how many matching reads pass
     /// before it; `None` when no read hold is armed.
@@ -872,7 +872,6 @@ impl Default for HoldingStore {
             selected: Mutex::new(None),
             held: Mutex::new(Vec::new()),
             hold_snapshots: std::sync::atomic::AtomicBool::new(false),
-            snapshot_batches: AtomicUsize::new(0),
             released_snapshots: Mutex::new(None),
             read_branch: Mutex::new(None),
             next_branch_read: Mutex::new(None),
@@ -949,8 +948,7 @@ impl HoldingStore {
             .hold_snapshots
             .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            *self.released_snapshots.lock().unwrap() =
-                Some(self.snapshot_batches.load(Ordering::SeqCst));
+            *self.released_snapshots.lock().unwrap() = Some(self.held.lock().unwrap().len());
         }
         let held = std::mem::take(&mut *self.held.lock().unwrap());
         for publish in held {
@@ -1062,10 +1060,11 @@ impl TimelineStore for HoldingStore {
             hold
         };
         if !hold {
-            if self.hold_snapshots.load(std::sync::atomic::Ordering::SeqCst)
+            if self
+                .hold_snapshots
+                .load(std::sync::atomic::Ordering::SeqCst)
                 && environment_snapshot(&events)
             {
-                self.snapshot_batches.fetch_add(1, Ordering::SeqCst);
                 self.memory.append(key, events, Box::new(|_| ()))?;
                 self.held.lock().unwrap().push(publish);
                 self.entered.notify_one();

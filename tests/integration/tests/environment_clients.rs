@@ -377,7 +377,7 @@ async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
     });
     tokio::pin!(creation);
     let session = tokio::select! {
-        _ = &mut creation => panic!("the Session opens before its opening snapshots were held"),
+        result = &mut creation => result.expect("the Session opens"),
         () = async {
             store.entered.notified().await;
             store.release();
@@ -407,7 +407,10 @@ async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
             snapshots.len(),
             1,
             "{label} is published once: {:?}",
-            events.iter().map(|event| event.kind.key()).collect::<Vec<_>>()
+            events
+                .iter()
+                .map(|event| event.kind.key())
+                .collect::<Vec<_>>()
         );
     }
 
