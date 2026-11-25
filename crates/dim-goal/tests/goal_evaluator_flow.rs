@@ -2208,7 +2208,7 @@ async fn pursuit_5_a_failed_or_cancelled_evaluator_turn_reports_failed() {
 
 /// A conclusion or an evaluator failure that folds while a change holds task
 /// admission is decided before that change states its own record (#2158).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn a_decision_folded_in_the_settlement_window_is_taken() {
     for case in ["done", "blocked", "evaluation_failed"] {
         let env = Env::start().await;
