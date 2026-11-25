@@ -1737,7 +1737,7 @@ fn classified(failure: AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
 fn a_status_code_in_a_stream_event_is_a_class_label() {
     use aimux_core::ApiCallErrorOrigin::{HttpResponse as Http, StreamEvent as Event, Transport};
 
-    let cases: [(ApiCallErrorOrigin, Option<u16>, &[&str], ModelFailureKind); 14] = [
+    let cases: [(ApiCallErrorOrigin, Option<u16>, &[&str], ModelFailureKind); 12] = [
         // The event's own code decides, not the status aimux guessed for it.
         (Event, Some(500), &["502"], ModelFailureKind::ServerError),
         (Event, Some(500), &["504"], ModelFailureKind::ServerError),
@@ -1752,9 +1752,6 @@ fn a_status_code_in_a_stream_event_is_a_class_label() {
             &["429", "insufficient_quota"],
             ModelFailureKind::QuotaExhausted,
         ),
-        // A number outside the status classes is not one.
-        (Event, Some(500), &["399"], ModelFailureKind::Unknown),
-        (Event, Some(500), &["600"], ModelFailureKind::Unknown),
         // A transport failure stays a network failure, and a response's own
         // status outranks the code its body carries.
         (Transport, None, &["502"], ModelFailureKind::Network),
@@ -1782,7 +1779,7 @@ fn a_status_code_in_a_stream_event_is_a_class_label() {
 
 /// A stream event that writes its status as a JSON integer is read through
 /// the same three digits, in its own shape or one level down in the response
-/// envelope, and one outside the status classes leaves the kind unknown.
+/// envelope, and a number outside 400 to 599 is not read as a code at all.
 #[test]
 fn a_stream_event_status_written_as_a_number_is_a_class_label() {
     use aimux_core::ApiCallErrorOrigin::StreamEvent as Event;
@@ -1831,13 +1828,26 @@ fn a_stream_event_status_written_as_a_number_is_a_class_label() {
     ));
     assert_eq!(facts.kind, ModelFailureKind::ServerError);
 
-    let (_, facts) = classified(call_failure(
-        Event,
-        Some(500),
-        json!({"error": {"code": 1000, "message": "Unrecognized."}}),
-        None,
-    ));
-    assert_eq!(facts.kind, ModelFailureKind::Unknown);
+    // A number outside the status classes decides nothing, and the code it
+    // was read from stays empty: the status aimux guessed for the event does
+    // not decide the kind either.
+    for code in [399, 600, 1000] {
+        let (kind, facts) = classified(call_failure(
+            Event,
+            Some(500),
+            json!({"error": {"code": code, "message": "Unrecognized."}}),
+            None,
+        ));
+        assert_eq!(facts.kind, ModelFailureKind::Unknown, "{code}");
+        assert_eq!(
+            kind,
+            HostErrorKind::Http {
+                status: Some(500),
+                code: None,
+            },
+            "{code}"
+        );
+    }
 }
 
 /// Only a stream event writes its status as a number: a response's own status
