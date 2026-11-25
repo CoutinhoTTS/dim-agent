@@ -6251,12 +6251,15 @@ enum NotesCheck {
 /// and every note is read over the inputs that did reach the model. A request
 /// that never reached the model fails the run as a missing note, and so does
 /// one that reached it without its note. A receipt the run's own turn cap
-/// stopped, or no turn consumed, leaves the probe with no request to read, but
-/// the check reads every receipt and note before it reports that cap: the run
-/// is an incomplete fixture rather than a missing note only when no receipt or
-/// note confirms a failure (model-prompts §8.1, issue #2140).
+/// stopped, no turn consumed, or a line that ended before it could answer it
+/// leaves the probe with no request to read, but the check reads every receipt
+/// and note before it reports that cap: the run is an incomplete fixture
+/// rather than a missing note only when no receipt or note confirms a failure.
+/// A run that already failed or reached its wall clock is not checked: that
+/// stop, not the note, kept the request from the model (model-prompts §8.1,
+/// issue #2140).
 fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
-    if driven.error.is_some() {
+    if driven.error.is_some() || driven.timed_out {
         return NotesCheck::Observed;
     }
     let cap_stop = (driven.stop == "turns").then(|| budget_stop_reason(driven.stop));
@@ -6277,6 +6280,9 @@ fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
             Carried::Unconsumed if cap_stop.is_some() => cap_cut = true,
             Carried::Unconsumed => {}
             Carried::CapCut => cap_cut = true,
+            // A line that ended before it consumed the input cannot answer it,
+            // as one that never consumed it: no answer of that line is scored.
+            Carried::EndedBeforeAnswer => {}
             Carried::Unreached => {
                 return NotesCheck::Unseen(format!(
                     "line {} consumed {} but its request never reached the model",
@@ -6296,7 +6302,8 @@ fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
 /// consumed follow-up's note reached the model: the request
 /// [`carried_request`] reads for the input, and the note's exact text
 /// (Timeline branches §12.4). An input no request consumed is not checked: no
-/// answer of that line is scored. A request a steer replaced before its model
+/// answer of that line is scored, and neither is one whose line ended before
+/// the request reached the model. A request a steer replaced before its model
 /// call is not checked either: the note travels in the request that replaces
 /// it in the same turn. A request the run's own turn-budget stop ended, whose
 /// reason `cap_stop` carries, is not reported either: that stop, not the note,
@@ -6343,7 +6350,7 @@ fn switch_notes_unseen(
             ));
         };
         let call = match carried_request(export, &message.branch, &note.input, cap_stop) {
-            Carried::Unconsumed | Carried::CapCut => continue,
+            Carried::Unconsumed | Carried::CapCut | Carried::EndedBeforeAnswer => continue,
             Carried::Unreached => {
                 return Some(format!(
                     "line {} consumed the switch input {} but its request never reached the model",
@@ -6386,6 +6393,10 @@ enum Carried {
     /// The run's own turn cap stopped that request before its model call, when
     /// the caller names the cap's reason.
     CapCut,
+    /// The line ended at or before it consumed the input, and no request of
+    /// the line reached the model after that: the line cannot answer the
+    /// input (Timeline branches §10; issue #2140).
+    EndedBeforeAnswer,
     /// No request the consuming turn began reached the model.
     Unreached,
 }
@@ -6395,7 +6406,9 @@ enum Carried {
 /// when no turn begins or ends in between. Only that request's own
 /// `model/call` answers for the input, or the call of a request that replaced
 /// it inside the same turn through `replaced by steer`. A start without a turn
-/// id joins no other start's turn and replaces nothing.
+/// id joins no other start's turn and replaces nothing. An input whose line
+/// ended at or before the consumption, with no request of the line reaching
+/// the model after it, has no answer to read.
 fn carried_request(export: &str, branch: &str, input: &str, cap_stop: Option<&str>) -> Carried {
     /// One `step/model-start` on the input's line.
     struct Start {
@@ -6406,10 +6419,11 @@ fn carried_request(export: &str, branch: &str, input: &str, cap_stop: Option<&st
     let mut consumed_at: Option<u64> = None;
     let mut turns: Vec<u64> = Vec::new();
     let mut starts: Vec<Start> = Vec::new();
-    let mut calls: BTreeMap<String, Value> = BTreeMap::new();
+    let mut calls: BTreeMap<String, (u64, Value)> = BTreeMap::new();
     let mut replaced: BTreeSet<String> = BTreeSet::new();
     let mut cut: BTreeSet<String> = BTreeSet::new();
     let mut ended: BTreeMap<String, u64> = BTreeMap::new();
+    let mut ended_line: Option<u64> = None;
     let mut ended_turns: BTreeMap<String, u64> = BTreeMap::new();
     let mut interrupted: Vec<u64> = Vec::new();
     for line in export.lines() {
@@ -6438,7 +6452,10 @@ fn carried_request(export: &str, branch: &str, input: &str, cap_stop: Option<&st
             }
             (Some("model"), Some("call")) => {
                 if let Some(request) = event["data"]["request_id"].as_str() {
-                    calls.insert(request.to_owned(), event["data"]["request"].clone());
+                    calls.insert(
+                        request.to_owned(),
+                        (sequence, event["data"]["request"].clone()),
+                    );
                 }
             }
             (Some("step"), Some("model-output-end")) => {
@@ -6455,6 +6472,9 @@ fn carried_request(export: &str, branch: &str, input: &str, cap_stop: Option<&st
                             .or_insert(sequence);
                     }
                 }
+            }
+            (Some("branch"), Some("end")) => {
+                ended_line = Some(ended_line.map_or(sequence, |at| at.min(sequence)));
             }
             (Some("turn"), Some("start")) => turns.push(sequence),
             (Some("turn"), Some("end")) => {
@@ -6499,6 +6519,15 @@ fn carried_request(export: &str, branch: &str, input: &str, cap_stop: Option<&st
     let Some(consumed_at) = consumed_at else {
         return Carried::Unconsumed;
     };
+    // A line that ended at or before it consumed the input cannot answer it,
+    // and no answer of that line is scored. A request of the line that reached
+    // the model after the consumption still answers for it (Timeline branches
+    // §10, §12.4; issue #2140).
+    if ended_line.is_some_and(|ended_at| ended_at <= consumed_at)
+        && !calls.values().any(|(at, _)| *at > consumed_at)
+    {
+        return Carried::EndedBeforeAnswer;
+    }
     let Some(first) = starts
         .iter()
         .filter(|start| start.sequence > consumed_at)
@@ -6516,7 +6545,7 @@ fn carried_request(export: &str, branch: &str, input: &str, cap_stop: Option<&st
     }
     let mut request = first;
     loop {
-        if let Some(call) = calls.get(&request.request) {
+        if let Some((_, call)) = calls.get(&request.request) {
             return Carried::Call(call.clone());
         }
         let Some(turn) = request.turn.clone() else {
@@ -6585,7 +6614,7 @@ fn fixture_incomplete(driven: &Driven, scenario: &Scenario, export: &str) -> Opt
                     input.line, input.what, driven.stop
                 ));
             }
-            Carried::CapCut | Carried::Unreached => {
+            Carried::CapCut | Carried::EndedBeforeAnswer | Carried::Unreached => {
                 return Some(format!(
                     "line {}: no request carried {} to the model before the run stopped on {}",
                     input.line, input.what, driven.stop
