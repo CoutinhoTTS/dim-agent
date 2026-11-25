@@ -32,3 +32,5 @@ mod storage_flow;
 mod storage_session_flow;
 #[cfg(unix)]
 mod transport_limits;
+#[cfg(not(unix))]
+mod worktree_removal_flow;

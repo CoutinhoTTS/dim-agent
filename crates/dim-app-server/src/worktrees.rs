@@ -1760,8 +1760,10 @@ fn parse_duration(text: &str) -> Result<Duration, RpcError> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
+    #[cfg(unix)]
     fn scratch(name: &str) -> PathBuf {
         let path =
             std::env::temp_dir().join(format!("dim-worktrees-{name}-{}", uuid::Uuid::new_v4()));
@@ -1857,27 +1859,5 @@ mod tests {
         );
         assert!(child.is_dir());
         std::fs::remove_dir_all(&entry).unwrap();
-    }
-
-    /// A non-Unix target deletes a directory by path, so a reparse point
-    /// swapped in after the check could redirect the non-force removal; this
-    /// path refuses and `--force` removes the tree instead.
-    #[cfg(not(unix))]
-    #[tokio::test]
-    async fn a_path_based_removal_refuses_an_unregistered_directory() {
-        let entry = scratch("path-based-removal");
-        let child = entry.join("repo");
-        std::fs::create_dir_all(&child).unwrap();
-        let error = remove_checked_entry(&entry, std::slice::from_ref(&child), false)
-            .await
-            .expect_err("a path-based removal must refuse the non-force removal");
-        assert_eq!(error.code(), "worktree_in_use");
-        assert!(
-            matches!(&error, WorktreeError::InUse(message) if message.contains("--force")),
-            "{error:?}"
-        );
-        assert!(child.is_dir());
-        remove_checked_entry(&entry, &[], true).await.unwrap();
-        assert!(!entry.exists());
     }
 }
