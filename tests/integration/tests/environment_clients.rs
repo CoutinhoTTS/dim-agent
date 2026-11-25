@@ -303,10 +303,6 @@ async fn a_part_mounted_after_the_opening_event_dispatched_writes_after_the_iden
         Options {
             clients: Some(presence.host()),
             opening_dispatch_hold: Some(hold.clone()),
-            // The opening must outlast the replacement this flow performs while
-            // the opening event's dispatch is held, so an older tree fails on
-            // where the snapshot lands instead of failing to open.
-            startup_timeout: Some(Duration::from_secs(30)),
             ..Options::default()
         },
     )
