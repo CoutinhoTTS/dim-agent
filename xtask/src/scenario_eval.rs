@@ -6247,17 +6247,20 @@ enum NotesCheck {
 
 /// The run's switch inputs and notes as the export shows them (Timeline
 /// branches §12.4). A run that already failed is not checked. Every input a
-/// move submitted must be carried by the request of the turn that consumed it:
-/// one the run's own turn cap stopped leaves the probe with no request to
-/// read, and the run is an incomplete fixture rather than a missing note
-/// (model-prompts §8.1, issue #2140). Every other input that never reached the
-/// model fails the run as a missing note before the judge. The notes are then
-/// read over the inputs that did reach the model.
+/// move submitted must be carried by the request of the turn that consumed it,
+/// and every note is read over the inputs that did reach the model. A request
+/// that never reached the model fails the run as a missing note, and so does
+/// one that reached it without its note. A receipt the run's own turn cap
+/// stopped, or no turn consumed, leaves the probe with no request to read, but
+/// the check reads every receipt and note before it reports that cap: the run
+/// is an incomplete fixture rather than a missing note only when no receipt or
+/// note confirms a failure (model-prompts §8.1, issue #2140).
 fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
     if driven.error.is_some() {
         return NotesCheck::Observed;
     }
     let cap_stop = (driven.stop == "turns").then(|| budget_stop_reason(driven.stop));
+    let mut cap_cut = false;
     for input in &driven.switch_notes.inputs {
         let Some(id) = input.input.as_deref() else {
             return NotesCheck::Unseen(format!(
@@ -6268,11 +6271,12 @@ fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
         match carried_request(export, &input.line, id, cap_stop.as_deref()) {
             Carried::Call(_) => {}
             // An input no turn consumed is not checked: no answer of its line
-            // is scored. When the run stopped on its turn cap, that cap is
-            // what left it unobserved.
-            Carried::Unconsumed if cap_stop.is_some() => return NotesCheck::CapCut,
+            // is scored. When the run stopped on its turn cap, that cap is what
+            // left it unobserved, and the run is incomplete only if no other
+            // receipt or note confirms a failure.
+            Carried::Unconsumed if cap_stop.is_some() => cap_cut = true,
             Carried::Unconsumed => {}
-            Carried::CapCut => return NotesCheck::CapCut,
+            Carried::CapCut => cap_cut = true,
             Carried::Unreached => {
                 return NotesCheck::Unseen(format!(
                     "line {} consumed {} but its request never reached the model",
@@ -6283,6 +6287,7 @@ fn switch_note_check(driven: &Driven, export: &str) -> NotesCheck {
     }
     match switch_notes_unseen(export, &driven.switch_notes.expected, cap_stop.as_deref()) {
         Some(error) => NotesCheck::Unseen(error),
+        None if cap_cut => NotesCheck::CapCut,
         None => NotesCheck::Observed,
     }
 }
