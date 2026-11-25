@@ -8492,7 +8492,7 @@ async fn send_switch_follow_ups(
 /// fixture input: its receipt names the line the Session's default branch was
 /// when it was sent.
 async fn fire_due(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     steers: &mut [(Steer, bool)],
     line: &str,
@@ -8522,7 +8522,7 @@ async fn fire_due(
 /// Sends the event-triggered steers whose substring the notice's
 /// `step/tool-use` event carries, and whether it sent one.
 async fn fire_triggered(
-    client: &mut Client,
+    client: &mut impl SwitchClient,
     session: &str,
     steers: &mut [(Steer, bool)],
     line: &str,
@@ -11362,6 +11362,65 @@ mod tests {
         );
     }
 
+    /// A switch input the line consumed, whose request never reached the model
+    /// for any reason other than the run's turn cap, fails the run before the
+    /// judge: no request of the consuming turn carried the input, on the root
+    /// line that owes no note as on any other (Timeline branches §12.4,
+    /// model-prompts §8.1).
+    #[test]
+    fn a_consumed_switch_input_whose_request_never_reached_the_model_is_unseen() {
+        let event = |sequence: u64, kind: [&str; 2], data: Value| {
+            json!({"kind": "event", "branch_id": "main",
+                   "event": {"id": format!("e{sequence}"), "sequence": sequence,
+                             "type": kind[0], "name": kind[1], "data": data}})
+            .to_string()
+        };
+        let export = [
+            event(1, ["input", "message"], json!({})),
+            event(2, ["input", "consumed"], json!({"input_id": "f1"})),
+            event(
+                3,
+                ["step", "model-start"],
+                json!({"turn_id": "t1", "request_id": "r1"}),
+            ),
+            event(
+                4,
+                ["step", "model-output-end"],
+                json!({"turn_id": "t1", "request_id": "r1", "status": "cancelled",
+                       "reason": "timeline closed"}),
+            ),
+        ]
+        .join("\n");
+        let driven = Driven {
+            session: "s".into(),
+            stop: "idle",
+            timed_out: false,
+            cleanup_deadline: None,
+            turns: 1,
+            window: None,
+            decline_retries: 0,
+            switch_retries: 0,
+            switch_notes: SwitchNotes {
+                expected: Vec::new(),
+                inputs: vec![FixtureInput {
+                    what: FORMER_INPUT,
+                    line: "main".into(),
+                    input: Some("f1".into()),
+                }],
+            },
+            inputs: Vec::new(),
+            incomplete: None,
+            error: None,
+        };
+        let unseen = unseen_note(switch_note_check(&driven, &export))
+            .expect("the request that consumed the input never reached the model");
+        assert!(
+            unseen.contains("line main consumed the former line's request after the switch"),
+            "{unseen}"
+        );
+        assert!(unseen.contains("never reached the model"), "{unseen}");
+    }
+
     /// A switch input belongs to the turn its line consumed it in: a request a
     /// later turn began does not answer for it, even when it carries the note
     /// (Timeline branches §12.4).
@@ -11639,6 +11698,88 @@ mod tests {
             received,
             [(SWITCH_INPUT, "main"), (FORMER_INPUT, "main")],
             "both follow-ups keep their receipt, on the line they went to"
+        );
+    }
+
+    /// A steer the fixture submits keeps a receipt: the input the Session
+    /// answered, on the line the runner sent it from, whether it was due on
+    /// the clock or triggered by a tool call (model-prompts §8.1).
+    #[tokio::test]
+    async fn a_sent_steer_keeps_a_receipt_on_the_line_it_went_to() {
+        let mut steers = vec![
+            (
+                Steer {
+                    after_seconds: Some(0.1),
+                    when_tool_call: None,
+                    text: "timed".into(),
+                },
+                false,
+            ),
+            (
+                Steer {
+                    after_seconds: None,
+                    when_tool_call: Some("read".into()),
+                    text: "triggered".into(),
+                },
+                false,
+            ),
+        ];
+        let mut inputs = Vec::new();
+        let mut client = SwitchRecorder {
+            inputs: ["s1".to_owned(), "s2".to_owned()].into(),
+            ..SwitchRecorder::default()
+        };
+        let started = Instant::now() - Duration::from_secs(1);
+        assert!(
+            fire_due(
+                &mut client,
+                "session",
+                &mut steers,
+                "main",
+                &mut inputs,
+                started
+            )
+            .await
+            .expect("the timed steer is sent"),
+            "the timed steer is due"
+        );
+        let event = json!({"type": "step", "name": "tool-use",
+                           "data": {"name": "read", "arguments": {"path": "parser/expr.py"}}});
+        assert!(
+            fire_triggered(
+                &mut client,
+                "session",
+                &mut steers,
+                "line-2",
+                &mut inputs,
+                &event
+            )
+            .await
+            .expect("the triggered steer is sent"),
+            "the tool call triggers the steer"
+        );
+        let received: Vec<(&str, &str, Option<&str>)> = inputs
+            .iter()
+            .map(|input| (input.what, input.line.as_str(), input.input.as_deref()))
+            .collect();
+        assert_eq!(
+            received,
+            [
+                (STEER_INPUT, "main", Some("s1")),
+                (STEER_INPUT, "line-2", Some("s2")),
+            ],
+            "each steer keeps the line the runner sent it from and the id the Session answered"
+        );
+        assert_eq!(
+            client.methods(),
+            ["session.submit", "session.submit"],
+            "a steer is one submission"
+        );
+        assert!(
+            client.calls.iter().all(|(_, params)| {
+                params["mode"] == "steer" && params.get("branchId").is_none()
+            }),
+            "a steer goes to the default branch and names no line"
         );
     }
 
