@@ -1361,7 +1361,7 @@ fn a_failure_kind_follows_one_precedence_rule() {
         .iter()
         .filter_map(|(origin, status, codes, want)| {
             let codes: Vec<Option<&str>> = codes.iter().copied().map(Some).collect();
-            let got = classify_kind(*origin, *status, &codes);
+            let got = classify_kind(*origin, *status, None, &codes);
             (got != *want)
                 .then(|| format!("{origin:?} {status:?} {codes:?}: got {got:?}, want {want:?}"))
         })
@@ -1729,49 +1729,124 @@ fn classified(failure: AiMuxError) -> (HostErrorKind, ModelFailureFacts) {
     (kind, *model)
 }
 
-/// A three-digit status a stream event writes as a code names a class, the
-/// same way a response status does. It decides after a condition, after a
+/// The status a stream event writes as its own code names a class, the same
+/// way a response status does. It decides after a condition, after a
 /// transport failure and after a response's own status, and before the
 /// unknown kind.
 #[test]
-fn a_status_code_in_a_stream_event_is_a_class_label() {
+fn a_stream_event_status_decides_after_a_condition_and_a_response_status() {
     use aimux_core::ApiCallErrorOrigin::{HttpResponse as Http, StreamEvent as Event, Transport};
 
-    let cases: [(ApiCallErrorOrigin, Option<u16>, &[&str], ModelFailureKind); 12] = [
+    type Case = (
+        ApiCallErrorOrigin,
+        Option<u16>,
+        Option<u16>,
+        &'static [&'static str],
+        ModelFailureKind,
+    );
+    let cases: [Case; 13] = [
         // The event's own code decides, not the status aimux guessed for it.
-        (Event, Some(500), &["502"], ModelFailureKind::ServerError),
-        (Event, Some(500), &["504"], ModelFailureKind::ServerError),
-        (Event, Some(500), &["408"], ModelFailureKind::ServerError),
-        (Event, Some(500), &["429"], ModelFailureKind::RateLimited),
-        (Event, Some(500), &["401"], ModelFailureKind::AuthRejected),
-        (Event, Some(500), &["403"], ModelFailureKind::AuthRejected),
-        // A condition beside the code still decides.
         (
             Event,
             Some(500),
-            &["429", "insufficient_quota"],
+            Some(502),
+            &[],
+            ModelFailureKind::ServerError,
+        ),
+        (
+            Event,
+            Some(500),
+            Some(504),
+            &[],
+            ModelFailureKind::ServerError,
+        ),
+        (
+            Event,
+            Some(500),
+            Some(408),
+            &[],
+            ModelFailureKind::ServerError,
+        ),
+        (
+            Event,
+            Some(500),
+            Some(429),
+            &[],
+            ModelFailureKind::RateLimited,
+        ),
+        (
+            Event,
+            Some(500),
+            Some(401),
+            &[],
+            ModelFailureKind::AuthRejected,
+        ),
+        (
+            Event,
+            Some(500),
+            Some(403),
+            &[],
+            ModelFailureKind::AuthRejected,
+        ),
+        // A condition beside the event's own status still decides.
+        (
+            Event,
+            Some(500),
+            Some(429),
+            &["insufficient_quota"],
             ModelFailureKind::QuotaExhausted,
         ),
-        // A transport failure stays a network failure, and a response's own
-        // status outranks the code its body carries.
-        (Transport, None, &["502"], ModelFailureKind::Network),
-        (Http, Some(422), &["500"], ModelFailureKind::InvalidRequest),
+        // The event's own status outranks a named class label beside it.
+        (
+            Event,
+            Some(500),
+            Some(502),
+            &["authentication_error"],
+            ModelFailureKind::ServerError,
+        ),
+        (Event, Some(500), None, &[], ModelFailureKind::Unknown),
+        // A transport failure stays a network failure once no condition
+        // decides.
+        (
+            Transport,
+            None,
+            None,
+            &["rate_limit_exceeded"],
+            ModelFailureKind::RateLimited,
+        ),
+        (
+            Transport,
+            None,
+            None,
+            &["api_error"],
+            ModelFailureKind::Network,
+        ),
+        // A response's own status decides before its body's class label.
         (
             Http,
-            Some(429),
-            &["429", "insufficient_quota"],
-            ModelFailureKind::QuotaExhausted,
+            Some(422),
+            None,
+            &["api_error"],
+            ModelFailureKind::InvalidRequest,
         ),
-        (Http, Some(200), &["502"], ModelFailureKind::ServerError),
-        (Http, Some(503), &["429"], ModelFailureKind::ServerError),
+        (
+            Http,
+            Some(200),
+            None,
+            &["api_error"],
+            ModelFailureKind::ServerError,
+        ),
     ];
     let mismatched: Vec<String> = cases
         .iter()
-        .filter_map(|(origin, status, codes, want)| {
+        .filter_map(|(origin, status, code_status, codes, want)| {
             let codes: Vec<Option<&str>> = codes.iter().copied().map(Some).collect();
-            let got = classify_kind(*origin, *status, &codes);
-            (got != *want)
-                .then(|| format!("{origin:?} {status:?} {codes:?}: got {got:?}, want {want:?}"))
+            let got = classify_kind(*origin, *status, *code_status, &codes);
+            (got != *want).then(|| {
+                format!(
+                    "{origin:?} {status:?} {code_status:?} {codes:?}: got {got:?}, want {want:?}"
+                )
+            })
         })
         .collect();
     assert!(mismatched.is_empty(), "{mismatched:#?}");
@@ -1878,4 +1953,46 @@ fn a_response_status_outranks_the_status_code_in_its_body() {
         None,
     ));
     assert_eq!(facts.kind, ModelFailureKind::Unknown);
+}
+
+/// A three-digit number is a status only where a stream event writes it as
+/// its own code: an opaque numeric `type` or provider code keeps only its
+/// named classes, and an unknown one stays unknown.
+#[test]
+fn a_numeric_type_or_provider_code_is_not_a_status() {
+    use aimux_core::ApiCallErrorOrigin::StreamEvent as Event;
+
+    for label in ["502", "504"] {
+        let (kind, facts) = classified(call_failure(
+            Event,
+            Some(500),
+            json!({"error": {"type": label, "message": "the provider reported an opaque label"}}),
+            None,
+        ));
+        assert_eq!(facts.kind, ModelFailureKind::Unknown, "{label}");
+        assert_eq!(
+            kind,
+            HostErrorKind::Http {
+                status: Some(500),
+                code: None,
+            },
+            "{label}"
+        );
+    }
+
+    let (kind, facts) = classified(call_failure(
+        Event,
+        Some(500),
+        json!({"error": {"message": "the provider reported an opaque label"}}),
+        Some("502"),
+    ));
+    assert_eq!(facts.kind, ModelFailureKind::Unknown);
+    assert_eq!(facts.provider_code.as_deref(), Some("502"));
+    assert_eq!(
+        kind,
+        HostErrorKind::Http {
+            status: Some(500),
+            code: None,
+        }
+    );
 }

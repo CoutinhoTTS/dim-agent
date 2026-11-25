@@ -657,16 +657,20 @@ fn classify(failure: &AiMuxError, locally_refused: bool) -> (HostErrorKind, Mode
                 (!value.is_empty()).then(|| value.to_ascii_lowercase())
             };
             let origin = detail.origin;
-            let code = match field("code") {
-                Some(code) => normalize(code),
+            let (code, code_status) = match field("code") {
+                Some(code) => (normalize(code), None),
                 // A stream event may report the failing status as a JSON
-                // integer; it names the same class as its three digits.
-                None if origin == ApiCallErrorOrigin::StreamEvent => view
-                    .and_then(|value| value.get("code"))
-                    .and_then(Value::as_u64)
-                    .filter(|code| (400..=599).contains(code))
-                    .map(|code| code.to_string()),
-                None => None,
+                // integer. Only this value is a status: a numeric `type` or
+                // provider code is an opaque label.
+                None if origin == ApiCallErrorOrigin::StreamEvent => {
+                    let status = view
+                        .and_then(|value| value.get("code"))
+                        .and_then(Value::as_u64)
+                        .filter(|code| (400..=599).contains(code))
+                        .and_then(|code| u16::try_from(code).ok());
+                    (status.map(|code| code.to_string()), status)
+                }
+                None => (None, None),
             };
             let error_type = field("type").and_then(normalize);
             let provider_code = detail
@@ -682,7 +686,7 @@ fn classify(failure: &AiMuxError, locally_refused: bool) -> (HostErrorKind, Mode
             let kind = if locally_refused {
                 ModelFailureKind::InvalidRequest
             } else {
-                classify_kind(origin, detail.status_code, &codes)
+                classify_kind(origin, detail.status_code, code_status, &codes)
             };
             let chain = cause_chain(detail);
             let reason = if codes.contains(&Some("subscription_sharing_usage_limit_exceeded")) {
@@ -810,15 +814,17 @@ fn source_diagnosis(cause: &ErrorCause) -> Option<String> {
 ///
 /// A condition code decides at any status, a non-retried condition before a
 /// retried one; then a transport failure is `network`; then an error status on
-/// the response decides; then a class label, in practice for a stream event,
-/// whose status is the provider's mapping of the event's own strings.
+/// the response decides; then a class label decides, either the status a
+/// stream event wrote as its own code or a provider's named label; then the
+/// kind is unknown.
 fn classify_kind(
     origin: ApiCallErrorOrigin,
     status: Option<u16>,
+    code_status: Option<u16>,
     codes: &[Option<&str>],
 ) -> ModelFailureKind {
     let mut condition = None;
-    let mut label = None;
+    let mut label = code_status.and_then(status_kind);
     for role in codes.iter().flatten().filter_map(|code| code_role(code)) {
         match role {
             CodeRole::Condition(kind) if !kind.retried() => return kind,
@@ -852,11 +858,6 @@ enum CodeRole {
 }
 
 fn code_role(code: &str) -> Option<CodeRole> {
-    if code.len() == 3
-        && let Some(kind) = code.parse::<u16>().ok().and_then(status_kind)
-    {
-        return Some(CodeRole::ClassLabel(kind));
-    }
     Some(match code {
         "insufficient_quota"
         | "quota_exceeded"

@@ -30,9 +30,10 @@ A timeout of the HTTP connection or of the stream reaches the bridge as a
 transport `ApiCall` and is `network`. `AiMuxError::Timeout` has no producer in a
 chat call; if it ever reaches the bridge it is `unknown` and is not retried.
 
-A status the table names decides the same kind when a stream event reports it
-as the event's own code: `502` or `504` is a `server_error`, `429` a
-`rate_limited`, `401` or `403` an `auth_rejected`, and so on through the table.
+A status the table names decides the same kind when a stream event writes it
+as a JSON integer in the event's own `code`: `502` or `504` is a
+`server_error`, `429` a `rate_limited`, `401` or `403` an `auth_rejected`, and
+so on through the table.
 
 The bridge also bounds its own waits: a stream that delivers nothing for five
 minutes is `network`, with the reason `the stream delivered nothing for 300
@@ -91,11 +92,13 @@ gateway forwards either under any status.
   response carries an error status, the label can only agree with it or
   contradict it, and when it contradicts, the status is the fact.
 
-A three-digit status is a class label too, in whichever field it arrives, and
-the status table above says which class it names. A stream event may write that
-status as a JSON integer, and the bridge reads its three-digit form: the event
-reports the failure it hit, while the status aimux maps the event to is its own
-reading and is never taken as the fact.
+A three-digit status written as a JSON integer in a stream event's own `code`
+is a class label too, and the status table above says which class it names:
+the event reports the failure it hit, while the status aimux maps the event to
+is its own reading and is never taken as the fact. A three-digit number in any
+other field, such as a `type` or the adapter's provider code, is an opaque
+label: it participates through the named conditions and classes above and is
+never read as a status.
 
 ### The rule
 
@@ -109,8 +112,8 @@ rule decides every protocol's failure:
 2. otherwise a Transport-origin failure is `network`;
 3. otherwise an error status, 4xx or 5xx, on the response decides, by the
    table above;
-4. otherwise a class label decides, a three-digit status included, which in
-   practice is a stream event;
+4. otherwise a class label decides, which in practice is a stream event: the
+   status it writes as its own integer code, or a provider's named label;
 5. otherwise the kind is `unknown`.
 
 A status outside 4xx and 5xx is not an error status and says nothing about
@@ -125,8 +128,9 @@ carries one and otherwise guesses from the event's code and type, where a
 provider that matches nothing gets 500. Dim cannot tell an explicit status
 from a guessed one, so a stream event skips step 3 and steps 1 and 4 decide
 it; reading that status would turn every unrecognized event into a retried
-`server_error`. A three-digit code the event carries decides as a class label,
-and a code outside 400 to 599 decides nothing. 501 and 505 are
+`server_error`. A three-digit integer in the event's own `code` decides as a
+class label, and a number outside 400 to 599 decides nothing; a three-digit
+`type` or provider code is not a status. 501 and 505 are
 `invalid_request` by step 3 because the status table says so, not by an
 exception to this rule, and a condition code beside them still decides. Two
 kinds change from the rule: a 4xx answer that carries only a server-class label
