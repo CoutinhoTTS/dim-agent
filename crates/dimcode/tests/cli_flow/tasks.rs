@@ -3523,8 +3523,7 @@ fn tui_resume_restores_settled_delegations_outside_the_window_in_dispatch_order(
 #[test]
 fn tui_reopening_tasks_rearms_a_failed_line_window() {
     let home = Home::new();
-    let (ready, readiness) = std::sync::mpsc::channel();
-    let daemon = home.daemon(move |wire| {
+    let daemon = home.daemon(|wire| {
         wire.hello(&["session.methods"]);
         let attach = wire.read("session.attach");
         wire.reply(&attach, attach_record(&attach));
@@ -3559,11 +3558,8 @@ fn tui_reopening_tasks_rearms_a_failed_line_window() {
                 match reads {
                     1 => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
                         "code":-32000,"message":"line window unreadable"}})),
-                    2 => {
-                        wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
-                            "code":-32000,"message":"the retried window is unreadable"}}));
-                        ready.send(()).unwrap();
-                    }
+                    2 => wire.send(json!({"jsonrpc":"2.0","id":request["id"],"error":{
+                        "code":-32000,"message":"the retried window is unreadable"}})),
                     _ => {
                         let events: Vec<_> = (2..=102).flat_map(page).collect();
                         wire.reply(
@@ -3594,7 +3590,7 @@ fn tui_reopening_tasks_rearms_a_failed_line_window() {
     terminal.write(b"\x1b[B\r");
     terminal.until("Branch history failed; reopen to retry");
     terminal.write(b"/tasks\r");
-    readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+    terminal.until("the retried window is unreadable");
     terminal.write(b"\x1b[27u");
     terminal.write(b"/lines\r");
     terminal.until("reopen the parser");
