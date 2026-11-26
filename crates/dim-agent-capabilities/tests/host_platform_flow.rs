@@ -1979,7 +1979,7 @@ async fn a_shell_burst_completes_without_a_private_subscriber() {
         .unwrap();
     let mut seen = false;
     let mut last = String::new();
-    for _ in 0..2000 {
+    for _ in 0..6000 {
         let page = platform
             .output(OutputRequest {
                 task_id: "burst-shell".into(),
