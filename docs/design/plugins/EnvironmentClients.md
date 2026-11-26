@@ -106,12 +106,14 @@ receipt awaits no I/O of its own.
 
 A child line's own history starts with TimelineTree's identity input, which the
 tree writes after the branch opening seals. The receipt therefore appends
-nothing for such a line, whose opening fact names the parent it was cut from:
-the receipt reads the branch's last `branch/start` or `branch/resume`, so it
-decides the same way whether or not it mounted before that event was
-dispatched. The input that opens the line stays its first input, and the first
-loop pass after `BranchLifecycle::activated()` appends the snapshot, so it
-follows that input.
+nothing for such a line. It decides from the opening kind the line's owner
+wrote — the root line's `branch/start`, a child line's `branch/start` naming the
+parent it was cut from, or a stored line's `branch/resume` — which the tree
+hands the opening receipts when it seals the opening. The receipt makes no
+storage read, so the opening cannot be delayed by one and the decision does not
+depend on whether the part mounted before the opening event was dispatched. The
+input that opens the line stays its first input, and the first loop pass after
+`BranchLifecycle::activated()` appends the snapshot, so it follows that input.
 
 A branch whose opening sealed before the part mounted, such as a `Connection`
 reload onto a live branch, registers nothing either; the first loop pass after
@@ -119,9 +121,9 @@ reload onto a live branch, registers nothing either; the first loop pass after
 
 A receipt belongs to the generation that registered it. A generation that
 unloads while the opening still collects receipts — a reload onto a loading
-branch — leaves its receipt in the opening; the receipt still reads the
-branch's opening fact, so a child line's identity input stays first, and it
-checks that generation's cancellation token right before it appends. A
+branch — leaves its receipt in the opening; the receipt still decides from the
+opening kind its owner wrote, so a child line's identity input stays first, and
+it checks that generation's cancellation token right before it appends. A
 cancellation that lands after that check can leave
 a second snapshot with the same source, as a reload does: both events stay in
 the branch's history, and the later `<dim-state>` block of the same source
@@ -195,9 +197,9 @@ The in-memory presence read is infallible; it returns an empty list for an unkno
 | --- | --- |
 | `SessionClientsHost` | Read the current connections |
 | The branch's input path | Append the snapshot |
-| `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes |
+| `BranchLifecycle` | Register the opening receipt, which the opening hands the line's opening kind; wait for publication before appending afterwards; stop when the branch closes |
 | `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot |
-| `Timeline` | Append the snapshot; the branch's opening fact tells a child line whose identity input opens it after the opening |
+| `Timeline` | Append the snapshot |
 | Process bus (`ClientsChanged`) | Wake on a connection change |
 
 The process `sessionClientsHost` is a data face with the request and reply defined in [service faces §4.9](../service-faces.md#49-旧主机端口credentialvariableshost-等六个). `sessionIdentity`, `timeline` and `branchLifecycle` are also data faces. This Rust projection still uses owner methods outside the dispatched operations and is not a leaf-ready foreign part.
@@ -237,10 +239,11 @@ None to the runtime or rutis.
 | A temporary route adopted with no `session.idle` after create | Adopted; the opening left nothing undispatched |
 | A temporary route adopted while a snapshot the part appended after activation is still dispatched | Refused with `provider_route_conflict`; the same call is adopted once the branch dispatches the snapshot and its `input/applied`; the caller retries or waits for `session.idle` |
 | Opening sealed before the part mounted | The snapshot is appended after activation |
-| The part is replaced while its line loads | The retired receipt sees the line's opening fact and writes nothing; the replacement appends the line's one presence snapshot after its identity input |
+| The part is replaced while its line loads | The retired receipt sees the opening kind and writes nothing; the replacement appends the line's one presence snapshot after its identity input |
 | A generation is cancelled before its receipt's append | The receipt checks the token right before it appends and appends nothing |
 | A generation is cancelled after its receipt's last check | It may append one more snapshot, as a reload does: both events stay in history, and the later `<dim-state>` block of the same source replaces the earlier one for the model |
-| A part mounts after the line's `branch/start` was dispatched | It decides from the line's opening fact: the receipt writes nothing ahead of the identity input, and the snapshot follows once the line activates |
+| A part mounts after the line's `branch/start` was dispatched | It decides from the opening kind the tree hands the receipt: the receipt writes nothing ahead of the identity input, and the snapshot follows once the line activates |
+| The Timeline store stalls during the opening | The receipt makes no read of it: the branch opens within its budget, and a child line's identity input stays first |
 | Two TUI leaves | Two `tui` entries, not one count |
 | A TUI leaf and its protocol connection | One `tui` entry; no duplicate `cli` entry |
 | Two distinct connections with the same label | Two entries; labels are not identities |

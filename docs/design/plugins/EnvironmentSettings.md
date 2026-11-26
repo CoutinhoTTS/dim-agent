@@ -83,12 +83,15 @@ it.
 
 A child line's own history starts with TimelineTree's identity input, which the
 tree writes after the branch opening seals. The receipt therefore appends
-nothing for such a line, whose opening fact names the parent it was cut from:
-the receipt reads the branch's last `branch/start` or `branch/resume`, so it
-decides the same way whether or not it mounted before that event was
-dispatched. The input that opens the line stays its first input, and the first
-loop pass after `BranchLifecycle::activated()` reads the value and appends the
-snapshot, so it follows that input.
+nothing for such a line. It decides from the opening kind the line's owner
+wrote — the root line's `branch/start`, a child line's `branch/start` naming the
+parent it was cut from, or a stored line's `branch/resume` — which the tree
+hands the opening receipts when it seals the opening. The receipt makes no
+storage read, so the opening cannot be delayed by one and the decision does not
+depend on whether the part mounted before the opening event was dispatched. The
+input that opens the line stays its first input, and the first loop pass after
+`BranchLifecycle::activated()` reads the value and appends the snapshot, so it
+follows that input.
 
 A branch whose opening sealed before the part mounted, such as an
 `ExecutionSettings` reload onto a live branch, registers nothing either; the
@@ -98,7 +101,7 @@ there. A failed or timed-out opening read, and a failed opening append, keep
 
 A receipt and the loop after activation check their own generation's
 cancellation token right before `Timeline::append`; a child line never reaches
-that append, because its opening fact decides first. A cancellation that lands
+that append, because its opening kind decides first. A cancellation that lands
 after the check can leave a second snapshot of the same source, as a reload
 does: both events stay in the branch's history, and the later `<dim-state>`
 block of the same source replaces the earlier one for the model
@@ -152,9 +155,9 @@ A read failure is not a value. The design does not append `unknown` or a fabrica
 | --- | --- |
 | The setting module's read port | Read the effective values for the body |
 | The branch's input path | Append the snapshot |
-| `BranchLifecycle` | Register the opening receipt; wait for publication before appending afterwards; stop when the branch closes; its generation token is checked before an append |
+| `BranchLifecycle` | Register the opening receipt, which the opening hands the line's opening kind; wait for publication before appending afterwards; stop when the branch closes; its generation token is checked before an append |
 | `Dispatcher` | The opening receipt returns once the branch dispatched the snapshot |
-| `Timeline` | Append the snapshot; the branch's opening fact tells a child line whose identity input opens it after the opening |
+| `Timeline` | Append the snapshot |
 | Process bus (`SettingsChanged`) | Wake on a committed write |
 
 The execution source's process `executionSettingsHost` is a data face with asynchronous `read({})`; `timeline`, `branchLifecycle` and `dispatcher` are data faces. This Rust projection is not a leaf-ready foreign part.
@@ -193,7 +196,8 @@ None to the runtime or rutis.
 | --- | --- |
 | Branch open | The snapshot and its `input/applied` are committed and dispatched before the branch is Active, so `session.create` and a restore return with both |
 | A child line opens | The identity input is the line's first input; the snapshot follows it once the line is published |
-| A part mounts after the line's `branch/start` was dispatched | It decides from the line's opening fact: the receipt writes nothing ahead of the identity input, and the snapshot follows once the line activates |
+| A part mounts after the line's `branch/start` was dispatched | It decides from the opening kind the tree hands the receipt: the receipt writes nothing ahead of the identity input, and the snapshot follows once the line activates |
+| The Timeline store stalls during the opening | The receipt makes no read of it: the branch opens within its budget, and a child line's identity input stays first |
 | The settings source does not answer during the opening | Log; the branch opens; the first loop pass after activation reads and appends one snapshot |
 | The branch's opening budget is shorter than the retry interval | The read is bounded by half that budget; the branch opens and the first loop pass appends one snapshot once the source answers |
 | A generation is cancelled before its receipt's append | The receipt checks the token right before it appends and appends nothing |
