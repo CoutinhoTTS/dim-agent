@@ -1456,6 +1456,20 @@ mod tests {
         );
     }
 
+    /// The state of the child in each snapshot the worker published after it
+    /// was created, in the order it published them.
+    fn child_states(receiver: &mut std::sync::mpsc::Receiver<Update>) -> Vec<LineState> {
+        let mut states = Vec::new();
+        while let Ok(update) = receiver.try_recv() {
+            if let Update::Snapshot(state) = update
+                && let Some(child) = state.lines.iter().find(|line| line.id == "b-7d")
+            {
+                states.push(child.state.clone());
+            }
+        }
+        states
+    }
+
     fn published(receiver: &mut std::sync::mpsc::Receiver<Update>) -> ViewSnapshot {
         let mut snapshot = None;
         while let Ok(update) = receiver.try_recv() {
@@ -2142,7 +2156,8 @@ mod tests {
                 .unwrap();
             worker.poll_task_history().await.unwrap();
             if live {
-                worker.task_event("b-7c", create_failed(3, "b-7d"));
+                // Beyond the page's cutoff, so the page cannot record it.
+                worker.task_event("b-7c", create_failed(400, "b-7d"));
                 assert!(
                     !worker
                         .projection
@@ -2165,6 +2180,11 @@ mod tests {
                 json!({"events": page, "through": 300, "nextBefore": 1, "nextAfter": 300}),
             )
             .await;
+            assert_eq!(
+                child_states(&mut receiver),
+                [LineState::CreationFailed],
+                "{page:?}: the first snapshot publishing the child is terminal"
+            );
             assert!(
                 !worker.task_history_queue.contains(&"b-7d".to_owned()),
                 "{page:?}: the page queued the failed child"
@@ -2179,18 +2199,6 @@ mod tests {
                         && matches!(read.stage, ReadStage::Inventory("session.input.pending"))
                 ),
                 "{page:?}: the parent's inventory is still pending"
-            );
-            worker.publish();
-            let snapshot = published(&mut receiver);
-            let child = snapshot
-                .lines
-                .iter()
-                .find(|line| line.id == "b-7d")
-                .expect("the page published the child");
-            assert_eq!(
-                child.state,
-                LineState::CreationFailed,
-                "{page:?}: the first published child row is already terminal"
             );
             worker
                 .command(Command::FocusLine("b-7d".into()))

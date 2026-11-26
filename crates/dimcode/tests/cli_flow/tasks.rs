@@ -3714,3 +3714,115 @@ fn tui_a_branch_creation_failure_settles_the_line_before_its_first_read() {
     terminal.wait();
     daemon.join().unwrap();
 }
+
+/// A creation failure that is already known when the parent's first page is
+/// published leaves the child terminal in that page's snapshot: while the
+/// parent's inventory is still pending, `/lines` already shows the failed row,
+/// opening it is refused, and no read is issued for the child. Both orders are
+/// covered: the failure recorded inside the parent's page, and a failure
+/// buffered beyond the page's cutoff while that read is in flight.
+#[test]
+fn tui_creation_failure_reaches_the_directory_before_the_parent_inventory_settles() {
+    for in_page in [true, false] {
+        let home = Home::new();
+        let (ready, readiness) = std::sync::mpsc::channel();
+        let (proceed, control) = std::sync::mpsc::channel();
+        let daemon = home.daemon(move |wire| {
+            wire.hello(&["session.methods"]);
+            let attach = wire.read("session.attach");
+            wire.reply(&attach, attach_record(&attach));
+            let methods = wire.read("session.methods");
+            wire.reply(
+                &methods,
+                json!({"methods":[
+                    {"name":"session.input.pending","mutating":false},
+                    {"name":"session.exec.pending","mutating":false},
+                    {"name":"session.turn.get","mutating":false}
+                ]}),
+            );
+            let main = wire.read("session.history");
+            wire.reply(
+                &main,
+                json!({"events":[fact("main-message",1,1000,"step","text",json!({
+                    "turn_id":"turn","request_id":"request","delta":"main transcript"
+                }))],"through":1,"nextAfter":1,"done":true}),
+            );
+            wire.no_context();
+            wire.2 = true;
+            let providers = wire.read_any();
+            assert_eq!(providers["method"], "account.providers");
+            wire.reply(&providers, json!([]));
+            event(wire, "main", child_created("b-7c", 2, "parent line"));
+            let cut = owner_request(wire, "session.turn.get", "b-7c");
+            wire.reply(
+                &cut,
+                json!({"branchId":"b-7c","through":4,"turn":null,"output":null}),
+            );
+            let discovery = owner_request(wire, "session.input.pending", "b-7c");
+            wire.reply(
+                &discovery,
+                json!({"branchId":"b-7c","through":4,"inputs":[],"next":null}),
+            );
+            let page = owner_request(wire, "session.history", "b-7c");
+            ready.send(()).unwrap();
+            if !in_page {
+                event(
+                    wire,
+                    "b-7c",
+                    fact("create-failed",400,4000,"branch","create-failed",json!({
+                        "status":"failed","branch":"b-7d","createEvent":5,"error":"creation refused",
+                    })),
+                );
+            }
+            let mut events = vec![
+                fact("parent-text",3,3000,"step","text",json!({
+                    "turn_id":"turn","request_id":"request","delta":"parent transcript"
+                })),
+                child_created("b-7d", 5, "child line"),
+            ];
+            if in_page {
+                events.push(fact("create-failed",6,6000,"branch","create-failed",json!({
+                    "status":"failed","branch":"b-7d","createEvent":5,"error":"creation refused",
+                })));
+            }
+            wire.reply(
+                &page,
+                json!({"events":events,"through":300,"nextBefore":1,"nextAfter":300}),
+            );
+            let inventory = loop {
+                let request = wire.frame();
+                assert_ne!(
+                    request["params"]["branchId"], "b-7d",
+                    "the failed child was read while the parent inventory was pending: {request}"
+                );
+                if request["method"] == "session.input.pending" {
+                    break request;
+                }
+                assert!(wire.empty_state(&request), "unexpected request {request}");
+            };
+            assert_eq!(
+                inventory["params"]["branchId"], "b-7c",
+                "the parent's inventory reads next"
+            );
+            control.recv_timeout(Duration::from_secs(10)).unwrap();
+            wire.reply(
+                &inventory,
+                json!({"branchId":"b-7c","through":300,"inputs":[],"next":null}),
+            );
+        });
+        let mut terminal = Terminal::resume_tui(home.command());
+        terminal.until("test / model");
+        terminal.write(b"/lines\r");
+        terminal.until("parent line");
+        terminal.write(b"\x1b[B\r");
+        readiness.recv_timeout(Duration::from_secs(10)).unwrap();
+        terminal.write(b"/lines\r");
+        terminal.until("creation failed");
+        terminal.write(b"\x1b[B\r");
+        terminal.until("Line creation failed: b-7d");
+        proceed.send(()).unwrap();
+        home.kill(&terminal);
+        terminal.wait();
+        daemon.join().unwrap();
+    }
+}
