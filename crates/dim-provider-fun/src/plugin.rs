@@ -50,11 +50,19 @@ impl FunConnection {
             }
             let catalog = connection.catalog()?;
             let id = explicit.unwrap_or_else(|| catalog.default_model().clone());
+            let snapshot = catalog
+                .snapshot(&id.provider_id, &id.model_id)
+                .ok_or_else(|| {
+                    HostError::failed(format!(
+                        "Model is not configured: {}/{}",
+                        id.provider_id, id.model_id
+                    ))
+                })?;
             let model = catalog.get(&id.provider_id, &id.model_id)?;
             Ok(ModelSelection {
                 provider_id: id.provider_id,
                 model_id: id.model_id,
-                capability_snapshot: None,
+                capability_snapshot: Some(snapshot),
                 config: Some(model.defaults.clone()),
                 metadata: Some(dim_agent_types::RequestMetadata {
                     extensions: serde_json::Map::from_iter([(
@@ -451,6 +459,7 @@ mod tests {
             max_output_tokens: 8_192,
             output_allowance: 8_192,
             capabilities: dim_agent_types::ModelCapabilities::with_limits(128_000, 8_192),
+            reasoning: None,
         }
     }
 

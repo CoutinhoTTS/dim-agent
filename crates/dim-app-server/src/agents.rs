@@ -1013,10 +1013,24 @@ impl AgentIndex {
                     .expect("AgentsPlugin apply sets its context")
                     .clone();
                 tokio::spawn(async move {
-                    let session = host
+                    let session = match host
                         .agent
                         .restore_session_for_version(id.clone(), version)
-                        .await?;
+                        .await
+                    {
+                        Ok(session) => session,
+                        // The stored record still exists. Preserve Build's
+                        // real diagnostic (for example, its model is no longer
+                        // configured) instead of flattening every restoration
+                        // failure into an opaque Fault.
+                        Err(error @ AgentError::Build(_)) => return Err(error),
+                        Err(error) => {
+                            return Err(AgentError::fault(
+                                "Session restoration",
+                                error.to_string(),
+                            ));
+                        }
+                    };
                     if slot.closing.load(Ordering::Acquire) {
                         // The close stopped this Session's restoration while
                         // this restore ran: release what it loaded and refuse
@@ -1034,7 +1048,9 @@ impl AgentIndex {
                     Ok::<_, AgentError>((session, gate, activity))
                 })
                 .await
-                .map_err(|error| AgentError::fault("Session restoration", error.to_string()))??
+                .map_err(|error| {
+                    AgentError::fault("Session restoration task", error.to_string())
+                })??
             }
             None => return Err(AgentError::Closed(id.into())),
         };

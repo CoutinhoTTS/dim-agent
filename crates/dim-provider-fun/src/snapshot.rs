@@ -29,6 +29,11 @@ pub struct ProviderSnapshot {
     pub id: String,
     #[serde(default)]
     pub label: String,
+    /// Fun snapshot schema capability revision. The provider catalog adds
+    /// per-model reasoning declarations only at revision 1 or newer; revision 0
+    /// remains the original capabilities-only contract.
+    #[serde(default)]
+    pub capability_revision: u32,
     pub protocol: String,
     pub base_url: String,
     #[serde(default)]
@@ -56,10 +61,30 @@ pub struct ModelSnapshot {
     pub label: String,
     pub context_window: u64,
     pub max_output_tokens: u64,
+    /// Per-model wire protocol override. Aggregator providers (dim's
+    /// `new-api-router` driver) route different models to different
+    /// protocols behind one base URL; absent means the provider protocol.
+    #[serde(default)]
+    pub protocol: Option<String>,
+    /// Per-model base URL override, paired with [`Self::protocol`] for the
+    /// endpoint rewriting such routers apply. Absent means the provider URL.
+    #[serde(default)]
+    pub base_url: Option<String>,
     #[serde(default)]
     pub config: Option<dim_agent_types::ModelConfig>,
     #[serde(default)]
     pub capabilities: Option<CapabilitiesSnapshot>,
+    #[serde(default)]
+    pub reasoning: Option<ReasoningSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReasoningSnapshot {
+    #[serde(default)]
+    pub effort_options: Vec<String>,
+    #[serde(default)]
+    pub off: Option<dim_agent_types::ReasoningOff>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

@@ -140,7 +140,10 @@ impl RpcError {
             "Build" => Self::app(
                 -32000,
                 "session_build_failed",
-                "Session initialization failed",
+                // A stored Session can name a model the current provider
+                // snapshot no longer contains. Keep the real reason: clients
+                // need it to repair the selection instead of retrying blindly.
+                message,
             ),
             "Reloading" => Self::reloading(),
             "PublicationUnknown" => Self::app(-32000, "publication_unknown", message),
@@ -150,6 +153,12 @@ impl RpcError {
                 "Submission identity belongs to multiple inputs",
             ),
             "BranchEnded" => Self::app(-32000, "branch_ended", message),
+            "Storage" => Self::app(-32000, "session_storage_failed", message),
+            "Cancelled" => Self::app(-32000, "session_cancelled", message),
+            "PartialSubmission" => Self::app(-32000, "submission_partial", message),
+            "Fault" => Self::app(-32000, "session_fault", message),
+            "Framework" => Self::app(-32000, "session_framework_failed", message),
+            "Multiple" => Self::app(-32000, "session_multiple_failures", message),
             _ => Self::wire(-32603, "Session operation failed"),
         }
     }
@@ -189,6 +198,12 @@ impl From<AgentError> for RpcError {
             AgentError::PublicationUnknown(_) => "PublicationUnknown",
             AgentError::AmbiguousSubmission(_) => "AmbiguousSubmission",
             AgentError::BranchEnded(_) => "BranchEnded",
+            AgentError::Storage(_) => "Storage",
+            AgentError::Cancelled(_) => "Cancelled",
+            AgentError::PartialSubmission(_) => "PartialSubmission",
+            AgentError::Fault { .. } => "Fault",
+            AgentError::Framework(_) => "Framework",
+            AgentError::Multiple(_) => "Multiple",
             _ => "",
         };
         Self::agent(variant, error.to_string())
@@ -1274,6 +1289,47 @@ impl DynPlugin for SessionMethodsPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_build_errors_keep_the_model_diagnostic() {
+        let error = RpcError::from(AgentError::Build(
+            "framework: config validation failed: Model is not configured: deepseek/old-model"
+                .to_owned(),
+        ));
+        assert_eq!(error.code, -32000);
+        assert_eq!(
+            error.data.as_ref().unwrap().app_error,
+            "session_build_failed"
+        );
+        assert!(error.message.contains("Model is not configured"));
+        assert!(error.message.contains("deepseek/old-model"));
+    }
+
+    #[test]
+    fn framework_wrapped_agent_errors_keep_their_stable_code() {
+        let error = AgentError::Build("branch opening timed out".to_owned());
+        let wrapped = AgentError::Framework(std::sync::Arc::new(
+            rutis::host::ErrorKind::PluginFailed(Box::new(error)),
+        ));
+        let mapped = RpcError::from(wrapped);
+        assert_eq!(mapped.code, -32000);
+        assert_eq!(
+            mapped.data.as_ref().unwrap().app_error,
+            "session_build_failed"
+        );
+        assert!(mapped.message.contains("branch opening timed out"));
+    }
+
+    #[test]
+    fn storage_failures_are_not_reported_as_anonymous_internal_errors() {
+        let mapped = RpcError::from(AgentError::Storage("disk is full".to_owned()));
+        assert_eq!(mapped.code, -32000);
+        assert_eq!(
+            mapped.data.as_ref().unwrap().app_error,
+            "session_storage_failed"
+        );
+        assert!(mapped.message.contains("disk is full"));
+    }
 
     /// A connection stand-in that records which handle wrote a notification.
     struct Channel {

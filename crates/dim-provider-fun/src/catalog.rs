@@ -2,7 +2,8 @@ use crate::snapshot::Snapshot;
 use dim_agent_capabilities::context_model::output_allowance;
 use dim_agent_capabilities::host::HostError;
 use dim_agent_types::{
-    ModelCapabilities, ModelCapabilitySnapshot, ModelConfig, ModelId, ModelProtocol, ModelSelection,
+    ModelCapabilities, ModelCapabilitySnapshot, ModelConfig, ModelId, ModelProtocol,
+    ModelReasoning, ModelSelection,
 };
 use serde::Serialize;
 use std::{
@@ -27,6 +28,7 @@ pub struct FunModel {
     pub max_output_tokens: u64,
     pub output_allowance: u64,
     pub capabilities: ModelCapabilities,
+    pub reasoning: Option<ModelReasoning>,
 }
 
 #[derive(Clone, Debug)]
@@ -80,8 +82,8 @@ impl FunCatalog {
             if !provider.enabled {
                 continue;
             }
-            let protocol = protocol(&provider.protocol)?;
-            if protocol == ModelProtocol::Bedrock {
+            let provider_protocol = protocol(&provider.protocol)?;
+            if provider_protocol == ModelProtocol::Bedrock {
                 return Err(format!("provider {provider_id} cannot use bedrock"));
             }
             let url = url::Url::parse(provider.base_url.trim())
@@ -89,6 +91,7 @@ impl FunCatalog {
             if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
                 return Err(format!("provider {provider_id} has an invalid baseUrl"));
             }
+            let provider_base_url = provider.base_url.trim().to_owned();
             for (name, value) in &provider.headers {
                 if http::header::HeaderName::from_bytes(name.as_bytes()).is_err()
                     || http::header::HeaderValue::from_str(value).is_err()
@@ -104,6 +107,27 @@ impl FunCatalog {
                         "model ids for {provider_id} must be nonempty and unique"
                     ));
                 }
+                let model_protocol = match model.protocol.as_deref() {
+                    Some(value) if !value.trim().is_empty() => protocol(value)?,
+                    _ => provider_protocol,
+                };
+                if model_protocol == ModelProtocol::Bedrock {
+                    return Err(format!("model {provider_id}/{model_id} cannot use bedrock"));
+                }
+                let model_base_url = match model.base_url.as_deref() {
+                    Some(value) if !value.trim().is_empty() => {
+                        let url = url::Url::parse(value.trim()).map_err(|_| {
+                            format!("model {provider_id}/{model_id} has an invalid baseUrl")
+                        })?;
+                        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+                            return Err(format!(
+                                "model {provider_id}/{model_id} has an invalid baseUrl"
+                            ));
+                        }
+                        value.trim().to_owned()
+                    }
+                    _ => provider_base_url.clone(),
+                };
                 if model.context_window == 0 || model.max_output_tokens == 0 {
                     return Err(format!(
                         "{provider_id}/{model_id} needs positive contextWindow and maxOutputTokens"
@@ -124,14 +148,37 @@ impl FunCatalog {
                     capabilities.reasoning = declared.reasoning.unwrap_or(capabilities.reasoning);
                     capabilities.vision = declared.vision.unwrap_or(capabilities.vision);
                 }
+                let reasoning = if provider.capability_revision == 0 {
+                    None
+                } else {
+                    model.reasoning.and_then(|declared| {
+                        let mut efforts = declared.effort_options;
+                        efforts.retain(|effort| {
+                            matches!(
+                                effort.as_str(),
+                                "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+                            )
+                        });
+                        if declared.off.is_some() && !efforts.iter().any(|effort| effort == "none")
+                        {
+                            efforts.push("none".into());
+                        }
+                        (!efforts.is_empty()).then_some(ModelReasoning {
+                            supported: capabilities.reasoning,
+                            effort_options: Some(efforts),
+                            off: declared.off,
+                            ..Default::default()
+                        })
+                    })
+                };
                 models.insert(
                     model_id.clone(),
                     FunModel {
                         provider_id: provider_id.clone(),
                         model_id,
                         label: model.label,
-                        protocol,
-                        base_url: provider.base_url.trim().to_owned(),
+                        protocol: model_protocol,
+                        base_url: model_base_url,
                         headers: provider.headers.clone(),
                         preset: provider.preset.clone(),
                         key_file: provider.key_file.clone(),
@@ -141,6 +188,7 @@ impl FunCatalog {
                         max_output_tokens: model.max_output_tokens,
                         output_allowance: allowance,
                         capabilities,
+                        reasoning,
                     },
                 );
             }
@@ -191,7 +239,7 @@ impl FunCatalog {
         ModelSelection {
             provider_id: id.provider_id.clone(),
             model_id: id.model_id.clone(),
-            capability_snapshot: None,
+            capability_snapshot: self.snapshot(&id.provider_id, &id.model_id),
             config,
             metadata: None,
         }
@@ -208,6 +256,19 @@ impl FunCatalog {
 
     pub fn model_count(&self) -> usize {
         self.providers.values().map(HashMap::len).sum()
+    }
+
+    pub fn snapshot(&self, provider_id: &str, model_id: &str) -> Option<ModelCapabilitySnapshot> {
+        let model = self.get(provider_id, model_id).ok()?;
+        Some(ModelCapabilitySnapshot {
+            target: ModelId {
+                provider_id: provider_id.to_owned(),
+                model_id: model_id.to_owned(),
+            },
+            capabilities: model.capabilities.clone(),
+            reasoning: model.reasoning.clone(),
+            service_tier: None,
+        })
     }
 
     pub fn selectable(&self) -> Vec<ModelCapabilitySnapshot> {
@@ -229,7 +290,7 @@ impl FunCatalog {
                     model_id: model_id.to_owned(),
                 },
                 capabilities: model.capabilities.clone(),
-                reasoning: None,
+                reasoning: model.reasoning.clone(),
                 service_tier: None,
             })
             .collect()
@@ -256,7 +317,13 @@ impl FunCatalog {
                             "capabilities": {
                                 "contextWindow": model.context_window,
                                 "maxOutputTokens": model.max_output_tokens,
-                            }
+                            },
+                            "reasoning": model.reasoning,
+                            "defaultEffort": model
+                                .defaults
+                                .reasoning
+                                .as_ref()
+                                .and_then(|reasoning| reasoning.effort.clone()),
                         },
                         "enabled": true,
                         "unavailableReason": null
@@ -389,6 +456,34 @@ mod tests {
         assert_eq!(catalog.selectable().len(), 1);
         assert_eq!(catalog.get("local", "one").unwrap().output_allowance, 8192);
         assert!(catalog.get("local", "missing").is_err());
+        assert!(catalog.get("local", "one").unwrap().reasoning.is_none());
+    }
+
+    #[test]
+    fn revision_zero_keeps_reasoning_out_of_the_capability_snapshot() {
+        let mut value = snapshot(1);
+        value["providers"][0]["models"][0]["capabilities"]["reasoning"] = json!(true);
+        value["providers"][0]["models"][0]["reasoning"]["effortOptions"] = json!(["low"]);
+        let catalog = FunCatalog::from_value(value).unwrap();
+        assert!(catalog.get("local", "one").unwrap().reasoning.is_none());
+    }
+
+    #[test]
+    fn reasoning_effort_options_reach_the_capability_snapshot() {
+        let mut value = snapshot(1);
+        value["providers"][0]["capabilityRevision"] = json!(1);
+        value["providers"][0]["models"][0]["capabilities"]["reasoning"] = json!(true);
+        value["providers"][0]["models"][0]["reasoning"]["effortOptions"] =
+            json!(["low", "high", "xhigh"]);
+        let catalog = FunCatalog::from_value(value).unwrap();
+        let selected = catalog.selectable();
+        assert_eq!(selected.len(), 1);
+        let reasoning = selected[0].reasoning.as_ref().unwrap();
+        assert!(reasoning.supported);
+        assert_eq!(
+            reasoning.effort_options.as_deref(),
+            Some(["low".to_owned(), "high".to_owned(), "xhigh".to_owned()].as_slice())
+        );
     }
 
     #[test]
@@ -398,5 +493,65 @@ mod tests {
         assert!(state.replace(older).is_err());
         let newer = FunCatalog::from_value(snapshot(3)).unwrap();
         assert_eq!(state.replace(newer).unwrap().revision, 3);
+    }
+
+    #[test]
+    fn a_model_can_override_the_provider_protocol_and_base_url() {
+        let value = json!({
+            "version": 1,
+            "revision": 1,
+            "defaultModel": {"providerId": "router", "modelId": "chat"},
+            "providers": [{
+                "id": "router",
+                "protocol": "openai-compatible",
+                "baseUrl": "https://router.example/v1",
+                "keyFile": "/tmp/router.key",
+                "models": [
+                    {
+                        "id": "chat",
+                        "contextWindow": 128000,
+                        "maxOutputTokens": 8192,
+                        "config": {"maxTokens": 8192}
+                    },
+                    {
+                        "id": "claude",
+                        "protocol": "anthropic",
+                        "baseUrl": "https://router.example",
+                        "contextWindow": 200000,
+                        "maxOutputTokens": 16384,
+                        "config": {"maxTokens": 16384}
+                    }
+                ]
+            }]
+        });
+        let catalog = FunCatalog::from_value(value).unwrap();
+        let chat = catalog.get("router", "chat").unwrap();
+        assert_eq!(chat.protocol, ModelProtocol::OpenaiCompatible);
+        assert_eq!(chat.base_url, "https://router.example/v1");
+        let claude = catalog.get("router", "claude").unwrap();
+        assert_eq!(claude.protocol, ModelProtocol::Anthropic);
+        assert_eq!(claude.base_url, "https://router.example");
+    }
+
+    #[test]
+    fn an_unknown_model_protocol_is_rejected() {
+        let mut value = snapshot(1);
+        value["providers"][0]["models"][0]["protocol"] = json!("carrier-pigeon");
+        let error = FunCatalog::from_value(value).unwrap_err();
+        assert!(error.contains("unknown protocol"));
+    }
+
+    #[test]
+    fn a_bedrock_model_protocol_is_rejected() {
+        let mut value = snapshot(1);
+        value["providers"][0]["models"][0]["protocol"] = json!("bedrock");
+        assert!(FunCatalog::from_value(value).is_err());
+    }
+
+    #[test]
+    fn an_invalid_model_base_url_is_rejected() {
+        let mut value = snapshot(1);
+        value["providers"][0]["models"][0]["baseUrl"] = json!("ftp://example.com");
+        assert!(FunCatalog::from_value(value).is_err());
     }
 }

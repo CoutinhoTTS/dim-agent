@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "dim-provider-fun"
-version = "0.1.0-alpha.27"
+version = "0.1.0-alpha.29"
 dependencies = [
  "dim-agent-capabilities",
  "dim-agent-runtime",

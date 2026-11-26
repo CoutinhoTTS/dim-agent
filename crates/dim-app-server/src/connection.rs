@@ -2697,20 +2697,50 @@ impl RpcService {
                 .await
                 .map_err(provider_error);
         }
-        if !preferences.is_empty() {
-            return Err(provider_error(
-                dim_agent_capabilities::host::HostError::failed(
-                    "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",
-                ),
-            ));
-        }
         let request = ModelSelectionRequest::at(explicit, cwd.as_deref()).map_err(port_error)?;
-        self.index
+        let host = self
+            .index
             .model_selection()
-            .ok_or_else(RpcError::reloading)?
+            .ok_or_else(RpcError::reloading)?;
+        let mut selection = host
             .resolve(request, self.unloading.clone())
             .await
-            .map_err(port_error)
+            .map_err(port_error)?;
+        let preferences = preferences.values();
+        if preferences != Default::default() {
+            let snapshot = selection.capability_snapshot.as_ref().ok_or_else(|| {
+                RpcError::invalid(
+                    "Model preferences require a catalog with capability declarations; configure the API-key model's generation settings in --model-config",
+                )
+            })?;
+            let protocol = selection
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.extensions.get("providerProtocol"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| {
+                    serde_json::from_value::<dim_agent_types::ModelProtocol>(
+                        serde_json::Value::String(value.to_owned()),
+                    )
+                    .ok()
+                });
+            let protocol =
+                protocol.ok_or_else(|| RpcError::invalid("Model protocol is not configured"))?;
+            let base = selection.config.clone().unwrap_or_default();
+            selection.config = Some(
+                dim_agent_capabilities::host::reasoning_config(
+                    &base,
+                    snapshot,
+                    protocol,
+                    preferences
+                        .reasoning_effort
+                        .as_deref()
+                        .unwrap_or("provider-default"),
+                )
+                .map_err(|error| RpcError::invalid(error))?,
+            );
+        }
+        Ok(selection)
     }
 }
 
