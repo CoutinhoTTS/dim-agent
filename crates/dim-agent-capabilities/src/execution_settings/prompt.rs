@@ -6,13 +6,13 @@
 //! register a Prompt source.
 use super::{ExecutionSettings, ExecutionSettingsHost, SOURCE};
 use crate::{
-    branch_input::{append_own, append_own_dispatched, opens_with_identity_input},
+    branch_input::{append_own, append_own_dispatched},
     host::ToolExecutionContext,
     settings::{SettingsChanged, settings_changes},
     tool_registry::{ToolConcurrency, ToolContribution, ToolHandler, ToolRegistry},
 };
 use dim_agent_runtime::{
-    BranchLifecycle, BranchPhase, Dispatcher, Names, PartRegistry, PartScope, Timeline,
+    BranchLifecycle, BranchPhase, Dispatcher, Names, OpeningKind, PartRegistry, PartScope, Timeline,
 };
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -270,28 +270,20 @@ impl DynPlugin for SettingsSnapshotBranch {
                 let dispatcher = dispatcher.clone();
                 let lifecycle = lifecycle.clone();
                 let shared = shared.clone();
-                let registered = phase.register_opening(Arc::new(move || {
-                    let (host, timeline, dispatcher) =
-                        (host.clone(), timeline.clone(), dispatcher.clone());
-                    let (lifecycle, shared) = (lifecycle.clone(), shared.clone());
+                let registered = phase.admit_opening_with(Box::new(move |opening| {
                     Box::pin(async move {
+                        // A child line's identity input is written after the
+                        // opening seals, so this receipt leaves the snapshot to
+                        // the published line instead of appending ahead of it.
+                        if opening == OpeningKind::Child {
+                            return Ok(());
+                        }
                         // A retired part's receipt stays registered while the
                         // opening still collects receipts, so it checks its own
                         // generation before reading and again before the
                         // append.
                         if lifecycle.is_cancelled() {
                             return Ok(());
-                        }
-                        match opens_with_identity_input(&timeline).await {
-                            Ok(true) => return Ok(()),
-                            Ok(false) => {}
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    "the line's opening was not read; the published line appends the execution settings"
-                                );
-                                return Ok(());
-                            }
                         }
                         // An opening fails after its inactivity budget passes
                         // without progress; half of it leaves the receipt room
@@ -327,7 +319,7 @@ impl DynPlugin for SettingsSnapshotBranch {
                                 tracing::warn!("execution settings were not read in time");
                             }
                         }
-                        Ok::<(), Error>(())
+                        Ok(())
                     })
                 }));
                 if let Err(error) = registered {

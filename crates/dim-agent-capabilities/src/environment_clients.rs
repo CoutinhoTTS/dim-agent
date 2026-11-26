@@ -4,12 +4,12 @@
 //! read-only `SessionClientsHost`. This capability appends a snapshot of the
 //! attached connections at branch open and on every `ClientsChanged` fact.
 use crate::{
-    branch_input::{append_own, append_own_dispatched, opens_with_identity_input},
+    branch_input::{append_own, append_own_dispatched},
     context_block,
 };
 use dim_agent_runtime::{
-    BranchLifecycle, BranchPhase, Dispatcher, Names, PartRegistry, PartScope, SessionIdentity,
-    Timeline,
+    BranchLifecycle, BranchPhase, Dispatcher, Names, OpeningKind, PartRegistry, PartScope,
+    SessionIdentity, Timeline,
 };
 use dim_agent_types::*;
 use rutis::host::{BoxFuture, CtxHost, DynPlugin, Effect, Key, TypeKey};
@@ -267,29 +267,13 @@ impl DynPlugin for ClientsBranchPlugin {
                 let session = session.clone();
                 let lifecycle = lifecycle.clone();
                 let last = last.clone();
-                let registered = phase.register_opening(Arc::new(move || {
-                    let (clients, timeline, dispatcher) =
-                        (clients.clone(), timeline.clone(), dispatcher.clone());
-                    let (session, last) = (session.clone(), last.clone());
-                    let lifecycle = lifecycle.clone();
+                let registered = phase.admit_opening_with(Box::new(move |opening| {
                     Box::pin(async move {
-                        // A retired part's receipt stays registered while the
-                        // opening still collects receipts, so it checks its own
-                        // generation before reading and again before the
-                        // append.
-                        if lifecycle.is_cancelled() {
+                        // A child line's identity input is written after the
+                        // opening seals, so this receipt leaves the snapshot to
+                        // the published line instead of appending ahead of it.
+                        if opening == OpeningKind::Child {
                             return Ok(());
-                        }
-                        match opens_with_identity_input(&timeline).await {
-                            Ok(true) => return Ok(()),
-                            Ok(false) => {}
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    "the line's opening was not read; the published line appends the client presence"
-                                );
-                                return Ok(());
-                            }
                         }
                         let current = snapshot(
                             &clients
@@ -298,6 +282,9 @@ impl DynPlugin for ClientsBranchPlugin {
                                 })
                                 .presences,
                         );
+                        // A retired part's receipt stays registered while the
+                        // opening still collects receipts, so it checks its own
+                        // generation right before the append.
                         if lifecycle.is_cancelled() {
                             return Ok(());
                         }
@@ -309,7 +296,7 @@ impl DynPlugin for ClientsBranchPlugin {
                                 tracing::warn!(%error, "client presence was not appended");
                             }
                         }
-                        Ok::<(), Error>(())
+                        Ok(())
                     })
                 }));
                 if let Err(error) = registered {
