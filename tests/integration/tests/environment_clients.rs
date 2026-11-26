@@ -21,12 +21,14 @@ use dim_agent_runtime::{
     TimelineStore, TimelineStoreBinding, TimelineTrace,
 };
 use dim_agent_runtime::{BranchOptions, testing::branch_events};
+use dim_agent_runtime::{QueryFilter, QueryOperand};
 use dim_agent_types::{BranchSource, EventKind, InputBlock};
 use local_support::*;
 use rutis::Ctx;
 use rutis::host::{BoxFuture, DynPlugin, Effect, Key, TypeKey};
 use rutis::host::{CtxHost, FiberState, InstanceId};
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -523,11 +525,13 @@ impl DynPlugin for OpeningPartsPlugin {
 }
 
 /// The default profile plus the two environment branches the opening collects,
-/// with `store` as the Session's storage: the flow supplies a store of its own
-/// and leaves the shared fixture's alone.
-async fn env_with_snapshot_hold(
+/// with `store` as the Session's storage and `budget` as the opening budget
+/// (`None` keeps the default): the flow supplies a store of its own and leaves
+/// the shared fixture's alone.
+async fn env_with_store(
     dirs: &Dirs,
-    store: Arc<SnapshotHoldStore>,
+    store: Arc<dyn TimelineStore>,
+    budget: Option<Duration>,
     presence: SessionPresences,
     execution: Arc<ExecutionSettingsHost>,
 ) -> MinimalHost {
@@ -538,6 +542,9 @@ async fn env_with_snapshot_hold(
     builder
         .timeline_store(TimelineStoreBinding::new(store))
         .plugin(|names| Ok(Box::new(OpeningPartsPlugin::new(names)?)));
+    if let Some(budget) = budget {
+        builder.startup_timeout(budget);
+    }
     builder
         .require_part(BRANCH_PART)
         .require_part(SETTINGS_BRANCH_PART)
@@ -552,14 +559,14 @@ async fn env_with_snapshot_hold(
     .unwrap()
 }
 
-/// An opening receipt decides from its branch's opening fact at the published
-/// head: a later batch that the line committed and has not published yet does
-/// not fail the read, so both environment receipts append their snapshot while
-/// the opening still collects them. Otherwise the receipt that reads after the
-/// other part's append leaves its snapshot to the first pass after activation.
-/// The flow runs on a current-thread runtime, so the release below runs only
-/// once the Session's build task yielded, i.e. after both receipts read; on a
-/// multi-threaded runtime it could overtake the second read.
+/// Both environment receipts append their snapshot while the opening still
+/// collects them: the store holds every snapshot at publication, so a batch the
+/// line committed and has not published yet does not keep the second receipt
+/// out of the opening. Otherwise the receipt that appends after the other
+/// part's snapshot leaves its own to the first pass after activation. The flow
+/// runs on a current-thread runtime, so the release below runs only once the
+/// Session's build task yielded, i.e. after both receipts appended; on a
+/// multi-threaded runtime it could overtake the second append.
 #[tokio::test]
 async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
     let dirs = Dirs::new();
@@ -572,8 +579,14 @@ async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
     let execution = ExecutionSettingsHost::new(Arc::new(|_| {
         Box::pin(async { Ok(ExecutionSettings::default()) })
     }));
-    let host =
-        env_with_snapshot_hold(&dirs, store.clone(), presence.host(), Arc::new(execution)).await;
+    let host = env_with_store(
+        &dirs,
+        store.clone(),
+        None,
+        presence.host(),
+        Arc::new(execution),
+    )
+    .await;
     let opener = host.agent().clone();
     let creation = opener.create_session(SessionConfig {
         cwd: cwd.to_string_lossy().into_owned(),
@@ -621,6 +634,221 @@ async fn a_line_opens_with_both_snapshots_while_a_later_batch_is_unpublished() {
                 .collect::<Vec<_>>()
         );
     }
+
+    host.close().await.unwrap();
+}
+
+/// The Session's store, which can hold the query for a line's opening fact: the
+/// read a receipt used to make to learn whether its line opens with an identity
+/// input. `reads` counts every such query whether or not it is held, so a flow
+/// pins that the receipts decide without one.
+struct OpeningFactHoldStore {
+    memory: MemoryTimelineStore,
+    /// Set once the flow wants a line's opening-fact read held.
+    armed: AtomicBool,
+    reads: AtomicUsize,
+}
+impl Default for OpeningFactHoldStore {
+    fn default() -> Self {
+        Self {
+            memory: MemoryTimelineStore::default(),
+            armed: AtomicBool::new(false),
+            reads: AtomicUsize::new(0),
+        }
+    }
+}
+impl OpeningFactHoldStore {
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+    fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+}
+
+/// Whether the query asks a line's Timeline for its opening fact: the last
+/// `branch/start` or `branch/resume` it has.
+fn opening_fact_query(query: &QuerySpec) -> bool {
+    matches!(
+        &query.filter,
+        Some(QueryFilter::In { value: QueryOperand::Field { path }, values })
+            if path == "kind" && values.as_slice() == ["branch/start", "branch/resume"]
+    )
+}
+
+impl TimelineStore for OpeningFactHoldStore {
+    fn query<'a>(
+        &'a self,
+        scope: &'a TimelineReadScope,
+        query: &'a QuerySpec,
+        page: Option<&'a QueryPage>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<QueryResult>> {
+        if !opening_fact_query(query) {
+            return self.memory.query(scope, query, page);
+        }
+        self.reads.fetch_add(1, Ordering::SeqCst);
+        if !self.armed.load(Ordering::SeqCst) {
+            return self.memory.query(scope, query, page);
+        }
+        // A held read never answers: only the opening's own budget ends it.
+        Box::pin(std::future::pending())
+    }
+
+    fn create_session<'a>(
+        &'a self,
+        id: &'a str,
+        config: &'a SessionConfig,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.create_session(id, config)
+    }
+    fn rollback_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.rollback_session(id)
+    }
+    fn release_session<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.release_session(id)
+    }
+    fn session_config<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<Option<SessionConfig>>> {
+        self.memory.session_config(id)
+    }
+    fn branches<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<Vec<StoredBranch>>> {
+        self.memory.branches(id)
+    }
+    fn head<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<u64>> {
+        self.memory.head(key)
+    }
+    fn batch_end<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<()>> {
+        self.memory.batch_end(key, sequence)
+    }
+    fn append(
+        &self,
+        key: TimelineKey,
+        events: Vec<StoredEvent>,
+        publish: PublishCallback,
+    ) -> dim_agent_runtime::Result<()> {
+        self.memory.append(key, events, publish)
+    }
+    fn read_segments<'a>(
+        &'a self,
+        id: &'a str,
+        segments: Vec<(String, std::ops::RangeInclusive<u64>)>,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<Vec<Vec<StoredEvent>>>> {
+        self.memory.read_segments(id, segments)
+    }
+    fn trace<'a>(
+        &'a self,
+        key: &'a TimelineKey,
+        sequence: u64,
+    ) -> dim_agent_runtime::BoxFuture<'a, dim_agent_runtime::Result<Option<TimelineTrace>>> {
+        self.memory.trace(key, sequence)
+    }
+}
+
+/// The `branch`'s `<dim-state>` snapshots of `source`, oldest first.
+async fn state_snapshots(session: &Session, branch: &str, source: &str) -> Vec<u64> {
+    let marker = format!("<dim-state source=\"{source}\">");
+    branch_events(session, branch, ..)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            matches!(&event.kind, EventKind::InputMessage(data)
+                if data.user.is_none()
+                    && data.blocks.first().is_some_and(|block| matches!(block,
+                        InputBlock::Raw { text, .. } if text.starts_with(&marker))))
+        })
+        .map(|event| event.sequence)
+        .collect()
+}
+
+/// A receipt decides from the opening kind its line's owner wrote, so a stalled
+/// read of the line's Timeline cannot hold the opening: under a short budget a
+/// held opening-fact read still lets a child line open, the root line keeps both
+/// of its opening snapshots, and the child's identity input stays first.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_held_opening_fact_read_does_not_hold_a_line_open() {
+    let dirs = Dirs::new();
+    let cwd = dirs.dir("work");
+    let presence = Arc::new(Presence(Mutex::new(vec![connection(
+        ClientChannel::Tui,
+        Some("eric@laptop"),
+    )])));
+    let store = Arc::new(OpeningFactHoldStore::default());
+    let execution = ExecutionSettingsHost::new(Arc::new(|_| {
+        Box::pin(async { Ok(ExecutionSettings::default()) })
+    }));
+    let host = env_with_store(
+        &dirs,
+        store.clone(),
+        Some(Duration::from_millis(500)),
+        presence.host(),
+        Arc::new(execution),
+    )
+    .await;
+    let session = host
+        .agent()
+        .clone()
+        .create_session(SessionConfig {
+            cwd: cwd.to_string_lossy().into_owned(),
+            ..SessionConfig::default()
+        })
+        .await
+        .expect("the Session opens inside its shorter opening budget");
+    for (source, label) in [
+        (CLIENTS, "the client presence snapshot"),
+        (SNAPSHOT_SOURCE, "the execution settings snapshot"),
+    ] {
+        assert_eq!(
+            state_snapshots(&session, "main", source).await.len(),
+            1,
+            "{label} is in the root line's opening"
+        );
+    }
+
+    store.arm();
+    let at = session.sequence("main").unwrap();
+    let opened = session
+        .branch(
+            "main".into(),
+            at,
+            BranchOptions {
+                prompt: "line work".into(),
+                source: BranchSource::Host {
+                    operation_id: "held-opening-fact".into(),
+                },
+            },
+        )
+        .await;
+    assert!(
+        opened.is_ok(),
+        "the line opens inside a short budget while only its opening-fact read is held: {opened:?}"
+    );
+    let child = opened.unwrap();
+
+    one_presence_snapshot_after_the_identity_input(&session, &child).await;
+    assert_eq!(
+        store.reads(),
+        0,
+        "the opening receipts decide from the owner's kind without reading a line's Timeline"
+    );
 
     host.close().await.unwrap();
 }
