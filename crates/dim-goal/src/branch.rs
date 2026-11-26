@@ -1544,6 +1544,14 @@ impl Owner {
             if let Err(Err(error)) = reply.send(result) {
                 tracing::warn!(%error, "Goal terminal state could not be saved");
                 let _ = owner.write_status.send_replace(Err(error));
+                #[cfg(feature = "testing")]
+                crate::testing::stage_held(
+                    &owner.session_id,
+                    &owner.branch_id,
+                    crate::testing::Stage::Published,
+                    after,
+                )
+                .await;
             }
         });
         result
